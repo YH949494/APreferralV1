@@ -379,25 +379,39 @@
     });
   }
 
+  function activePath(campaignRef) {
+    var path = "/api/campaign-registration/active";
+    return campaignRef ? path + "?campaign_ref=" + encodeURIComponent(campaignRef) : path;
+  }
+
   function mount() {
     var root = document.getElementById(ROOT_ID);
     if (!root) return;
 
     waitForInitData(function () {
-      apiGet("/api/campaign-registration/active").then(function (res) {
-        var view = res.data || {};
-        if (!res.ok || view.status !== "ok" || !view.campaign || view.registered) return;
-        if (registeredCampaignIds[view.campaign.campaign_id]) return;
+      // Resolve the deep-link campaign reference FIRST: when a Campaign
+      // Registration link names a specific campaign, the server must
+      // resolve THAT campaign, not just whichever one happens to be
+      // highest-priority globally (two registration campaigns can be open
+      // at once). campaign_ref is a navigation hint only — the server still
+      // requires the named campaign to itself be open for registration.
+      waitForCampaignRef(function (deepLinkCampaignId) {
+        apiGet(activePath(deepLinkCampaignId)).then(function (res) {
+          var view = res.data || {};
+          if (!res.ok || view.status !== "ok" || !view.campaign || view.registered) return;
+          if (registeredCampaignIds[view.campaign.campaign_id]) return;
+          // Registration modal OFF: never render the modal or the banner
+          // for this campaign, whatever should_prompt says.
+          if (view.campaign.modal_enabled === false) return;
 
-        waitForCampaignRef(function (deepLinkCampaignId) {
           var forceOpen = deepLinkCampaignId && deepLinkCampaignId === view.campaign.campaign_id;
 
           if (view.should_prompt || forceOpen) {
             openModal(view, function () {
               dismiss(view);
-              apiGet("/api/campaign-registration/active").then(function (r2) {
+              apiGet(activePath(view.campaign.campaign_id)).then(function (r2) {
                 var v2 = r2.data || {};
-                if (r2.ok && v2.status === "ok" && v2.campaign && !v2.registered) {
+                if (r2.ok && v2.status === "ok" && v2.campaign && !v2.registered && v2.campaign.modal_enabled !== false) {
                   showBannerThenModal(root, v2);
                 }
               });

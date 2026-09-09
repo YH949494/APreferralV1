@@ -387,3 +387,155 @@ def test_campaign_centre_create_accepts_registration_block(fake_db):
         doc = fake_db["gc_campaigns"].find_one({"campaign_id": "reg-via-cc"})
         assert doc["registration"]["enabled"] is True
         assert doc["registration"]["reminder_hours"] == 12
+
+
+# ---------------------------------------------------------------------------
+# Codex review fixes
+# ---------------------------------------------------------------------------
+
+def test_registration_only_campaign_can_publish_without_destination(fake_db):
+    """A campaign created purely for Campaign Registration (destination.ready
+    defaulted to false by the Admin Dashboard create form) must still be
+    publishable — registration has no external destination to be ready."""
+    app = Flask(__name__)
+    app.register_blueprint(cc.campaign_centre_bp)
+    with app.test_client() as client, _admin_ok():
+        r = client.post("/api/admin/gc-campaigns", json={
+            "campaign_id": "reg-only",
+            "name": "Registration Only",
+            "type": "external_website",
+            "schedule": {"starts_at": datetime.now(timezone.utc).isoformat()},
+            "destination": {"provider_id": "", "path": "", "open_mode": "telegram_web_app", "ready": False},
+            "registration": {"enabled": True},
+        })
+        assert r.status_code == 201
+        pub = client.post("/api/admin/gc-campaigns/reg-only/publish")
+        assert pub.get_json()["status"] == "ok"
+        assert pub.get_json()["campaign_status"] == "live"
+
+
+def test_publish_still_requires_destination_when_registration_disabled(fake_db):
+    app = Flask(__name__)
+    app.register_blueprint(cc.campaign_centre_bp)
+    with app.test_client() as client, _admin_ok():
+        client.post("/api/admin/gc-campaigns", json={
+            "campaign_id": "no-reg",
+            "name": "No Registration",
+            "type": "external_website",
+            "schedule": {"starts_at": datetime.now(timezone.utc).isoformat()},
+            "destination": {"provider_id": "", "path": "", "open_mode": "telegram_web_app", "ready": False},
+        })
+        pub = client.post("/api/admin/gc-campaigns/no-reg/publish")
+        assert pub.get_json()["code"] == "destination_not_ready"
+
+
+def test_deep_link_resolves_the_requested_campaign_not_global_priority(fake_db):
+    """Two registration campaigns concurrently open; a deep link to the
+    lower-priority one must return THAT campaign, not the higher-priority
+    one /active would pick by default."""
+    _insert_campaign(fake_db, campaign_id="high-priority", priority=200)
+    _insert_campaign(fake_db, campaign_id="low-priority", priority=50)
+    with _app().test_client() as client, _verified(UID):
+        default = client.get("/api/campaign-registration/active?init_data=x").get_json()
+        assert default["campaign"]["campaign_id"] == "high-priority"
+
+        via_ref = client.get(
+            "/api/campaign-registration/active?init_data=x&campaign_ref=low-priority"
+        ).get_json()
+        assert via_ref["campaign"]["campaign_id"] == "low-priority"
+
+
+def test_deep_link_ref_falls_back_when_campaign_not_open(fake_db):
+    _insert_campaign(fake_db, campaign_id="the-only-one")
+    with _app().test_client() as client, _verified(UID):
+        data = client.get(
+            "/api/campaign-registration/active?init_data=x&campaign_ref=does-not-exist"
+        ).get_json()
+        assert data["campaign"]["campaign_id"] == "the-only-one"
+
+
+def test_modal_disabled_never_should_prompt(fake_db):
+    _insert_campaign(fake_db, registration={**cr.default_registration_config(), "enabled": True, "modal_enabled": False})
+    with _app().test_client() as client, _verified(UID):
+        data = client.get("/api/campaign-registration/active?init_data=x").get_json()
+        assert data["should_prompt"] is False
+        assert data["campaign"]["modal_enabled"] is False
+
+
+def test_modal_enabled_true_by_default_in_public_payload(fake_db):
+    _insert_campaign(fake_db)
+    with _app().test_client() as client, _verified(UID):
+        data = client.get("/api/campaign-registration/active?init_data=x").get_json()
+        assert data["campaign"]["modal_enabled"] is True
+
+
+def test_selected_audience_requires_country_region_in_required_fields():
+    cfg, err = cr.validate_registration_config({
+        "audience": {"scope": "selected", "regions": ["Malaysia"]},
+        "required_fields": ["full_name", "contact_number", "delivery_address"],
+    })
+    assert cfg is None
+    assert err == "country_region_required_for_selected_audience"
+
+
+def test_shipping_eligible_recorded_but_never_blocks_registration(fake_db):
+    _insert_campaign(fake_db, registration={
+        **cr.default_registration_config(),
+        "enabled": True,
+        "shipping": {"scope": "selected", "regions": ["Malaysia"]},
+    })
+    with _app().test_client() as client, _verified(UID):
+        r = client.post(f"/api/campaign-registration/{CAMPAIGN_ID}/register?init_data=x",
+                         json=_valid_payload(country_region="Thailand"))
+        assert r.status_code == 201  # never blocked
+        assert r.get_json()["registration"]["shipping_eligible"] is False
+
+        stored = fake_db[cr.REGISTRATIONS_COLLECTION].find_one({"campaign_id": CAMPAIGN_ID})
+        assert stored["shipping_eligible"] is False
+
+
+def test_shipping_eligible_true_when_region_matches(fake_db):
+    _insert_campaign(fake_db, registration={
+        **cr.default_registration_config(),
+        "enabled": True,
+        "shipping": {"scope": "selected", "regions": ["Malaysia"]},
+    })
+    with _app().test_client() as client, _verified(UID):
+        r = client.post(f"/api/campaign-registration/{CAMPAIGN_ID}/register?init_data=x",
+                         json=_valid_payload(country_region="Malaysia"))
+        assert r.get_json()["registration"]["shipping_eligible"] is True
+
+
+def test_csv_export_neutralizes_formula_prefixes():
+    row = {
+        "campaign_id": CAMPAIGN_ID, "telegram_user_id": UID, "telegram_username": "=cmd|'/c calc'!A1",
+        "full_name": "+1+1", "contact_number": "-1", "country_region": "@SUM(1+1)",
+        "delivery_address": "normal address", "channel_verified": True, "base_entries": 1,
+        "shipping_eligible": True, "status": "registered", "registered_at": "2026-01-01T00:00:00+00:00",
+    }
+    safe = cr._csv_row(row)
+    assert safe["telegram_username"].startswith("'=")
+    assert safe["full_name"].startswith("'+")
+    assert safe["contact_number"].startswith("'-")
+    assert safe["country_region"].startswith("'@")
+    assert safe["delivery_address"] == "normal address"
+    assert safe["telegram_user_id"] == UID  # non-text fields untouched
+
+
+def test_csv_export_response_neutralizes_formula_prefixes(fake_db):
+    fake_db[cr.REGISTRATIONS_COLLECTION].insert_one({
+        "campaign_id": CAMPAIGN_ID, "telegram_user_id": UID, "telegram_username": "playerone",
+        "full_name": "=HYPERLINK(\"http://evil\")", "contact_number": "+65 8123 4567",
+        "country_region": "Singapore", "delivery_address": "10 Orchard Rd", "channel_verified": True,
+        "base_entries": 1, "status": "registered", "registered_at": datetime.now(timezone.utc),
+    })
+    with _app().test_client() as client, _admin_ok():
+        body = client.get("/api/admin/campaign-registrations/export").get_data(as_text=True)
+        assert "'=HYPERLINK" in body
+        assert "\n=HYPERLINK" not in body and body.count("=HYPERLINK") == 1
+
+
+def test_deep_links_bot_username_requires_admin(fake_db):
+    with _app().test_client() as client, _admin_denied():
+        r = client.get("/api/admin/deep-links/bot-username")
+        assert r.status_code == 401

@@ -183,6 +183,13 @@ def validate_registration_config(raw: dict | None, *, partial: bool = False) -> 
         return None, err
     cfg["shipping"] = shipping
 
+    # A "selected" audience is enforced against the submitted country_region
+    # (see register_for_campaign), so that field must actually be collected —
+    # otherwise every submission compares an empty string against the
+    # allow-list and registration becomes impossible for everyone.
+    if cfg["audience"]["scope"] == "selected" and "country_region" not in cfg["required_fields"]:
+        return None, "country_region_required_for_selected_audience"
+
     return cfg, None
 
 
@@ -287,6 +294,7 @@ def _serialize_registration(doc: dict) -> dict:
         "delivery_address": doc.get("delivery_address"),
         "channel_verified": bool(doc.get("channel_verified")),
         "base_entries": doc.get("base_entries", DEFAULT_BASE_ENTRIES),
+        "shipping_eligible": bool(doc.get("shipping_eligible", True)),
         "status": doc.get("status"),
         "registered_at": doc["registered_at"].isoformat() if doc.get("registered_at") else None,
     }
@@ -303,6 +311,11 @@ def _public_campaign_fields(campaign: dict) -> dict:
         "base_entries": reg.get("base_entries", DEFAULT_BASE_ENTRIES),
         "require_channel_subscription": bool(reg.get("require_channel_subscription")),
         "channel_username": (campaign.get("telegram") or {}).get("channel_username", ""),
+        # The client must be able to honor an admin's "Registration modal
+        # OFF" toggle — without this the modal/banner would render
+        # regardless of the stored setting (there is no other public field
+        # that carries it).
+        "modal_enabled": reg.get("modal_enabled", True) is not False,
     }
 
 
@@ -318,17 +331,37 @@ def active_campaign_registration():
     if err:
         return err
 
-    resp = jsonify(_active_registration_payload(uid))
+    campaign_ref = (request.args.get("campaign_ref") or "").strip()
+    resp = jsonify(_active_registration_payload(uid, campaign_ref=campaign_ref or None))
     resp.headers["Cache-Control"] = "no-store"
     return resp
 
 
-def _active_registration_payload(uid: int) -> dict:
-    campaign = find_active_registration_campaign()
+def _resolve_campaign_for_active(campaign_ref: str | None) -> dict | None:
+    """When the caller names a specific campaign (a Campaign Registration
+    deep link — see campaign_start_param), resolve THAT campaign rather than
+    always falling back to the single highest-priority open campaign. With
+    two registration campaigns concurrently open, a deep link to the
+    lower-priority one must not silently open the other one (an
+    authenticated user can only ever resolve a campaign that is itself
+    currently open for registration — this is a navigation hint, not a
+    privilege escalation)."""
+    if campaign_ref and _TELEGRAM_START_PARAM_SAFE.match(campaign_ref):
+        from campaign_centre import get_campaign
+
+        campaign = get_campaign(campaign_ref)
+        if campaign and registration_is_open(campaign):
+            return campaign
+    return find_active_registration_campaign()
+
+
+def _active_registration_payload(uid: int, *, campaign_ref: str | None = None) -> dict:
+    campaign = _resolve_campaign_for_active(campaign_ref)
     if not campaign:
         return {"status": "ok", "campaign": None, "registered": False, "should_prompt": False}
 
     campaign_id = campaign["campaign_id"]
+    modal_enabled = (campaign.get("registration") or {}).get("modal_enabled", True) is not False
     registration = get_registration(campaign_id, uid)
     if registration:
         return {
@@ -344,7 +377,7 @@ def _active_registration_payload(uid: int) -> dict:
     now = datetime.now(timezone.utc)
     next_prompt_at = as_aware_utc(state.get("next_prompt_at")) if state else None
     dismissed_until = next_prompt_at.isoformat() if next_prompt_at and next_prompt_at > now else None
-    should_prompt = not dismissed_until
+    should_prompt = modal_enabled and not dismissed_until
 
     payload = {
         "status": "ok",
@@ -395,6 +428,16 @@ def register_for_campaign(campaign_id: str):
         if fields["country_region"].strip().lower() not in allowed:
             return jsonify({"status": "error", "code": "region_not_eligible"}), 403
 
+    # Physical prize shipping eligibility is configured separately from
+    # registration audience and, per spec, must never block registration —
+    # it is recorded on the row so admin fulfilment can see it, not enforced
+    # here.
+    shipping = reg_cfg.get("shipping") or {"scope": "all", "regions": []}
+    shipping_eligible = True
+    if shipping.get("scope") == "selected":
+        allowed_shipping = {r.strip().lower() for r in shipping.get("regions") or []}
+        shipping_eligible = fields["country_region"].strip().lower() in allowed_shipping
+
     channel_verified = False
     if reg_cfg.get("require_channel_subscription"):
         ok, sub_err = _subscription_check(campaign, uid)
@@ -420,6 +463,7 @@ def register_for_campaign(campaign_id: str):
         **fields,
         "channel_verified": channel_verified,
         "base_entries": reg_cfg.get("base_entries", DEFAULT_BASE_ENTRIES),
+        "shipping_eligible": shipping_eligible,
         "status": "registered",
         "registered_at": now,
         "updated_at": now,
@@ -537,13 +581,17 @@ def parse_campaign_start_param(raw: str | None) -> str | None:
     return campaign_id
 
 
-def campaign_deep_link(campaign_id: str) -> str | None:
+def bot_username() -> str:
     import os
 
-    bot_username = (os.environ.get("BOT_USERNAME") or "").strip().lstrip("@")
-    if not bot_username or not campaign_id_is_link_safe(campaign_id):
+    return (os.environ.get("BOT_USERNAME") or "").strip().lstrip("@")
+
+
+def campaign_deep_link(campaign_id: str) -> str | None:
+    username = bot_username()
+    if not username or not campaign_id_is_link_safe(campaign_id):
         return None
-    return f"https://t.me/{bot_username}?startapp={campaign_start_param(campaign_id)}"
+    return f"https://t.me/{username}?startapp={campaign_start_param(campaign_id)}"
 
 
 # ---------------------------------------------------------------------------
@@ -560,6 +608,28 @@ _CSV_FIELDS = [
     "campaign_id", "telegram_user_id", "telegram_username", "full_name", "contact_number",
     "country_region", "delivery_address", "channel_verified", "base_entries", "registered_at", "status",
 ]
+
+# Fields that hold free text a registrant controls — these, and only these,
+# get CSV-formula-injection neutralization on export (telegram_user_id/
+# base_entries are server-derived ints; campaign_id/status/registered_at are
+# never user input).
+_CSV_TEXT_FIELDS = {"telegram_username", "full_name", "contact_number", "country_region", "delivery_address"}
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@")
+
+
+def _csv_safe(value: str) -> str:
+    """Prefixes a leading =, +, -, or @ with a single quote so spreadsheet
+    software (Excel/Sheets/LibreOffice) renders attacker-controlled
+    registration text as a literal string instead of evaluating it as a
+    formula when the export is opened."""
+    text = str(value or "")
+    if text.startswith(_CSV_FORMULA_PREFIXES):
+        return "'" + text
+    return text
+
+
+def _csv_row(row: dict) -> dict:
+    return {k: (_csv_safe(v) if k in _CSV_TEXT_FIELDS else v) for k, v in row.items()}
 
 
 def _admin_query() -> dict:
@@ -582,6 +652,18 @@ def _admin_query() -> dict:
         if search.isdigit():
             query["$or"].append({"telegram_user_id": int(search)})
     return query
+
+
+@campaign_registration_admin_bp.get("/api/admin/deep-links/bot-username")
+def deep_links_bot_username():
+    """Backs the Deep Links registry tab so it never hardcodes a
+    production-specific bot handle — every link it renders is built from
+    this same BOT_USERNAME env var that campaign_deep_link/mission_deep_link
+    already use server-side."""
+    _, err = _require_admin()
+    if err:
+        return err
+    return jsonify({"status": "ok", "bot_username": bot_username()})
 
 
 @campaign_registration_admin_bp.get("/api/admin/campaign-registrations")
@@ -654,7 +736,7 @@ def export_campaign_registrations():
     writer = csv.DictWriter(out, fieldnames=_CSV_FIELDS, extrasaction="ignore")
     writer.writeheader()
     for d in docs:
-        row = _serialize_registration(d)
+        row = _csv_row(_serialize_registration(d))
         writer.writerow(row)
 
     filename = f"campaign_registrations_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.csv"

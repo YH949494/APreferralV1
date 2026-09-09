@@ -5159,26 +5159,57 @@
       "</div>";
   }
 
+  var _botUsernamePromise = null;
+  function getBotUsername() {
+    // Cached for the page session — the deep link registry must never fall
+    // back to a hardcoded/production-specific bot handle, so every link
+    // here is built from this same server-configured BOT_USERNAME the
+    // backend's campaign_deep_link/mission_deep_link helpers use.
+    if (!_botUsernamePromise) {
+      _botUsernamePromise = api("/api/admin/deep-links/bot-username").then(function (r) {
+        return r.bot_username || "";
+      }).catch(function () { return ""; });
+    }
+    return _botUsernamePromise;
+  }
+
   function loadDeepLinks(force) {
-    var botUsername = (window.APP_BOT_USERNAME || "APreferralV1_bot");
-    $("#dl-general-body").innerHTML = dlRow("Mini App Home", "-", "https://t.me/" + botUsername + "?startapp=home");
-    $("#dl-invite-body").innerHTML = dlRow("Invite / Affiliate (quest_invite)", "-", "https://t.me/" + botUsername + "?startapp=quest_invite");
+    $("#dl-general-body").innerHTML = emptyState("Loading…");
+    $("#dl-invite-body").innerHTML = emptyState("Loading…");
+    $("#dl-campaigns-body").innerHTML = emptyState("Loading…");
+    $("#dl-missions-body").innerHTML = emptyState("Loading…");
 
-    api("/api/admin/gc-campaigns").then(function (data) {
-      var items = data.campaigns || [];
-      if (!items.length) { $("#dl-campaigns-body").innerHTML = emptyState("No campaigns yet."); return; }
-      $("#dl-campaigns-body").innerHTML = items.map(function (c) {
-        return dlRow(c.name || c.campaign_id, c.campaign_id, "https://t.me/" + botUsername + "?startapp=campaign_" + c.campaign_id);
-      }).join("");
-    }).catch(function (e) { statePanel("dl-campaigns-body", "error", "Failed to load campaigns: " + e.message); });
+    getBotUsername().then(function (botUsername) {
+      if (!botUsername) {
+        var msg = "BOT_USERNAME is not configured on the server — deep links can't be generated.";
+        $("#dl-general-body").innerHTML = emptyState(msg);
+        $("#dl-invite-body").innerHTML = emptyState(msg);
+        $("#dl-campaigns-body").innerHTML = emptyState(msg);
+        $("#dl-missions-body").innerHTML = emptyState(msg);
+        return;
+      }
 
-    api("/api/admin/gc-campaigns").then(function (data) {
-      var missions = (data.campaigns || []).filter(function (c) { return c.mechanic === "mission_pool"; });
-      if (!missions.length) { $("#dl-missions-body").innerHTML = emptyState("No missions yet."); return; }
-      $("#dl-missions-body").innerHTML = missions.map(function (c) {
-        return dlRow(c.name || c.campaign_id, c.campaign_id, "https://t.me/" + botUsername + "?startapp=mission_" + c.campaign_id);
-      }).join("");
-    }).catch(function (e) { statePanel("dl-missions-body", "error", "Failed to load missions: " + e.message); });
+      $("#dl-general-body").innerHTML = dlRow("Mini App Home", "-", "https://t.me/" + botUsername + "?startapp=home");
+      $("#dl-invite-body").innerHTML = dlRow("Invite / Affiliate (quest_invite)", "-", "https://t.me/" + botUsername + "?startapp=quest_invite");
+
+      api("/api/admin/gc-campaigns").then(function (data) {
+        var items = data.campaigns || [];
+        if (!items.length) { $("#dl-campaigns-body").innerHTML = emptyState("No campaigns yet."); return; }
+        $("#dl-campaigns-body").innerHTML = items.map(function (c) {
+          var link = c.registration_deep_link || ("https://t.me/" + botUsername + "?startapp=campaign_" + c.campaign_id);
+          return dlRow(c.name || c.campaign_id, c.campaign_id, link);
+        }).join("");
+
+        var missions = items.filter(function (c) { return c.mechanic === "mission_pool"; });
+        if (!missions.length) { $("#dl-missions-body").innerHTML = emptyState("No missions yet."); return; }
+        $("#dl-missions-body").innerHTML = missions.map(function (c) {
+          return dlRow(c.name || c.campaign_id, c.campaign_id, "https://t.me/" + botUsername + "?startapp=mission_" + c.campaign_id);
+        }).join("");
+      }).catch(function (e) {
+        statePanel("dl-campaigns-body", "error", "Failed to load campaigns: " + e.message);
+        statePanel("dl-missions-body", "error", "Failed to load missions: " + e.message);
+      });
+    });
   }
 
   function bindDeepLinks() {
