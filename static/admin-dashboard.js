@@ -4997,7 +4997,7 @@
   // reads/writes the same gc_campaigns.registration block via the existing
   // Campaign Centre update path — no second config storage mechanism) ----------
 
-  var crCfgState = { campaignId: null, loaded: false };
+  var crCfgState = { campaignId: null, loaded: false, campaignName: null, formReady: false };
 
   function crCfgReadForm() {
     var requiredFields = [];
@@ -5062,6 +5062,7 @@
 
   function crCfgOnCampaignSelected(campaignId) {
     crCfgState.campaignId = campaignId || null;
+    crCfgState.formReady = false; // form/name not yet bound to campaignId — block preview until the fetch below lands
     var form = $("#cr-cfg-form"), empty = $("#cr-cfg-empty");
     if (!campaignId) {
       if (form) form.classList.add("hidden");
@@ -5073,6 +5074,7 @@
       crCfgState.campaignName = (r.campaign || {}).name || campaignId;
       crCfgWriteForm((r.campaign || {}).registration);
       crCfgUpdateDeepLink(campaignId);
+      crCfgState.formReady = true;
       if (empty) empty.classList.add("hidden");
       if (form) form.classList.remove("hidden");
     }).catch(function (e) { toast("❌ " + e.message, "error"); });
@@ -5119,6 +5121,7 @@
     if (previewBtn) previewBtn.addEventListener("click", function () {
       var campaignId = crCfgState.campaignId;
       if (!campaignId) { toast("❌ Select a campaign first", "error"); return; }
+      if (!crCfgState.formReady) { toast("❌ Still loading campaign details — try again in a moment", "error"); return; }
       if (!window.CampaignRegistrationWidget || typeof window.CampaignRegistrationWidget.preview !== "function") {
         toast("❌ Preview widget unavailable", "error");
         return;

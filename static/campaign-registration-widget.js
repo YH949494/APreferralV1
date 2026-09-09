@@ -239,7 +239,7 @@
     opts = opts || {};
     var previewMode = !!opts.previewMode;
     modal.innerHTML = "";
-    var baseEntries = (view.campaign && view.campaign.base_entries) || 1;
+    var baseEntries = baseEntriesOf(view);
     var entryWord = baseEntries === 1 ? "y" : "ies";
     var bodyText = previewMode
       ? "You're entered into " + (view.campaign.name || "this campaign") + ".\n" + baseEntries + " base entr" + entryWord + " received."
@@ -280,6 +280,16 @@
     return set;
   }
 
+  function baseEntriesOf(view) {
+    var v = view.campaign && view.campaign.base_entries;
+    return (v !== undefined && v !== null) ? v : 1;
+  }
+
+  function submitLabelFor(view) {
+    var baseEntries = baseEntriesOf(view);
+    return "Register & Get " + baseEntries + " Entr" + (baseEntries === 1 ? "y" : "ies");
+  }
+
   function openModal(view, onDismiss, opts) {
     opts = opts || {};
     var previewMode = !!opts.previewMode;
@@ -297,9 +307,7 @@
     });
 
     var msg = el("div", { class: "cr-msg", style: "display:none;" });
-    var baseEntries = (view.campaign && view.campaign.base_entries) || 1;
-    var submitLabel = "Register & Get " + baseEntries + " Entr" + (baseEntries === 1 ? "y" : "ies");
-    var submitBtn = el("button", { class: "cr-btn-primary", type: "button", text: submitLabel });
+    var submitBtn = el("button", { class: "cr-btn-primary", type: "button", text: submitLabelFor(view) });
     var notNowBtn = el("button", { class: "cr-btn-secondary", type: "button", text: "Not now" });
 
     var modalChildren = [];
@@ -367,7 +375,7 @@
           msg.textContent = "We couldn't confirm your registration. Please try again.";
           msg.style.display = "block";
           submitBtn.disabled = false;
-          submitBtn.textContent = "Register & Get 1 Entry";
+          submitBtn.textContent = submitLabelFor(view);
           return;
         }
         var data = res.data || {};
@@ -385,7 +393,7 @@
         msg.textContent = errorText(code);
         msg.style.display = "block";
         submitBtn.disabled = false;
-        submitBtn.textContent = "Register & Get 1 Entry";
+        submitBtn.textContent = submitLabelFor(view);
       });
   }
 
