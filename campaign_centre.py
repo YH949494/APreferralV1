@@ -338,6 +338,19 @@ def _validate_body(body: dict, *, partial: bool = False) -> tuple[dict | None, s
                 return None, code
             updates["_mission_pool_validated"] = pool_block
 
+    # ---- Campaign Registration (optional, orthogonal to `type`) --------
+    # Any campaign can carry a registration config — it is not a campaign
+    # type of its own, so this applies regardless of `campaign_type`. See
+    # campaign_registration.py, which owns validation of this block the same
+    # way mission_pool owns `mission_config`/`mission_pool` above.
+    if "registration" in body:
+        import campaign_registration
+
+        registration, code = campaign_registration.validate_registration_config(body.get("registration"))
+        if code:
+            return None, code
+        updates["registration"] = registration
+
     if "reward_config" in body:
         raw_reward = body.get("reward_config") or {}
         rules = raw_reward.get("rules") or []
@@ -409,6 +422,8 @@ def list_campaigns():
     mission_ids = [d["campaign_id"] for d in docs if mission_pool.is_mission_pool(d)]
     active_reward_counts = mission_pool.active_reward_counts(mission_ids) if mission_ids else {}
 
+    import campaign_registration
+
     out = []
     for d in docs:
         item = _serialize(d)
@@ -416,6 +431,8 @@ def list_campaigns():
         item["effective_visibility"] = visibility_explanation(d, provider, now)
         if mission_pool.is_mission_pool(d):
             item["mission_active_rewards"] = active_reward_counts.get(d["campaign_id"], 0)
+        if (d.get("registration") or {}).get("enabled"):
+            item["registration_deep_link"] = campaign_registration.campaign_deep_link(d["campaign_id"])
         out.append(item)
     return jsonify({"status": "ok", "campaigns": out})
 
@@ -556,13 +573,22 @@ def _transition(campaign_id: str, admin: dict, new_status: str, action: str):
             if not (doc.get("mission_pool") or {}).get("pool_id"):
                 return jsonify({"status": "error", "code": "mission_pool_config_required"}), 400
         else:
-            provider = get_provider((doc.get("destination") or {}).get("provider_id") or "")
             if doc.get("type") in _REWARD_DRIVEN_TYPES and not (doc.get("reward_config") or {}).get("rules"):
                 return jsonify({"status": "error", "code": "reward_rules_required"}), 400
-            if not (doc.get("destination") or {}).get("ready"):
-                return jsonify({"status": "error", "code": "destination_not_ready"}), 400
-            if not provider_is_usable_for_results(provider):
-                return jsonify({"status": "error", "code": "provider_inactive"}), 400
+            # A campaign whose sole purpose is Campaign Registration (e.g. a
+            # standalone lucky-draw sign-up) has no external destination to
+            # be "ready" — campaign_registration.registration_is_open()
+            # never consults destination/provider either. Requiring one here
+            # would make such a campaign impossible to publish through the
+            # very Admin Dashboard flow that creates it with
+            # destination.ready defaulted to false.
+            registration_only = bool((doc.get("registration") or {}).get("enabled"))
+            if not registration_only:
+                provider = get_provider((doc.get("destination") or {}).get("provider_id") or "")
+                if not (doc.get("destination") or {}).get("ready"):
+                    return jsonify({"status": "error", "code": "destination_not_ready"}), 400
+                if not provider_is_usable_for_results(provider):
+                    return jsonify({"status": "error", "code": "provider_inactive"}), 400
     database.db["gc_campaigns"].update_one(
         {"campaign_id": campaign_id},
         {"$set": {"status": new_status, "updated_at": datetime.now(timezone.utc)}},
