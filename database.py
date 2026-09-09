@@ -511,19 +511,32 @@ def save_weekly_snapshot():
     )
 
     # ✅ Match main app's collection & fields
-    db["weekly_leaderboard_history"].insert_one({
-        "week_start": week_start,
-        "week_end": week_end,
-        "checkin_leaderboard": [
-            {"user_id": u["user_id"], "username": u.get("username"), "weekly_xp": u.get("weekly_xp", 0)}
-            for u in top_checkins
-        ],
-        "referral_leaderboard": [
-            {"user_id": u["user_id"], "username": u.get("username"), "weekly_referrals": u.get("weekly_referrals", 0)}
-            for u in top_referrals
-        ],
-        "archived_at": now
-    })
+    # Atomic upsert keyed by week_start (not insert_one): a retry, a misfire
+    # replay, or two racing processes must never create a second document for
+    # the same week_start now that uniq_weekly_history_week_start is unique.
+    try:
+        db["weekly_leaderboard_history"].update_one(
+            {"week_start": week_start},
+            {
+                "$setOnInsert": {
+                    "week_start": week_start,
+                    "week_end": week_end,
+                    "checkin_leaderboard": [
+                        {"user_id": u["user_id"], "username": u.get("username"), "weekly_xp": u.get("weekly_xp", 0)}
+                        for u in top_checkins
+                    ],
+                    "referral_leaderboard": [
+                        {"user_id": u["user_id"], "username": u.get("username"), "weekly_referrals": u.get("weekly_referrals", 0)}
+                        for u in top_referrals
+                    ],
+                    "archived_at": now,
+                }
+            },
+            upsert=True,
+        )
+    except DuplicateKeyError:
+        # Another instance won the race on the unique week_start index.
+        pass
 
     # ✅ Reset weekly counters for the new week
     users_collection.update_many({}, {
