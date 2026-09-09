@@ -133,9 +133,19 @@ underlying verification, just centralized in one module.
 Campaign Centre is a module inside the existing Admin Dashboard
 (`static/admin-dashboard.html` / `admin-dashboard.js`), listed in the
 sidebar as **Player Campaigns** (not "Campaign Centre" — that label was
-already taken by the pre-existing segment-audience module) with the six
-required tabs: Campaigns, Providers, Tournament Results, Rewards,
-Verification, Activity Log. It reuses the dashboard's existing nav/sidebar,
-admin session auth, layout primitives (`.data-table`, `.pill`, `.btn`,
-`emptyState()`, `statePanel()`), and view-switching machinery — there is no
-separate standalone admin page for this feature.
+already taken by the pre-existing segment-audience module) with tabs
+including Campaigns, Registrations, Deep Links, Mission Reward Pool,
+Providers, Tournament Results, Rewards, Verification, and Activity Log. It
+reuses the dashboard's existing nav/sidebar, admin session auth, layout
+primitives (`.data-table`, `.pill`, `.btn`, `emptyState()`, `statePanel()`),
+and view-switching machinery — there is no separate standalone admin page
+for this feature.
+
+Registration configuration (`gc_campaigns.registration`) is edited on the
+**Registrations** tab, not on the Campaigns tab's Create Campaign form: pick
+a campaign from the selector at the top of the Registration Configuration
+section, edit its settings, and Save — this reads/writes the same
+`PUT /api/admin/gc-campaigns/{campaign_id}` `registration` block used
+everywhere else. The Create Campaign form only sets campaign-level fields
+and always creates a `draft` with registration left unset (disabled by
+default) until configured there.
