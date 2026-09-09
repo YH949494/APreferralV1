@@ -77,6 +77,22 @@ _VALID_STATUS_TRANSITIONS = {
 # reachable by players.
 _DELETABLE_STATUSES = {"draft", "archived", "ended"}
 
+# Deleting a campaign deliberately keeps its historical registration/
+# mission-entry/reward/tournament-result rows for traceability (see
+# delete_campaign), all still keyed by campaign_id. If that same campaign_id
+# were allowed to be reused by a new campaign, the new campaign would
+# silently inherit that old history — e.g. campaign_registration.py's
+# get_registration()/register_for_campaign() and mission_pool.py's
+# already_submitted check both key purely on campaign_id, with no way to
+# tell "this row belongs to the campaign that used to have this id" from
+# "this row belongs to the current one". So a deleted campaign_id is
+# permanently reserved here and rejected by create/duplicate.
+_DELETED_IDS_COLLECTION = "gc_deleted_campaign_ids"
+
+
+def _campaign_id_was_deleted(campaign_id: str) -> bool:
+    return database.db[_DELETED_IDS_COLLECTION].find_one({"campaign_id": campaign_id}) is not None
+
 
 def _require_admin():
     from vouchers import require_admin
@@ -94,6 +110,9 @@ def _ensure_indexes() -> None:
         col.create_index([("schedule.ends_at", 1)], name="ix_gc_campaigns_ends_at")
         col.create_index([("priority", -1)], name="ix_gc_campaigns_priority")
         col.create_index([("destination.provider_id", 1)], name="ix_gc_campaigns_provider_id")
+        database.db[_DELETED_IDS_COLLECTION].create_index(
+            [("campaign_id", 1)], name="ux_gc_deleted_campaign_ids_campaign_id", unique=True
+        )
     except Exception:
         logger.warning("[CAMPAIGN_CENTRE] index creation failed", exc_info=True)
 
@@ -452,6 +471,8 @@ def create_campaign():
     campaign_id = (body.get("campaign_id") or "").strip()
     if not campaign_id:
         return jsonify({"status": "error", "code": "missing_campaign_id"}), 400
+    if _campaign_id_was_deleted(campaign_id):
+        return jsonify({"status": "error", "code": "campaign_id_previously_deleted"}), 409
 
     updates, code = _validate_body(body)
     if code:
@@ -595,10 +616,15 @@ def _transition(campaign_id: str, admin: dict, new_status: str, action: str):
                     return jsonify({"status": "error", "code": "destination_not_ready"}), 400
                 if not provider_is_usable_for_results(provider):
                     return jsonify({"status": "error", "code": "provider_inactive"}), 400
-    database.db["gc_campaigns"].update_one(
+    result = database.db["gc_campaigns"].update_one(
         {"campaign_id": campaign_id},
         {"$set": {"status": new_status, "updated_at": datetime.now(timezone.utc)}},
     )
+    if result.matched_count == 0:
+        # The campaign was permanently deleted between the read above and
+        # this write (see delete_campaign) — report not_found rather than a
+        # false "ok" for a status change that never actually landed.
+        return jsonify({"status": "error", "code": "not_found"}), 404
     _log_audit(action, admin, campaign_id, {"new_status": new_status})
     log_funnel_event(action, campaign_id=campaign_id, campaign_type=doc.get("type"), source="admin")
     return jsonify({"status": "ok", "campaign_status": new_status})
@@ -640,6 +666,8 @@ def duplicate_campaign(campaign_id: str):
     new_campaign_id = (body.get("campaign_id") or f"{campaign_id}-copy").strip()
     if get_campaign(new_campaign_id):
         return jsonify({"status": "error", "code": "duplicate_campaign_id"}), 409
+    if _campaign_id_was_deleted(new_campaign_id):
+        return jsonify({"status": "error", "code": "campaign_id_previously_deleted"}), 409
 
     new_doc = dict(doc)
     new_doc.pop("_id", None)
@@ -693,6 +721,11 @@ def delete_campaign(campaign_id: str):
     ``tournament_nonces``, ``campaign_provider_integration_status``,
     ``campaign_subscription_cache``) are untouched — they are keyed by
     provider/channel, not owned by any single campaign.
+
+    Because that history survives under the original campaign_id, the id
+    itself is permanently reserved afterwards (``_DELETED_IDS_COLLECTION``)
+    so create/duplicate can never recreate a campaign that would silently
+    inherit it (see ``_campaign_id_was_deleted``).
     """
     admin, err = _require_admin()
     if err:
@@ -712,6 +745,11 @@ def delete_campaign(campaign_id: str):
         }), 409
 
     database.db["campaign_registration_state"].delete_many({"campaign_id": campaign_id})
+    database.db[_DELETED_IDS_COLLECTION].update_one(
+        {"campaign_id": campaign_id},
+        {"$setOnInsert": {"campaign_id": campaign_id, "deleted_at": datetime.now(timezone.utc)}},
+        upsert=True,
+    )
 
     snapshot = _serialize(doc)
     _log_audit("campaign_deleted", admin, campaign_id, {

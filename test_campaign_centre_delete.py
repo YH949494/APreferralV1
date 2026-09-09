@@ -186,8 +186,78 @@ def test_audit_log_written_and_survives_deletion(fake_db, client):
 
 
 # ---------------------------------------------------------------------------
+# campaign_id reuse after deletion (preserved history must never be
+# silently inherited by a new campaign reusing the same id)
+# ---------------------------------------------------------------------------
+
+def test_create_campaign_rejects_a_previously_deleted_campaign_id(fake_db, client):
+    _seed_campaign(fake_db, status="archived")
+    with _mock_admin():
+        assert _delete(client).status_code == 200
+        resp = client.post("/api/admin/gc-campaigns", json={
+            "campaign_id": CAMPAIGN_ID, "name": "Reused id", "type": "external_website",
+            "schedule": {"starts_at": datetime.now(timezone.utc).isoformat()},
+        })
+    assert resp.status_code == 409
+    assert resp.get_json()["code"] == "campaign_id_previously_deleted"
+    assert fake_db["gc_campaigns"].find_one({"campaign_id": CAMPAIGN_ID}) is None
+
+
+def test_duplicate_campaign_rejects_a_previously_deleted_target_id(fake_db, client):
+    _seed_campaign(fake_db, campaign_id="source-campaign", status="draft")
+    _seed_campaign(fake_db, status="archived")  # CAMPAIGN_ID, will become the delete target
+    with _mock_admin():
+        assert _delete(client).status_code == 200
+        resp = client.post(
+            "/api/admin/gc-campaigns/source-campaign/duplicate",
+            json={"campaign_id": CAMPAIGN_ID},
+        )
+    assert resp.status_code == 409
+    assert resp.get_json()["code"] == "campaign_id_previously_deleted"
+
+
+def test_deleted_campaign_id_does_not_leak_into_a_fresh_campaign_with_the_same_id(fake_db, client):
+    """Regression guard for the underlying risk the reuse-block exists for:
+    even if the id were allowed to be reused, a stale registration row under
+    that campaign_id must never be reachable by a new campaign. This asserts
+    the reuse itself is blocked (the actual fix), rather than depending on
+    every downstream consumer's own campaign_id scoping being correct."""
+    _seed_campaign(fake_db, status="ended")
+    fake_db["campaign_registrations"].insert_one({"campaign_id": CAMPAIGN_ID, "telegram_user_id": 111})
+    with _mock_admin():
+        assert _delete(client).status_code == 200
+        resp = client.post("/api/admin/gc-campaigns", json={
+            "campaign_id": CAMPAIGN_ID, "name": "Reused id", "type": "external_website",
+            "schedule": {"starts_at": datetime.now(timezone.utc).isoformat()},
+        })
+    assert resp.status_code == 409
+    # the old registration is still there (preserved for traceability) but
+    # no new campaign document was ever allowed to claim its campaign_id
+    assert fake_db["campaign_registrations"].count_documents({"campaign_id": CAMPAIGN_ID}) == 1
+    assert fake_db["gc_campaigns"].find_one({"campaign_id": CAMPAIGN_ID}) is None
+
+
+# ---------------------------------------------------------------------------
 # Concurrency / atomicity
 # ---------------------------------------------------------------------------
+
+def test_publish_loses_race_with_delete_reports_not_found_not_false_success(fake_db, client):
+    """If publish/pause/archive has already read the campaign as eligible
+    but delete_campaign removes it before the status-transition's update_one
+    lands, that update must report the miss (not_found) instead of a false
+    'ok' for a status change that never landed on any document."""
+    _seed_campaign(fake_db, status="draft")
+    with _mock_admin():
+        # Simulate the race directly: the campaign is gone by the time the
+        # transition's update_one runs, exactly as if delete_campaign had
+        # interleaved between _transition's read and its write.
+        assert _delete(client).status_code == 200
+        resp = client.post(f"/api/admin/gc-campaigns/{CAMPAIGN_ID}/publish")
+    assert resp.status_code == 404
+    assert resp.get_json()["code"] == "not_found"
+    # no audit entry for a publish that never actually happened
+    assert fake_db["campaign_admin_audit_log"].find_one({"action": "campaign_published"}) is None
+
 
 def test_concurrent_publish_during_delete_cannot_both_succeed(fake_db, client):
     """The status check and the delete happen in one atomic
