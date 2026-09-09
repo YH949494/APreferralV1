@@ -163,6 +163,11 @@
       ".cr-success{text-align:center;padding:8px 0;}",
       ".cr-success-title{font-size:19px;font-weight:700;margin-bottom:10px;}",
       ".cr-success-body{font-size:14px;line-height:1.5;opacity:.9;margin-bottom:18px;}",
+      ".cr-modal{position:relative;}",
+      ".cr-preview-badge{display:inline-block;background:rgba(90,160,255,.18);border:1px solid rgba(90,160,255,.5);color:#8fc0ff;font-size:11px;font-weight:700;letter-spacing:.04em;border-radius:999px;padding:3px 10px;margin-bottom:10px;}",
+      ".cr-preview-note{font-size:12px;opacity:.75;margin-bottom:14px;line-height:1.4;}",
+      ".cr-preview-close{position:absolute;top:14px;right:16px;background:none;border:none;color:inherit;font-size:20px;line-height:1;cursor:pointer;opacity:.7;padding:0;}",
+      ".cr-preview-close:hover{opacity:1;}",
     ].join("\n");
     document.head.appendChild(style);
   }
@@ -230,18 +235,26 @@
     return { wrap: wrap, input: input, errorEl: errorEl };
   }
 
-  function showSuccess(modal, view) {
+  function showSuccess(modal, view, opts) {
+    opts = opts || {};
+    var previewMode = !!opts.previewMode;
     modal.innerHTML = "";
-    var baseEntries = (view.campaign && view.campaign.base_entries) || 1;
-    var body = el("div", { class: "cr-success" }, [
+    var baseEntries = baseEntriesOf(view);
+    var entryWord = baseEntries === 1 ? "y" : "ies";
+    var bodyText = previewMode
+      ? "You're entered into " + (view.campaign.name || "this campaign") + ".\n" + baseEntries + " base entr" + entryWord + " received."
+      : "You're entered into the Community Lucky Draw.\n" + baseEntries + " base entr" + entryWord + " received.";
+    var bodyChildren = [
       el("div", { class: "cr-success-title", text: "✅ Registration Complete" }),
-      el("div", {
-        class: "cr-success-body",
-        text: "You're entered into the Community Lucky Draw.\n" + baseEntries + " base entr" + (baseEntries === 1 ? "y" : "ies") + " received.",
-      }),
-    ]);
+      el("div", { class: "cr-success-body", text: bodyText }),
+    ];
+    if (previewMode) bodyChildren.push(el("div", { class: "cr-preview-note", text: "Preview only — nothing was saved." }));
+    var body = el("div", { class: "cr-success" }, bodyChildren);
     var doneBtn = el("button", { class: "cr-btn-primary", type: "button", text: "Done" });
-    doneBtn.addEventListener("click", function () { closeModal(); markRegisteredPermanently(view.campaign.campaign_id); });
+    doneBtn.addEventListener("click", function () {
+      closeModal();
+      if (!previewMode) markRegisteredPermanently(view.campaign.campaign_id);
+    });
     body.appendChild(doneBtn);
     modal.appendChild(body);
   }
@@ -267,7 +280,19 @@
     return set;
   }
 
-  function openModal(view, onDismiss) {
+  function baseEntriesOf(view) {
+    var v = view.campaign && view.campaign.base_entries;
+    return (v !== undefined && v !== null) ? v : 1;
+  }
+
+  function submitLabelFor(view) {
+    var baseEntries = baseEntriesOf(view);
+    return "Register & Get " + baseEntries + " Entr" + (baseEntries === 1 ? "y" : "ies");
+  }
+
+  function openModal(view, onDismiss, opts) {
+    opts = opts || {};
+    var previewMode = !!opts.previewMode;
     injectStyles();
     closeModal();
 
@@ -282,13 +307,23 @@
     });
 
     var msg = el("div", { class: "cr-msg", style: "display:none;" });
-    var submitBtn = el("button", { class: "cr-btn-primary", type: "button", text: "Register & Get 1 Entry" });
+    var submitBtn = el("button", { class: "cr-btn-primary", type: "button", text: submitLabelFor(view) });
     var notNowBtn = el("button", { class: "cr-btn-secondary", type: "button", text: "Not now" });
 
-    var modal = el("div", { class: "cr-modal" }, [
-      el("div", { class: "cr-title", text: "🎁 " + (view.campaign.name || "Community Lucky Draw") }),
-      el("div", { class: "cr-sub", text: "Register once to enter the Community Lucky Draw. It only takes a moment." }),
-    ]);
+    var modalChildren = [];
+    if (previewMode) modalChildren.push(el("div", { class: "cr-preview-badge", text: "PREVIEW MODE" }));
+    modalChildren.push(el("div", { class: "cr-title", text: "🎁 " + (view.campaign.name || "Community Lucky Draw") }));
+    modalChildren.push(el("div", {
+      class: "cr-sub",
+      text: previewMode ? "Register once to enter this campaign." : "Register once to enter the Community Lucky Draw. It only takes a moment.",
+    }));
+    if (previewMode) modalChildren.push(el("div", { class: "cr-preview-note", text: "Preview only — no registration data will be saved." }));
+    var modal = el("div", { class: "cr-modal" }, modalChildren);
+    if (previewMode) {
+      var closeBtn = el("button", { class: "cr-preview-close", type: "button", text: "×", "aria-label": "Close preview" });
+      closeBtn.addEventListener("click", function () { closeModal(); onDismiss(); });
+      modal.appendChild(closeBtn);
+    }
     rows.forEach(function (r) { modal.appendChild(r); });
     modal.appendChild(msg);
     var actions = el("div", { class: "cr-actions" }, [submitBtn, notNowBtn]);
@@ -322,6 +357,10 @@
         return;
       }
       msg.style.display = "none";
+      if (previewMode) {
+        showSuccess(modal, view, { previewMode: true });
+        return;
+      }
       submitBtn.disabled = true;
       submitBtn.textContent = "Registering…";
       doRegister(view, payload, modal, inputs, submitBtn, msg);
@@ -336,7 +375,7 @@
           msg.textContent = "We couldn't confirm your registration. Please try again.";
           msg.style.display = "block";
           submitBtn.disabled = false;
-          submitBtn.textContent = "Register & Get 1 Entry";
+          submitBtn.textContent = submitLabelFor(view);
           return;
         }
         var data = res.data || {};
@@ -354,7 +393,7 @@
         msg.textContent = errorText(code);
         msg.style.display = "block";
         submitBtn.disabled = false;
-        submitBtn.textContent = "Register & Get 1 Entry";
+        submitBtn.textContent = submitLabelFor(view);
       });
   }
 
@@ -424,10 +463,38 @@
     });
   }
 
+  // ---------------------------------------------------------------------
+  // Admin-only preview: renders the real modal from admin-supplied config,
+  // with zero network calls (no active-registration GET, no register POST,
+  // no dismiss POST) and no Telegram initData requirement. Safe to call
+  // from the Admin Dashboard for a draft/unpublished campaign.
+  // ---------------------------------------------------------------------
+
+  function preview(config) {
+    config = config || {};
+    var requiredFields = (config.required_fields && config.required_fields.length)
+      ? config.required_fields
+      : FIELD_DEFS.map(function (f) { return f.key; });
+    var view = {
+      status: "ok",
+      registered: false,
+      should_prompt: true,
+      campaign: {
+        campaign_id: config.campaign_id || "preview",
+        name: config.name || "Untitled Campaign",
+        base_entries: (config.base_entries !== undefined && config.base_entries !== null) ? config.base_entries : 1,
+        required_fields: requiredFields,
+        modal_enabled: true,
+      },
+    };
+    openModal(view, function () {}, { previewMode: true });
+  }
+
   window.CampaignRegistrationWidget = {
     parseCampaignParam: parseCampaignParam,
     resolveCampaignRef: resolveCampaignRef,
     mount: mount,
+    preview: preview,
   };
 
   if (document.readyState === "loading") {

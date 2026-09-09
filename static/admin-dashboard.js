@@ -4876,7 +4876,7 @@
           '<button class="btn" data-gc-action="pause" data-id="' + esc(c.campaign_id) + '">Pause</button>' +
           gcMissionActionsHtml(c) +
           ' <button class="btn" data-gc-action="archive" data-id="' + esc(c.campaign_id) + '">Archive</button> ' +
-          '<button class="btn" data-gc-action="preview" data-id="' + esc(c.campaign_id) + '">Preview</button> ' +
+          '<button class="btn" data-gc-action="preview" data-id="' + esc(c.campaign_id) + '">Preview Campaign</button> ' +
           '<button class="btn" data-gc-action="registration" data-id="' + esc(c.campaign_id) + '">' +
             ((c.registration && c.registration.enabled) ? "Registration ✅" : "Registration") + '</button> ' +
           '<button class="btn" data-gc-action="duplicate" data-id="' + esc(c.campaign_id) + '">Duplicate</button>' +
@@ -4997,7 +4997,7 @@
   // reads/writes the same gc_campaigns.registration block via the existing
   // Campaign Centre update path — no second config storage mechanism) ----------
 
-  var crCfgState = { campaignId: null, loaded: false };
+  var crCfgState = { campaignId: null, loaded: false, campaignName: null, formReady: false };
 
   function crCfgReadForm() {
     var requiredFields = [];
@@ -5062,6 +5062,7 @@
 
   function crCfgOnCampaignSelected(campaignId) {
     crCfgState.campaignId = campaignId || null;
+    crCfgState.formReady = false; // form/name not yet bound to campaignId — block preview until the fetch below lands
     var form = $("#cr-cfg-form"), empty = $("#cr-cfg-empty");
     if (!campaignId) {
       if (form) form.classList.add("hidden");
@@ -5070,8 +5071,10 @@
     }
     api("/api/admin/gc-campaigns/" + campaignId).then(function (r) {
       if (crCfgState.campaignId !== campaignId) return; // superseded by a later selection
+      crCfgState.campaignName = (r.campaign || {}).name || campaignId;
       crCfgWriteForm((r.campaign || {}).registration);
       crCfgUpdateDeepLink(campaignId);
+      crCfgState.formReady = true;
       if (empty) empty.classList.add("hidden");
       if (form) form.classList.remove("hidden");
     }).catch(function (e) { toast("❌ " + e.message, "error"); });
@@ -5109,6 +5112,27 @@
       var link = ($("#cr-cfg-deep-link") || {}).textContent || "";
       if (!link) return;
       try { navigator.clipboard.writeText(link); toast("✅ Copied", "success"); } catch (e) { toast("Copy failed", "error"); }
+    });
+
+    // Renders the real Mini App registration modal (campaign-registration-widget.js)
+    // against the admin form's CURRENT values, including unsaved edits — no
+    // save, no network call, no Mongo write. Works for a draft/disabled campaign.
+    var previewBtn = $("#cr-cfg-preview-btn");
+    if (previewBtn) previewBtn.addEventListener("click", function () {
+      var campaignId = crCfgState.campaignId;
+      if (!campaignId) { toast("❌ Select a campaign first", "error"); return; }
+      if (!crCfgState.formReady) { toast("❌ Still loading campaign details — try again in a moment", "error"); return; }
+      if (!window.CampaignRegistrationWidget || typeof window.CampaignRegistrationWidget.preview !== "function") {
+        toast("❌ Preview widget unavailable", "error");
+        return;
+      }
+      var form = crCfgReadForm();
+      window.CampaignRegistrationWidget.preview({
+        campaign_id: campaignId,
+        name: crCfgState.campaignName || campaignId,
+        base_entries: form.base_entries,
+        required_fields: form.required_fields,
+      });
     });
   }
 
