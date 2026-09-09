@@ -4877,6 +4877,8 @@
           gcMissionActionsHtml(c) +
           ' <button class="btn" data-gc-action="archive" data-id="' + esc(c.campaign_id) + '">Archive</button> ' +
           '<button class="btn" data-gc-action="preview" data-id="' + esc(c.campaign_id) + '">Preview</button> ' +
+          '<button class="btn" data-gc-action="registration" data-id="' + esc(c.campaign_id) + '">' +
+            ((c.registration && c.registration.enabled) ? "Registration ✅" : "Registration") + '</button> ' +
           '<button class="btn" data-gc-action="duplicate" data-id="' + esc(c.campaign_id) + '">Duplicate</button>' +
           (c.mechanic === "mission_pool"
             ? ' <button class="btn" data-gc-action="mission" data-id="' + esc(c.campaign_id) + '">Open</button>'
@@ -4921,6 +4923,58 @@
     if (mod) mod.open(campaignId);
   }
 
+  // ---------- Campaign Registration config block (shared by create + per-row edit) ----------
+
+  function gcRegReadForm() {
+    var requiredFields = [];
+    document.querySelectorAll(".gc-reg-field").forEach(function (cb) { if (cb.checked) requiredFields.push(cb.value); });
+    var audienceRegions = ($("#gc-reg-audience-regions").value || "").split(",").map(function (s) { return s.trim(); }).filter(Boolean);
+    var shippingRegions = ($("#gc-reg-shipping-regions").value || "").split(",").map(function (s) { return s.trim(); }).filter(Boolean);
+    return {
+      enabled: $("#gc-reg-enabled").checked,
+      miniapp_visible: $("#gc-reg-miniapp-visible").checked,
+      modal_enabled: $("#gc-reg-modal-enabled").checked,
+      require_channel_subscription: $("#gc-reg-require-channel").checked,
+      reminder_hours: parseInt($("#gc-reg-reminder-hours").value, 10) || 24,
+      base_entries: parseInt($("#gc-reg-base-entries").value, 10) >= 0 ? parseInt($("#gc-reg-base-entries").value, 10) : 1,
+      required_fields: requiredFields.length ? requiredFields : ["full_name", "contact_number", "country_region", "delivery_address"],
+      audience: { scope: $("#gc-reg-audience-scope").value, regions: audienceRegions },
+      shipping: { scope: $("#gc-reg-shipping-scope").value, regions: shippingRegions },
+    };
+  }
+
+  function gcRegWriteForm(reg, campaignId) {
+    reg = reg || {};
+    $("#gc-reg-enabled").checked = !!reg.enabled;
+    $("#gc-reg-miniapp-visible").checked = reg.miniapp_visible !== false;
+    $("#gc-reg-modal-enabled").checked = reg.modal_enabled !== false;
+    $("#gc-reg-require-channel").checked = !!reg.require_channel_subscription;
+    $("#gc-reg-reminder-hours").value = reg.reminder_hours || 24;
+    $("#gc-reg-base-entries").value = (reg.base_entries !== undefined && reg.base_entries !== null) ? reg.base_entries : 1;
+    var required = reg.required_fields || ["full_name", "contact_number", "country_region", "delivery_address"];
+    document.querySelectorAll(".gc-reg-field").forEach(function (cb) { cb.checked = required.indexOf(cb.value) !== -1; });
+    var audience = reg.audience || { scope: "all", regions: [] };
+    $("#gc-reg-audience-scope").value = audience.scope || "all";
+    $("#gc-reg-audience-regions").value = (audience.regions || []).join(", ");
+    var shipping = reg.shipping || { scope: "all", regions: [] };
+    $("#gc-reg-shipping-scope").value = shipping.scope || "all";
+    $("#gc-reg-shipping-regions").value = (shipping.regions || []).join(", ");
+    var label = $("#gc-reg-target-label"), saveBtn = $("#gc-reg-save-btn"), clearBtn = $("#gc-reg-target-clear-btn"), link = $("#gc-reg-deep-link");
+    if (campaignId) {
+      label.textContent = campaignId;
+      label.dataset.campaignId = campaignId;
+      saveBtn.style.display = "";
+      clearBtn.style.display = "";
+      link.textContent = "Deep link: https://t.me/<bot>?startapp=campaign_" + campaignId;
+    } else {
+      label.textContent = "(new campaign — set on create)";
+      delete label.dataset.campaignId;
+      saveBtn.style.display = "none";
+      clearBtn.style.display = "none";
+      link.textContent = "";
+    }
+  }
+
   function bindGcCampaigns() {
     var newBtn = $("#gc-new-campaign-btn");
     if (newBtn) newBtn.addEventListener("click", function () {
@@ -4928,6 +4982,21 @@
         "gc-c-starts", "gc-c-ends"].forEach(function (id) {
         var node = $("#" + id);
         if (node) node.value = "";
+      });
+      gcRegWriteForm(null, null);
+    });
+
+    var clearRegTargetBtn = $("#gc-reg-target-clear-btn");
+    if (clearRegTargetBtn) clearRegTargetBtn.addEventListener("click", function () { gcRegWriteForm(null, null); });
+
+    var saveRegBtn = $("#gc-reg-save-btn");
+    if (saveRegBtn) saveRegBtn.addEventListener("click", function () {
+      var campaignId = $("#gc-reg-target-label").dataset.campaignId;
+      if (!campaignId) return;
+      apiPutJson("/api/admin/gc-campaigns/" + campaignId, { registration: gcRegReadForm() }).then(function (res) {
+        if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "update_failed"), "error"); return; }
+        toast("✅ Registration config saved for " + campaignId, "success");
+        loadGcCampaigns(true);
       });
     });
 
@@ -4945,6 +5014,7 @@
           },
           telegram: { channel_username: ($("#gc-c-channel").value || "").trim() },
           destination: { provider_id: ($("#gc-c-provider").value || "").trim(), path: ($("#gc-c-path").value || "").trim(), open_mode: "telegram_web_app", ready: false },
+          registration: gcRegReadForm(),
         };
         apiPostJson("/api/admin/gc-campaigns", body).then(function (res) {
           if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "create_failed"), "error"); return; }
@@ -4962,6 +5032,13 @@
       else if (action === "pause") apiPost("/api/admin/gc-campaigns/" + id + "/pause").then(function () { loadGcCampaigns(true); });
       else if (action === "archive") apiPost("/api/admin/gc-campaigns/" + id + "/archive").then(function () { loadGcCampaigns(true); });
       else if (action === "mission") openMissionAdmin(id);
+      else if (action === "registration") {
+        api("/api/admin/gc-campaigns/" + id).then(function (r) {
+          gcRegWriteForm((r.campaign || {}).registration, id);
+          var target = document.getElementById("gc-reg-target-label");
+          if (target && target.scrollIntoView) target.scrollIntoView({ behavior: "smooth", block: "center" });
+        }).catch(function (e) { toast("❌ " + e.message, "error"); });
+      }
       else if (action === "close-mission") {
         if (!confirm(GC_CLOSE_MISSION_CONFIRM)) return;
         apiPost("/api/admin/mission-pool/" + id + "/close").then(function (r) {
@@ -4987,6 +5064,129 @@
       else if (action === "preview") api("/api/admin/gc-campaigns/" + id + "/preview").then(function (r) {
         alert("Card: " + JSON.stringify(r.card, null, 2) + "\n\nBadges: " + (r.admin_badges || []).join(", ") + "\n\nVisibility: " + JSON.stringify(r.effective_visibility));
       });
+    });
+  }
+
+  // ---------- Campaign Registrations (campaign_registration.py) ----------
+
+  function crQueryString(page) {
+    var params = new URLSearchParams();
+    var campaignId = ($("#cr-filter-campaign").value || "").trim();
+    var region = ($("#cr-filter-region").value || "").trim();
+    var verified = $("#cr-filter-verified").value;
+    var q = ($("#cr-filter-q").value || "").trim();
+    if (campaignId) params.set("campaign_id", campaignId);
+    if (region) params.set("region", region);
+    if (verified) params.set("channel_verified", verified);
+    if (q) params.set("q", q);
+    params.set("page", String(page || 1));
+    params.set("page_size", "50");
+    return params.toString();
+  }
+
+  function loadCampaignRegistrationsSummary() {
+    var campaignId = ($("#cr-filter-campaign").value || "").trim();
+    var qs = campaignId ? ("?campaign_id=" + encodeURIComponent(campaignId)) : "";
+    api("/api/admin/campaign-registrations/summary" + qs).then(function (r) {
+      var cards = [
+        { label: "Total registrations", value: r.total_registrations },
+        { label: "Registrations today", value: r.registrations_today },
+        { label: "Channel verified", value: r.channel_verified },
+        { label: "Campaign status", value: r.campaign_status || "—" },
+      ];
+      $("#cr-summary-cards").innerHTML = cards.map(function (c) {
+        return '<div class="section" style="padding:10px 14px;"><div class="sub">' + esc(c.label) + '</div>' +
+          '<div style="font-size:20px;font-weight:700;margin-top:4px;">' + esc(String(c.value)) + '</div></div>';
+      }).join("");
+    }).catch(function () {});
+  }
+
+  var crState = { page: 1 };
+
+  function loadCampaignRegistrations(force, page) {
+    crState.page = page || (force ? 1 : crState.page) || 1;
+    statePanel("cr-table-body", "loading", "Loading registrations…");
+    loadCampaignRegistrationsSummary();
+    api("/api/admin/campaign-registrations?" + crQueryString(crState.page)).then(function (data) {
+      var items = data.registrations || [];
+      if (!items.length) { $("#cr-table-body").innerHTML = emptyState("No registrations match these filters."); $("#cr-pagination").innerHTML = ""; return; }
+      var rows = items.map(function (r) {
+        return "<tr>" +
+          "<td>" + esc(String(r.telegram_user_id || "")) + "</td>" +
+          "<td>" + (r.telegram_username ? "@" + esc(r.telegram_username) : "—") + "</td>" +
+          "<td>" + esc(r.full_name || "") + "</td>" +
+          "<td>" + esc(r.contact_number || "") + "</td>" +
+          "<td>" + esc(r.country_region || "") + "</td>" +
+          "<td>" + esc(r.delivery_address || "") + "</td>" +
+          "<td>" + (r.channel_verified ? '<span class="pill approved">verified</span>' : '<span class="pill pending">unverified</span>') + "</td>" +
+          "<td>" + esc(String(r.base_entries != null ? r.base_entries : "")) + "</td>" +
+          "<td>" + esc(r.registered_at || "") + "</td>" +
+          "<td>" + esc(r.status || "") + "</td>" +
+          "</tr>";
+      }).join("");
+      $("#cr-table-body").innerHTML = '<table class="data-table"><thead><tr>' +
+        "<th>TG User ID</th><th>@Username</th><th>Full name</th><th>Contact</th><th>Country/Region</th>" +
+        "<th>Delivery address</th><th>Channel</th><th>Base entries</th><th>Registered at</th><th>Status</th>" +
+        "</tr></thead><tbody>" + rows + "</tbody></table>";
+      var totalPages = Math.max(1, Math.ceil((data.total || 0) / (data.page_size || 50)));
+      $("#cr-pagination").innerHTML = '<span class="sub">Page ' + data.page + " of " + totalPages + " (" + data.total + " total)</span> " +
+        '<button class="btn" id="cr-prev-btn" ' + (data.page <= 1 ? "disabled" : "") + '>Prev</button> ' +
+        '<button class="btn" id="cr-next-btn" ' + (data.page >= totalPages ? "disabled" : "") + '>Next</button>';
+      var prevBtn = $("#cr-prev-btn"), nextBtn = $("#cr-next-btn");
+      if (prevBtn) prevBtn.addEventListener("click", function () { loadCampaignRegistrations(false, data.page - 1); });
+      if (nextBtn) nextBtn.addEventListener("click", function () { loadCampaignRegistrations(false, data.page + 1); });
+    }).catch(function (e) { statePanel("cr-table-body", "error", "Failed to load registrations: " + e.message); });
+  }
+
+  function bindCampaignRegistrations() {
+    var searchBtn = $("#cr-search-btn");
+    if (searchBtn) searchBtn.addEventListener("click", function () { loadCampaignRegistrations(true, 1); });
+    var exportBtn = $("#cr-export-btn");
+    if (exportBtn) exportBtn.addEventListener("click", function () {
+      window.open("/api/admin/campaign-registrations/export?" + crQueryString(1), "_blank");
+    });
+  }
+
+  // ---------- Deep Link Registry (reusable — every link is derived from its
+  // own resource id, never a separately-maintained record) ----------
+
+  function dlRow(name, id, link) {
+    return '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 0;border-bottom:1px solid var(--border,rgba(0,0,0,.08));">' +
+      '<div style="min-width:160px;"><b>' + esc(name) + "</b><div class=\"sub\">" + esc(id) + "</div></div>" +
+      '<code style="flex:1;min-width:220px;word-break:break-all;">' + esc(link) + "</code>" +
+      '<button class="btn dl-copy-btn" data-link="' + esc(link) + '">Copy</button>' +
+      '<a class="btn" href="' + esc(link) + '" target="_blank" rel="noopener">Open</a>' +
+      "</div>";
+  }
+
+  function loadDeepLinks(force) {
+    var botUsername = (window.APP_BOT_USERNAME || "APreferralV1_bot");
+    $("#dl-general-body").innerHTML = dlRow("Mini App Home", "-", "https://t.me/" + botUsername + "?startapp=home");
+    $("#dl-invite-body").innerHTML = dlRow("Invite / Affiliate (quest_invite)", "-", "https://t.me/" + botUsername + "?startapp=quest_invite");
+
+    api("/api/admin/gc-campaigns").then(function (data) {
+      var items = data.campaigns || [];
+      if (!items.length) { $("#dl-campaigns-body").innerHTML = emptyState("No campaigns yet."); return; }
+      $("#dl-campaigns-body").innerHTML = items.map(function (c) {
+        return dlRow(c.name || c.campaign_id, c.campaign_id, "https://t.me/" + botUsername + "?startapp=campaign_" + c.campaign_id);
+      }).join("");
+    }).catch(function (e) { statePanel("dl-campaigns-body", "error", "Failed to load campaigns: " + e.message); });
+
+    api("/api/admin/gc-campaigns").then(function (data) {
+      var missions = (data.campaigns || []).filter(function (c) { return c.mechanic === "mission_pool"; });
+      if (!missions.length) { $("#dl-missions-body").innerHTML = emptyState("No missions yet."); return; }
+      $("#dl-missions-body").innerHTML = missions.map(function (c) {
+        return dlRow(c.name || c.campaign_id, c.campaign_id, "https://t.me/" + botUsername + "?startapp=mission_" + c.campaign_id);
+      }).join("");
+    }).catch(function (e) { statePanel("dl-missions-body", "error", "Failed to load missions: " + e.message); });
+  }
+
+  function bindDeepLinks() {
+    document.addEventListener("click", function (e) {
+      var btn = e.target && e.target.closest && e.target.closest(".dl-copy-btn");
+      if (!btn) return;
+      var link = btn.dataset.link || "";
+      try { navigator.clipboard.writeText(link); toast("✅ Copied", "success"); } catch (err) { toast("Copy failed", "error"); }
     });
   }
 
@@ -7389,7 +7589,7 @@
     });
   }
 
-  var VIEWS =["summary", "moduleOverview", "placeholder", "funnel", "abuse", "campaignBuilder", "campaignPerformance", "campaignIntelligence", "activeCampaigns", "draftCampaigns", "compiledDrops", "campaigns", "gcCampaigns", "missionPool", "gcProviders", "gcResults", "gcRewards", "gcVerification", "gcActivity", "campaignDisplay", "eventBanners", "luckyGames", "vouchers", "drops", "referrals", "affiliate", "affiliatePools", "affiliateBatches", "affiliatePending", "reactivation", "audit", "segmentProbabilityConfig", "segmentRoi", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "voucherHunterFalsePositive", "voucherHunterRuleSimulator", "vhPriorityImpact", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "joinRequests", "xpAdjust", "settings", "referralShareContent", "referralShareEngagement", "ccComposer", "ccCalendar", "ccBoard"];
+  var VIEWS =["summary", "moduleOverview", "placeholder", "funnel", "abuse", "campaignBuilder", "campaignPerformance", "campaignIntelligence", "activeCampaigns", "draftCampaigns", "compiledDrops", "campaigns", "gcCampaigns", "campaignRegistrations", "deepLinks", "missionPool", "gcProviders", "gcResults", "gcRewards", "gcVerification", "gcActivity", "campaignDisplay", "eventBanners", "luckyGames", "vouchers", "drops", "referrals", "affiliate", "affiliatePools", "affiliateBatches", "affiliatePending", "reactivation", "audit", "segmentProbabilityConfig", "segmentRoi", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "voucherHunterFalsePositive", "voucherHunterRuleSimulator", "vhPriorityImpact", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "joinRequests", "xpAdjust", "settings", "referralShareContent", "referralShareEngagement", "ccComposer", "ccCalendar", "ccBoard"];
 
   // ---------------------------------------------------------------------
   // Information architecture: sidebar Business Modules, each with its own
@@ -7417,6 +7617,8 @@
     ]},
     { key: "growth", icon: "🕹", label: "Player Campaigns", tabs: [
       { label: "Campaigns", view: "gcCampaigns" },
+      { label: "Registrations", view: "campaignRegistrations" },
+      { label: "Deep Links", view: "deepLinks" },
       { label: "Mission Reward Pool", view: "missionPool", live: true },
       { label: "Providers", view: "gcProviders" },
       { label: "Tournament Results", view: "gcResults" },
@@ -7691,7 +7893,7 @@
       campaignIntelligence: "Campaign Intelligence (P5)", activeCampaigns: "Active Campaigns",
       draftCampaigns: "Draft Campaigns", compiledDrops: "Compiled Voucher Drops",
       campaigns: "Campaigns (Legacy Targeting)",
-      gcCampaigns: "Player Campaigns", missionPool: "Mission Reward Pool", gcProviders: "Providers", gcResults: "Tournament Results",
+      gcCampaigns: "Player Campaigns", campaignRegistrations: "Campaign Registrations", deepLinks: "Deep Links", missionPool: "Mission Reward Pool", gcProviders: "Providers", gcResults: "Tournament Results",
       gcRewards: "Rewards", gcVerification: "Verification Integrations", gcActivity: "Activity Log",
       campaignDisplay: "Campaign Display Control",
       eventBanners: "Event Banner",
@@ -7734,6 +7936,8 @@
     else if (state.view === "compiledDrops") loadCompiledDrops(force);
     else if (state.view === "campaigns") loadCampaigns(force);
     else if (state.view === "gcCampaigns") loadGcCampaigns(force);
+    else if (state.view === "campaignRegistrations") loadCampaignRegistrations(force);
+    else if (state.view === "deepLinks") loadDeepLinks(force);
     else if (state.view === "missionPool") loadMissionPool();
     else if (state.view === "gcProviders") loadGcProviders(force);
     else if (state.view === "gcResults") loadGcResults(force);
@@ -7819,6 +8023,8 @@
     bindAffiliateBatches();
     bindAffiliatePending();
     bindGcCampaigns();
+    bindCampaignRegistrations();
+    bindDeepLinks();
     bindCampaignDisplay();
     bindEventBanners();
     bindLuckyGames();

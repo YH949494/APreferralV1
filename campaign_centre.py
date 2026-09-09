@@ -338,6 +338,19 @@ def _validate_body(body: dict, *, partial: bool = False) -> tuple[dict | None, s
                 return None, code
             updates["_mission_pool_validated"] = pool_block
 
+    # ---- Campaign Registration (optional, orthogonal to `type`) --------
+    # Any campaign can carry a registration config — it is not a campaign
+    # type of its own, so this applies regardless of `campaign_type`. See
+    # campaign_registration.py, which owns validation of this block the same
+    # way mission_pool owns `mission_config`/`mission_pool` above.
+    if "registration" in body:
+        import campaign_registration
+
+        registration, code = campaign_registration.validate_registration_config(body.get("registration"))
+        if code:
+            return None, code
+        updates["registration"] = registration
+
     if "reward_config" in body:
         raw_reward = body.get("reward_config") or {}
         rules = raw_reward.get("rules") or []

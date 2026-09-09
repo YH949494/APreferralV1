@@ -2700,6 +2700,10 @@ from mission_pool_ux import mission_pool_ux_admin_bp, mission_pool_ux_bp
 app.register_blueprint(mission_pool_ux_bp)
 app.register_blueprint(mission_pool_ux_admin_bp)
 
+from campaign_registration import campaign_registration_admin_bp, campaign_registration_bp
+app.register_blueprint(campaign_registration_bp)
+app.register_blueprint(campaign_registration_admin_bp)
+
 from event_banner import event_banner_admin_bp, event_banner_public_bp
 app.register_blueprint(event_banner_admin_bp)
 app.register_blueprint(event_banner_public_bp)

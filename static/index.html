@@ -1556,6 +1556,11 @@
       <img id="ap-event-banner-img" src="" alt="" decoding="async" loading="eager">
     </button>
 
+    <!-- CAMPAIGN REGISTRATION — stays empty unless the server reports an
+         active registration campaign the user hasn't registered for yet.
+         See campaign-registration-widget.js. -->
+    <div id="campaign-registration-root"></div>
+
     <!-- MISSION REWARD POOL (Phase 2) — stays empty and makes no network
          request unless this app open carries a Mission deep link AND the
          server confirms mechanic=mission_pool. See mission-pool-widget.js. -->
@@ -8435,5 +8440,6 @@ ${referral}`;
 </script>
 <script src="/static/campaign-centre-widget.js" defer></script>
 <script src="/static/mission-pool-widget.js" defer></script>
+<script src="/static/campaign-registration-widget.js" defer></script>
 </body>
 </html>
