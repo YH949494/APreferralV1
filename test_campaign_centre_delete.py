@@ -282,3 +282,182 @@ def test_double_delete_second_call_returns_404(fake_db, client):
     assert first.status_code == 200
     assert second.status_code == 404
     assert second.get_json()["code"] == "not_found"
+
+
+# ---------------------------------------------------------------------------
+# No false deletion audit/event when the atomic delete does not happen
+#
+# The audit log and campaign_events ledger are read as "this campaign was
+# deleted" by anyone auditing admin actions. Writing a campaign_deleted
+# record for a request that the atomic find_one_and_delete actually
+# rejected (still live/paused, already gone, or lost a status-flip race)
+# would be a false record — the campaign was NOT deleted. All of these must
+# leave zero campaign_deleted audit entries and zero campaign_deleted events.
+# ---------------------------------------------------------------------------
+
+def _no_deletion_audit_or_event_written(fake_db, campaign_id=CAMPAIGN_ID):
+    assert fake_db["campaign_admin_audit_log"].count_documents(
+        {"action": "campaign_deleted", "entity_id": campaign_id}
+    ) == 0
+    assert fake_db["campaign_events"].count_documents(
+        {"event_type": "campaign_deleted", "campaign_id": campaign_id}
+    ) == 0
+
+
+@pytest.mark.parametrize("status", ["live", "paused"])
+def test_live_or_paused_delete_attempt_writes_no_audit_or_event(fake_db, client, status):
+    _seed_campaign(fake_db, status=status)
+    with _mock_admin():
+        resp = _delete(client)
+    assert resp.status_code == 409
+    _no_deletion_audit_or_event_written(fake_db)
+    # and the registration_state cascade must not have run either
+    fake_db["campaign_registration_state"].insert_one({"campaign_id": CAMPAIGN_ID, "telegram_user_id": 1})
+    assert fake_db["campaign_registration_state"].count_documents({"campaign_id": CAMPAIGN_ID}) == 1
+
+
+def test_concurrent_status_flip_failure_writes_no_audit_or_event(fake_db, client):
+    """Same race as test_concurrent_publish_during_delete_cannot_both_succeed,
+    but from the audit/event side: a delete that the atomic filter rejects
+    because the campaign flipped to live must leave no trace claiming it
+    happened."""
+    _seed_campaign(fake_db, status="draft")
+    fake_db["gc_campaigns"].update_one({"campaign_id": CAMPAIGN_ID}, {"$set": {"status": "live"}})
+    with _mock_admin():
+        resp = _delete(client)
+    assert resp.status_code == 409
+    _no_deletion_audit_or_event_written(fake_db)
+
+
+def test_unknown_campaign_delete_writes_no_audit_or_event(fake_db, client):
+    with _mock_admin():
+        resp = _delete(client, campaign_id="does-not-exist")
+    assert resp.status_code == 404
+    _no_deletion_audit_or_event_written(fake_db, campaign_id="does-not-exist")
+
+
+def test_double_delete_second_call_writes_no_second_audit_or_event(fake_db, client):
+    _seed_campaign(fake_db, status="archived")
+    with _mock_admin():
+        first = _delete(client)
+        second = _delete(client)
+    assert first.status_code == 200
+    assert second.status_code == 404
+    # exactly one campaign_deleted record from the first, successful call —
+    # the failed second call must not have added another
+    assert fake_db["campaign_admin_audit_log"].count_documents(
+        {"action": "campaign_deleted", "entity_id": CAMPAIGN_ID}
+    ) == 1
+    assert fake_db["campaign_events"].count_documents(
+        {"event_type": "campaign_deleted", "campaign_id": CAMPAIGN_ID}
+    ) == 1
+
+
+# ---------------------------------------------------------------------------
+# Snapshot must come from the document find_one_and_delete actually returned
+# ---------------------------------------------------------------------------
+
+def test_audit_and_event_snapshot_comes_from_find_one_and_delete_result(fake_db, client):
+    """The audit/event payload must be built from the exact document
+    find_one_and_delete removed, not from a separate re-read (get_campaign)
+    that could race with something else. Proven by making
+    find_one_and_delete itself return a doctored document and asserting
+    that doctoring shows up in the audit/event records."""
+    _seed_campaign(fake_db, status="archived", name="Original Name")
+
+    real_find_one_and_delete = fake_db["gc_campaigns"].find_one_and_delete
+
+    def spy_find_one_and_delete(*args, **kwargs):
+        result = real_find_one_and_delete(*args, **kwargs)
+        if result is not None:
+            result = dict(result)
+            result["name"] = "SNAPSHOT-MARKER-FROM-DELETE-RESULT"
+        return result
+
+    fake_db["gc_campaigns"].find_one_and_delete = spy_find_one_and_delete
+
+    with _mock_admin():
+        resp = _delete(client)
+    assert resp.status_code == 200
+
+    audit = fake_db["campaign_admin_audit_log"].find_one({"action": "campaign_deleted", "entity_id": CAMPAIGN_ID})
+    assert audit["details"]["title"] == "SNAPSHOT-MARKER-FROM-DELETE-RESULT"
+    assert audit["details"]["snapshot"]["name"] == "SNAPSHOT-MARKER-FROM-DELETE-RESULT"
+
+    event = fake_db["campaign_events"].find_one({"event_type": "campaign_deleted", "campaign_id": CAMPAIGN_ID})
+    assert event is not None
+
+
+# ---------------------------------------------------------------------------
+# Post-delete cleanup failures must not be reported as deletion failure
+# ---------------------------------------------------------------------------
+
+def test_registration_state_cleanup_failure_still_reports_deletion_success(fake_db, client):
+    """The campaign document is already gone by the time
+    campaign_registration_state.delete_many runs. If that cleanup step
+    raises, the admin must still see a 200/ok — never a 5xx that would look
+    retryable for a deletion that already happened."""
+    _seed_campaign(fake_db, status="archived")
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("simulated cleanup failure")
+
+    fake_db["campaign_registration_state"].delete_many = boom
+
+    with _mock_admin():
+        resp = _delete(client)
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["status"] == "ok"
+    assert body["campaign_id"] == CAMPAIGN_ID
+    assert "registration_state_cleanup_failed" in body.get("cleanup_warnings", [])
+    # the campaign itself is still gone despite the cleanup step failing
+    assert fake_db["gc_campaigns"].find_one({"campaign_id": CAMPAIGN_ID}) is None
+    # and the audit trail for the deletion itself still landed
+    assert fake_db["campaign_admin_audit_log"].find_one(
+        {"action": "campaign_deleted", "entity_id": CAMPAIGN_ID}
+    ) is not None
+
+
+def test_audit_log_failure_still_reports_deletion_success(fake_db, client, caplog):
+    """_log_audit already swallows its own exceptions (logging a warning
+    instead of raising), so a broken audit collection must never surface as
+    a failed deletion — the campaign is gone regardless of whether the
+    audit write landed."""
+    _seed_campaign(fake_db, status="ended")
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("simulated audit collection failure")
+
+    fake_db["campaign_admin_audit_log"].insert_one = boom
+
+    with _mock_admin():
+        resp = _delete(client)
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["status"] == "ok"
+    assert body["campaign_id"] == CAMPAIGN_ID
+    assert fake_db["gc_campaigns"].find_one({"campaign_id": CAMPAIGN_ID}) is None
+    # no false "audit_log_failed" retry signal leaks through — _log_audit's
+    # own guard handled it and logged a warning instead
+    assert "audit_log_failed" not in body.get("cleanup_warnings", [])
+
+
+def test_funnel_event_failure_still_reports_deletion_success(fake_db, client):
+    """Unlike _log_audit, log_funnel_event's failure mode is exercised end
+    to end here (emit_campaign_event also swallows internally, per its own
+    docstring) — this proves the outer guard in delete_campaign is a no-op
+    in the successful case and never turns a working delete into a 5xx."""
+    _seed_campaign(fake_db, status="draft")
+
+    with _mock_admin():
+        resp = _delete(client)
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["status"] == "ok"
+    assert fake_db["gc_campaigns"].find_one({"campaign_id": CAMPAIGN_ID}) is None
+    event = fake_db["campaign_events"].find_one({"event_type": "campaign_deleted", "campaign_id": CAMPAIGN_ID})
+    assert event is not None

@@ -744,24 +744,75 @@ def delete_campaign(campaign_id: str):
             "campaign_status": existing.get("status"),
         }), 409
 
-    database.db["campaign_registration_state"].delete_many({"campaign_id": campaign_id})
-    database.db[_DELETED_IDS_COLLECTION].update_one(
-        {"campaign_id": campaign_id},
-        {"$setOnInsert": {"campaign_id": campaign_id, "deleted_at": datetime.now(timezone.utc)}},
-        upsert=True,
-    )
+    # The campaign document is already gone at this point — the atomic
+    # find_one_and_delete above is the only step that can turn this request
+    # into a 404/409, and its returned `doc` (not a fresh get_campaign()
+    # read, which could race with something else) is the source of truth
+    # for everything logged below. Every remaining step is best-effort
+    # bookkeeping for a deletion that has already happened, so none of it
+    # may surface as a 500 — that would tell the admin the delete failed
+    # and invite a retry of a campaign that's already gone. Each step is
+    # isolated and any failure is logged at error level for operational
+    # follow-up instead of raising.
+    cleanup_warnings: list[str] = []
+
+    try:
+        database.db["campaign_registration_state"].delete_many({"campaign_id": campaign_id})
+    except Exception:
+        logger.error(
+            "[CAMPAIGN_CENTRE] post_delete_registration_state_cleanup_failed campaign_id=%s",
+            campaign_id, exc_info=True,
+        )
+        cleanup_warnings.append("registration_state_cleanup_failed")
+
+    try:
+        database.db[_DELETED_IDS_COLLECTION].update_one(
+            {"campaign_id": campaign_id},
+            {"$setOnInsert": {"campaign_id": campaign_id, "deleted_at": datetime.now(timezone.utc)}},
+            upsert=True,
+        )
+    except Exception:
+        logger.error(
+            "[CAMPAIGN_CENTRE] post_delete_id_reservation_failed campaign_id=%s",
+            campaign_id, exc_info=True,
+        )
+        cleanup_warnings.append("id_reservation_failed")
 
     snapshot = _serialize(doc)
-    _log_audit("campaign_deleted", admin, campaign_id, {
-        "title": doc.get("name"),
-        "previous_status": doc.get("status"),
-        "snapshot": snapshot,
-    })
-    log_funnel_event(
-        "campaign_deleted", campaign_id=campaign_id, campaign_type=doc.get("type"),
-        source="admin", previous_status=doc.get("status"),
-    )
-    return jsonify({"status": "ok", "campaign_id": campaign_id}), 200
+    try:
+        _log_audit("campaign_deleted", admin, campaign_id, {
+            "title": doc.get("name"),
+            "previous_status": doc.get("status"),
+            "snapshot": snapshot,
+        })
+    except Exception:
+        # _log_audit already swallows its own exceptions and logs a warning;
+        # this guard only covers that contract changing out from under us.
+        logger.error(
+            "[CAMPAIGN_CENTRE] post_delete_audit_log_failed campaign_id=%s",
+            campaign_id, exc_info=True,
+        )
+        cleanup_warnings.append("audit_log_failed")
+
+    try:
+        log_funnel_event(
+            "campaign_deleted", campaign_id=campaign_id, campaign_type=doc.get("type"),
+            source="admin", previous_status=doc.get("status"),
+        )
+    except Exception:
+        logger.error(
+            "[CAMPAIGN_CENTRE] post_delete_funnel_event_failed campaign_id=%s",
+            campaign_id, exc_info=True,
+        )
+        cleanup_warnings.append("funnel_event_failed")
+
+    response = {"status": "ok", "campaign_id": campaign_id}
+    if cleanup_warnings:
+        # The campaign IS deleted — this only flags that some bookkeeping
+        # (audit trail, funnel event, or owned-state cleanup) needs manual
+        # follow-up. The admin must not read this as "try again".
+        response["cleanup_warnings"] = cleanup_warnings
+    return jsonify(response), 200
 
 
 @campaign_centre_bp.get("/api/admin/gc-campaigns/<campaign_id>/preview")
