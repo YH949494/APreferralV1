@@ -71,6 +71,12 @@ _VALID_STATUS_TRANSITIONS = {
     "archived": {"archived"},
 }
 
+# Permanent deletion is only allowed once a campaign can no longer be
+# publicly active — a live/paused campaign must be archived first (or run
+# out its schedule to `ended`) so it can never be deleted while still
+# reachable by players.
+_DELETABLE_STATUSES = {"draft", "archived", "ended"}
+
 
 def _require_admin():
     from vouchers import require_admin
@@ -666,6 +672,58 @@ def duplicate_campaign(campaign_id: str):
     result = database.db["gc_campaigns"].insert_one(new_doc)
     _log_audit("campaign_duplicated", admin, new_campaign_id, {"source": campaign_id})
     return jsonify({"status": "ok", "id": str(result.inserted_id), "campaign_id": new_campaign_id}), 201
+
+
+@campaign_centre_bp.delete("/api/admin/campaign-centre/campaigns/<campaign_id>")
+def delete_campaign(campaign_id: str):
+    """Permanently deletes a campaign. Only allowed once the campaign is no
+    longer live/paused (see ``_DELETABLE_STATUSES``) — the status check and
+    the delete happen in one atomic ``find_one_and_delete`` so a campaign
+    cannot be published in the window between checking its status and
+    removing it.
+
+    Historical winner/claim/reward/registration rows (``mission_entries``,
+    ``mission_identity_claims``, ``campaign_rewards``, ``tournament_results``,
+    ``campaign_registrations``) are deliberately left in place for
+    traceability — they stay valid, campaign_id-keyed rows after the parent
+    campaign document is gone. Only campaign-exclusive *operational* state
+    that has no meaning without the campaign (``campaign_registration_state``
+    — per-user dismissal/reminder state) is cascade-deleted, scoped by the
+    exact campaign_id. Shared/provider-scoped collections (``gc_providers``,
+    ``tournament_nonces``, ``campaign_provider_integration_status``,
+    ``campaign_subscription_cache``) are untouched — they are keyed by
+    provider/channel, not owned by any single campaign.
+    """
+    admin, err = _require_admin()
+    if err:
+        return err
+
+    doc = database.db["gc_campaigns"].find_one_and_delete(
+        {"campaign_id": campaign_id, "status": {"$in": sorted(_DELETABLE_STATUSES)}}
+    )
+    if doc is None:
+        existing = get_campaign(campaign_id)
+        if existing is None:
+            return jsonify({"status": "error", "code": "not_found"}), 404
+        return jsonify({
+            "status": "error",
+            "code": "invalid_status_for_deletion",
+            "campaign_status": existing.get("status"),
+        }), 409
+
+    database.db["campaign_registration_state"].delete_many({"campaign_id": campaign_id})
+
+    snapshot = _serialize(doc)
+    _log_audit("campaign_deleted", admin, campaign_id, {
+        "title": doc.get("name"),
+        "previous_status": doc.get("status"),
+        "snapshot": snapshot,
+    })
+    log_funnel_event(
+        "campaign_deleted", campaign_id=campaign_id, campaign_type=doc.get("type"),
+        source="admin", previous_status=doc.get("status"),
+    )
+    return jsonify({"status": "ok", "campaign_id": campaign_id}), 200
 
 
 @campaign_centre_bp.get("/api/admin/gc-campaigns/<campaign_id>/preview")
