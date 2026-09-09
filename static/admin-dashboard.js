@@ -4923,58 +4923,6 @@
     if (mod) mod.open(campaignId);
   }
 
-  // ---------- Campaign Registration config block (shared by create + per-row edit) ----------
-
-  function gcRegReadForm() {
-    var requiredFields = [];
-    document.querySelectorAll(".gc-reg-field").forEach(function (cb) { if (cb.checked) requiredFields.push(cb.value); });
-    var audienceRegions = ($("#gc-reg-audience-regions").value || "").split(",").map(function (s) { return s.trim(); }).filter(Boolean);
-    var shippingRegions = ($("#gc-reg-shipping-regions").value || "").split(",").map(function (s) { return s.trim(); }).filter(Boolean);
-    return {
-      enabled: $("#gc-reg-enabled").checked,
-      miniapp_visible: $("#gc-reg-miniapp-visible").checked,
-      modal_enabled: $("#gc-reg-modal-enabled").checked,
-      require_channel_subscription: $("#gc-reg-require-channel").checked,
-      reminder_hours: parseInt($("#gc-reg-reminder-hours").value, 10) || 24,
-      base_entries: parseInt($("#gc-reg-base-entries").value, 10) >= 0 ? parseInt($("#gc-reg-base-entries").value, 10) : 1,
-      required_fields: requiredFields.length ? requiredFields : ["full_name", "contact_number", "country_region", "delivery_address"],
-      audience: { scope: $("#gc-reg-audience-scope").value, regions: audienceRegions },
-      shipping: { scope: $("#gc-reg-shipping-scope").value, regions: shippingRegions },
-    };
-  }
-
-  function gcRegWriteForm(reg, campaignId) {
-    reg = reg || {};
-    $("#gc-reg-enabled").checked = !!reg.enabled;
-    $("#gc-reg-miniapp-visible").checked = reg.miniapp_visible !== false;
-    $("#gc-reg-modal-enabled").checked = reg.modal_enabled !== false;
-    $("#gc-reg-require-channel").checked = !!reg.require_channel_subscription;
-    $("#gc-reg-reminder-hours").value = reg.reminder_hours || 24;
-    $("#gc-reg-base-entries").value = (reg.base_entries !== undefined && reg.base_entries !== null) ? reg.base_entries : 1;
-    var required = reg.required_fields || ["full_name", "contact_number", "country_region", "delivery_address"];
-    document.querySelectorAll(".gc-reg-field").forEach(function (cb) { cb.checked = required.indexOf(cb.value) !== -1; });
-    var audience = reg.audience || { scope: "all", regions: [] };
-    $("#gc-reg-audience-scope").value = audience.scope || "all";
-    $("#gc-reg-audience-regions").value = (audience.regions || []).join(", ");
-    var shipping = reg.shipping || { scope: "all", regions: [] };
-    $("#gc-reg-shipping-scope").value = shipping.scope || "all";
-    $("#gc-reg-shipping-regions").value = (shipping.regions || []).join(", ");
-    var label = $("#gc-reg-target-label"), saveBtn = $("#gc-reg-save-btn"), clearBtn = $("#gc-reg-target-clear-btn"), link = $("#gc-reg-deep-link");
-    if (campaignId) {
-      label.textContent = campaignId;
-      label.dataset.campaignId = campaignId;
-      saveBtn.style.display = "";
-      clearBtn.style.display = "";
-      link.textContent = "Deep link: https://t.me/<bot>?startapp=campaign_" + campaignId;
-    } else {
-      label.textContent = "(new campaign — set on create)";
-      delete label.dataset.campaignId;
-      saveBtn.style.display = "none";
-      clearBtn.style.display = "none";
-      link.textContent = "";
-    }
-  }
-
   function bindGcCampaigns() {
     var newBtn = $("#gc-new-campaign-btn");
     if (newBtn) newBtn.addEventListener("click", function () {
@@ -4982,21 +4930,6 @@
         "gc-c-starts", "gc-c-ends"].forEach(function (id) {
         var node = $("#" + id);
         if (node) node.value = "";
-      });
-      gcRegWriteForm(null, null);
-    });
-
-    var clearRegTargetBtn = $("#gc-reg-target-clear-btn");
-    if (clearRegTargetBtn) clearRegTargetBtn.addEventListener("click", function () { gcRegWriteForm(null, null); });
-
-    var saveRegBtn = $("#gc-reg-save-btn");
-    if (saveRegBtn) saveRegBtn.addEventListener("click", function () {
-      var campaignId = $("#gc-reg-target-label").dataset.campaignId;
-      if (!campaignId) return;
-      apiPutJson("/api/admin/gc-campaigns/" + campaignId, { registration: gcRegReadForm() }).then(function (res) {
-        if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "update_failed"), "error"); return; }
-        toast("✅ Registration config saved for " + campaignId, "success");
-        loadGcCampaigns(true);
       });
     });
 
@@ -5014,7 +4947,6 @@
           },
           telegram: { channel_username: ($("#gc-c-channel").value || "").trim() },
           destination: { provider_id: ($("#gc-c-provider").value || "").trim(), path: ($("#gc-c-path").value || "").trim(), open_mode: "telegram_web_app", ready: false },
-          registration: gcRegReadForm(),
         };
         apiPostJson("/api/admin/gc-campaigns", body).then(function (res) {
           if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "create_failed"), "error"); return; }
@@ -5032,13 +4964,7 @@
       else if (action === "pause") apiPost("/api/admin/gc-campaigns/" + id + "/pause").then(function () { loadGcCampaigns(true); });
       else if (action === "archive") apiPost("/api/admin/gc-campaigns/" + id + "/archive").then(function () { loadGcCampaigns(true); });
       else if (action === "mission") openMissionAdmin(id);
-      else if (action === "registration") {
-        api("/api/admin/gc-campaigns/" + id).then(function (r) {
-          gcRegWriteForm((r.campaign || {}).registration, id);
-          var target = document.getElementById("gc-reg-target-label");
-          if (target && target.scrollIntoView) target.scrollIntoView({ behavior: "smooth", block: "center" });
-        }).catch(function (e) { toast("❌ " + e.message, "error"); });
-      }
+      else if (action === "registration") openCampaignRegistrationConfig(id);
       else if (action === "close-mission") {
         if (!confirm(GC_CLOSE_MISSION_CONFIRM)) return;
         apiPost("/api/admin/mission-pool/" + id + "/close").then(function (r) {
@@ -5064,6 +4990,125 @@
       else if (action === "preview") api("/api/admin/gc-campaigns/" + id + "/preview").then(function (r) {
         alert("Card: " + JSON.stringify(r.card, null, 2) + "\n\nBadges: " + (r.admin_badges || []).join(", ") + "\n\nVisibility: " + JSON.stringify(r.effective_visibility));
       });
+    });
+  }
+
+  // ---------- Registration Configuration (moved off Create Campaign form;
+  // reads/writes the same gc_campaigns.registration block via the existing
+  // Campaign Centre update path — no second config storage mechanism) ----------
+
+  var crCfgState = { campaignId: null, loaded: false };
+
+  function crCfgReadForm() {
+    var requiredFields = [];
+    document.querySelectorAll(".cr-cfg-field").forEach(function (cb) { if (cb.checked) requiredFields.push(cb.value); });
+    var audienceRegions = ($("#cr-cfg-audience-regions").value || "").split(",").map(function (s) { return s.trim(); }).filter(Boolean);
+    var shippingRegions = ($("#cr-cfg-shipping-regions").value || "").split(",").map(function (s) { return s.trim(); }).filter(Boolean);
+    return {
+      enabled: $("#cr-cfg-enabled").checked,
+      miniapp_visible: $("#cr-cfg-miniapp-visible").checked,
+      modal_enabled: $("#cr-cfg-modal-enabled").checked,
+      require_channel_subscription: $("#cr-cfg-require-channel").checked,
+      reminder_hours: parseInt($("#cr-cfg-reminder-hours").value, 10) || 24,
+      base_entries: parseInt($("#cr-cfg-base-entries").value, 10) >= 0 ? parseInt($("#cr-cfg-base-entries").value, 10) : 1,
+      required_fields: requiredFields.length ? requiredFields : ["full_name", "contact_number", "country_region", "delivery_address"],
+      audience: { scope: $("#cr-cfg-audience-scope").value, regions: audienceRegions },
+      shipping: { scope: $("#cr-cfg-shipping-scope").value, regions: shippingRegions },
+    };
+  }
+
+  // reg is undefined/null for a campaign with no registration config yet —
+  // renders the same disabled-by-default backend defaults in that case.
+  function crCfgWriteForm(reg) {
+    reg = reg || {};
+    $("#cr-cfg-enabled").checked = !!reg.enabled;
+    $("#cr-cfg-miniapp-visible").checked = reg.miniapp_visible !== false;
+    $("#cr-cfg-modal-enabled").checked = reg.modal_enabled !== false;
+    $("#cr-cfg-require-channel").checked = !!reg.require_channel_subscription;
+    $("#cr-cfg-reminder-hours").value = reg.reminder_hours || 24;
+    $("#cr-cfg-base-entries").value = (reg.base_entries !== undefined && reg.base_entries !== null) ? reg.base_entries : 1;
+    var required = reg.required_fields || ["full_name", "contact_number", "country_region", "delivery_address"];
+    document.querySelectorAll(".cr-cfg-field").forEach(function (cb) { cb.checked = required.indexOf(cb.value) !== -1; });
+    var audience = reg.audience || { scope: "all", regions: [] };
+    $("#cr-cfg-audience-scope").value = audience.scope || "all";
+    $("#cr-cfg-audience-regions").value = (audience.regions || []).join(", ");
+    var shipping = reg.shipping || { scope: "all", regions: [] };
+    $("#cr-cfg-shipping-scope").value = shipping.scope || "all";
+    $("#cr-cfg-shipping-regions").value = (shipping.regions || []).join(", ");
+  }
+
+  function crCfgUpdateDeepLink(campaignId) {
+    var linkEl = $("#cr-cfg-deep-link");
+    if (!linkEl) return;
+    linkEl.textContent = "";
+    getBotUsername().then(function (botUsername) {
+      if (!botUsername || crCfgState.campaignId !== campaignId) return;
+      linkEl.textContent = "https://t.me/" + botUsername + "?startapp=campaign_" + campaignId;
+    });
+  }
+
+  function loadCampaignRegistrationConfigOptions() {
+    var select = $("#cr-cfg-campaign-select");
+    if (!select) return;
+    api("/api/admin/gc-campaigns").then(function (data) {
+      var items = data.campaigns || [];
+      var current = select.value;
+      select.innerHTML = '<option value="">Select campaign…</option>' + items.map(function (c) {
+        return '<option value="' + esc(c.campaign_id) + '">' + esc(c.name || c.campaign_id) + " (" + esc(c.campaign_id) + ")</option>";
+      }).join("");
+      if (current && items.some(function (c) { return c.campaign_id === current; })) select.value = current;
+    }).catch(function () {});
+  }
+
+  function crCfgOnCampaignSelected(campaignId) {
+    crCfgState.campaignId = campaignId || null;
+    var form = $("#cr-cfg-form"), empty = $("#cr-cfg-empty");
+    if (!campaignId) {
+      if (form) form.classList.add("hidden");
+      if (empty) empty.classList.remove("hidden");
+      return;
+    }
+    api("/api/admin/gc-campaigns/" + campaignId).then(function (r) {
+      if (crCfgState.campaignId !== campaignId) return; // superseded by a later selection
+      crCfgWriteForm((r.campaign || {}).registration);
+      crCfgUpdateDeepLink(campaignId);
+      if (empty) empty.classList.add("hidden");
+      if (form) form.classList.remove("hidden");
+    }).catch(function (e) { toast("❌ " + e.message, "error"); });
+  }
+
+  // Entry point from the Campaigns tab's per-row "Registration" button:
+  // jump to the Registrations tab with that campaign preselected.
+  function openCampaignRegistrationConfig(campaignId) {
+    switchView("campaignRegistrations");
+    loadCampaignRegistrationConfigOptions();
+    var select = $("#cr-cfg-campaign-select");
+    if (select) select.value = campaignId;
+    crCfgOnCampaignSelected(campaignId);
+    var target = $("#cr-cfg-form");
+    if (target && target.scrollIntoView) target.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  function bindCampaignRegistrationConfig() {
+    var select = $("#cr-cfg-campaign-select");
+    if (select) select.addEventListener("change", function () { crCfgOnCampaignSelected(select.value); });
+
+    var saveBtn = $("#cr-cfg-save-btn");
+    if (saveBtn) saveBtn.addEventListener("click", function () {
+      var campaignId = crCfgState.campaignId;
+      if (!campaignId) return;
+      apiPutJson("/api/admin/gc-campaigns/" + campaignId, { registration: crCfgReadForm() }).then(function (res) {
+        if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "update_failed"), "error"); return; }
+        toast("✅ Registration settings saved for " + campaignId, "success");
+        loadCampaignRegistrationConfigOptions();
+      });
+    });
+
+    var copyBtn = $("#cr-cfg-copy-link-btn");
+    if (copyBtn) copyBtn.addEventListener("click", function () {
+      var link = ($("#cr-cfg-deep-link") || {}).textContent || "";
+      if (!link) return;
+      try { navigator.clipboard.writeText(link); toast("✅ Copied", "success"); } catch (e) { toast("Copy failed", "error"); }
     });
   }
 
@@ -5104,6 +5149,10 @@
   var crState = { page: 1 };
 
   function loadCampaignRegistrations(force, page) {
+    if (force || !crCfgState.loaded) {
+      crCfgState.loaded = true;
+      loadCampaignRegistrationConfigOptions();
+    }
     crState.page = page || (force ? 1 : crState.page) || 1;
     statePanel("cr-table-body", "loading", "Loading registrations…");
     loadCampaignRegistrationsSummary();
@@ -8054,6 +8103,7 @@
     bindAffiliateBatches();
     bindAffiliatePending();
     bindGcCampaigns();
+    bindCampaignRegistrationConfig();
     bindCampaignRegistrations();
     bindDeepLinks();
     bindCampaignDisplay();
