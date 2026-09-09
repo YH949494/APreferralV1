@@ -27,6 +27,7 @@ import logging
 from datetime import datetime, timezone
 
 from flask import Blueprint, jsonify, request
+from pymongo import ReturnDocument
 
 import database
 import reward_engine
@@ -77,21 +78,33 @@ _VALID_STATUS_TRANSITIONS = {
 # reachable by players.
 _DELETABLE_STATUSES = {"draft", "archived", "ended"}
 
-# Deleting a campaign deliberately keeps its historical registration/
-# mission-entry/reward/tournament-result rows for traceability (see
-# delete_campaign), all still keyed by campaign_id. If that same campaign_id
-# were allowed to be reused by a new campaign, the new campaign would
-# silently inherit that old history — e.g. campaign_registration.py's
-# get_registration()/register_for_campaign() and mission_pool.py's
-# already_submitted check both key purely on campaign_id, with no way to
-# tell "this row belongs to the campaign that used to have this id" from
-# "this row belongs to the current one". So a deleted campaign_id is
-# permanently reserved here and rejected by create/duplicate.
-_DELETED_IDS_COLLECTION = "gc_deleted_campaign_ids"
-
-
-def _campaign_id_was_deleted(campaign_id: str) -> bool:
-    return database.db[_DELETED_IDS_COLLECTION].find_one({"campaign_id": campaign_id}) is not None
+# A deleted campaign is never removed from gc_campaigns — its document is
+# atomically converted in place into a minimal tombstone (see
+# delete_campaign) with status="deleted". This is what actually reserves the
+# campaign_id: the collection's existing unique index on campaign_id
+# (ux_gc_campaigns_campaign_id) can never be re-satisfied by a new insert
+# once the tombstone exists, permanently and without a second collection
+# that could itself fail to write and reopen the reuse window. Deleting a
+# campaign deliberately keeps its historical registration/mission-entry/
+# reward/tournament-result rows for traceability, all still keyed by
+# campaign_id — e.g. campaign_registration.py's get_registration()/
+# register_for_campaign() and mission_pool.py's already_submitted check both
+# key purely on campaign_id, so if that id could ever be reused, the new
+# campaign would silently inherit that old history.
+#
+# Every field here is stripped from the tombstone left behind in
+# gc_campaigns (via $unset) — it keeps only campaign_id, name, type and the
+# status/deleted_at/deleted_by/timestamp bookkeeping needed to identify it
+# and explain why it can never be reactivated. None of these operational/
+# config fields survive, so nothing about a tombstone can expose or
+# re-activate the campaign (a destination URL, a reward pool, a mission
+# config, ...).
+_TOMBSTONE_UNSET_FIELDS = (
+    "description", "button_text", "banner_url",
+    "schedule", "telegram", "destination",
+    "mission_config", "mission_pool", "registration", "reward_config",
+    "mechanic",
+)
 
 
 def _require_admin():
@@ -110,9 +123,6 @@ def _ensure_indexes() -> None:
         col.create_index([("schedule.ends_at", 1)], name="ix_gc_campaigns_ends_at")
         col.create_index([("priority", -1)], name="ix_gc_campaigns_priority")
         col.create_index([("destination.provider_id", 1)], name="ix_gc_campaigns_provider_id")
-        database.db[_DELETED_IDS_COLLECTION].create_index(
-            [("campaign_id", 1)], name="ux_gc_deleted_campaign_ids_campaign_id", unique=True
-        )
     except Exception:
         logger.warning("[CAMPAIGN_CENTRE] index creation failed", exc_info=True)
 
@@ -159,7 +169,18 @@ def log_funnel_event(event: str, *, campaign_id: str, user_id: int | None = None
 
 
 def get_campaign(campaign_id: str) -> dict | None:
-    return database.db["gc_campaigns"].find_one({"campaign_id": campaign_id})
+    """The single lookup every caller (admin routes, public routes, and
+    every other module — mission_pool, campaign_registration, tournament_*,
+    subscription_verification_api, ...) goes through. A deleted campaign's
+    document still physically exists as a tombstone (see delete_campaign /
+    _TOMBSTONE_UNSET_FIELDS), so it must never be returned here — this one
+    check is what makes a deleted campaign invisible/inert everywhere: it
+    can't be published, registered against, submitted a mission entry for,
+    or shown in any admin/public view that reads through this function."""
+    doc = database.db["gc_campaigns"].find_one({"campaign_id": campaign_id})
+    if doc is not None and doc.get("status") == "deleted":
+        return None
+    return doc
 
 
 def _as_utc(value: datetime | None) -> datetime | None:
@@ -423,7 +444,11 @@ def list_campaigns():
     if err:
         return err
 
-    query: dict = {}
+    # Deleted campaigns are tombstoned in place (see delete_campaign) rather
+    # than removed, so the default listing must explicitly exclude them —
+    # status_filter can never request "deleted" itself since it's not in
+    # CAMPAIGN_STATUSES, but it does overwrite this default when set.
+    query: dict = {"status": {"$ne": "deleted"}}
     status_filter = (request.args.get("status") or "").strip()
     if status_filter:
         if status_filter not in CAMPAIGN_STATUSES:
@@ -471,7 +496,12 @@ def create_campaign():
     campaign_id = (body.get("campaign_id") or "").strip()
     if not campaign_id:
         return jsonify({"status": "error", "code": "missing_campaign_id"}), 400
-    if _campaign_id_was_deleted(campaign_id):
+    # A previously-deleted campaign_id still occupies a (tombstoned) document
+    # in gc_campaigns — checked explicitly so this case gets its own error
+    # code; an id that's still actively in use falls through to the
+    # unique-index/DuplicateKeyError handling below as before.
+    existing_doc = database.db["gc_campaigns"].find_one({"campaign_id": campaign_id})
+    if existing_doc is not None and existing_doc.get("status") == "deleted":
         return jsonify({"status": "error", "code": "campaign_id_previously_deleted"}), 409
 
     updates, code = _validate_body(body)
@@ -579,7 +609,16 @@ def update_campaign(campaign_id: str):
     updates["updated_at"] = datetime.now(timezone.utc)
     updates["updated_by"] = (admin or {}).get("usernameLower") or str((admin or {}).get("id", ""))
 
-    database.db["gc_campaigns"].update_one({"campaign_id": campaign_id}, {"$set": updates})
+    # Guarded by status != "deleted" too, not just campaign_id: closes the
+    # race where delete_campaign tombstones this exact campaign_id between
+    # the get_campaign() read above and this write — without the guard the
+    # update would land on the tombstone document itself (same campaign_id,
+    # never removed from the collection) and could partially resurrect it.
+    result = database.db["gc_campaigns"].update_one(
+        {"campaign_id": campaign_id, "status": {"$ne": "deleted"}}, {"$set": updates}
+    )
+    if result.matched_count == 0:
+        return jsonify({"status": "error", "code": "not_found"}), 404
     _log_audit("campaign_updated", admin, campaign_id, {"fields": list(updates.keys())})
     log_funnel_event("campaign_updated", campaign_id=campaign_id, campaign_type=doc.get("type"), source="admin")
     return jsonify({"status": "ok"})
@@ -616,8 +655,13 @@ def _transition(campaign_id: str, admin: dict, new_status: str, action: str):
                     return jsonify({"status": "error", "code": "destination_not_ready"}), 400
                 if not provider_is_usable_for_results(provider):
                     return jsonify({"status": "error", "code": "provider_inactive"}), 400
+    # status != "deleted" closes the same race as update_campaign's guard
+    # above: delete_campaign never removes the document, it tombstones it in
+    # place, so a blind {"campaign_id": campaign_id} filter here could land
+    # on — and partially resurrect — a tombstone that was written between
+    # the get_campaign() read above and this write.
     result = database.db["gc_campaigns"].update_one(
-        {"campaign_id": campaign_id},
+        {"campaign_id": campaign_id, "status": {"$ne": "deleted"}},
         {"$set": {"status": new_status, "updated_at": datetime.now(timezone.utc)}},
     )
     if result.matched_count == 0:
@@ -664,10 +708,14 @@ def duplicate_campaign(campaign_id: str):
         return jsonify({"status": "error", "code": "not_found"}), 404
     body = request.get_json(force=True, silent=True) or {}
     new_campaign_id = (body.get("campaign_id") or f"{campaign_id}-copy").strip()
-    if get_campaign(new_campaign_id):
+    # One raw lookup (not get_campaign(), which hides tombstones) covers
+    # both conflict cases: an id still actively in use, and an id that was
+    # permanently reserved by a previous deletion (see _TOMBSTONE_UNSET_FIELDS).
+    existing_new = database.db["gc_campaigns"].find_one({"campaign_id": new_campaign_id})
+    if existing_new is not None:
+        if existing_new.get("status") == "deleted":
+            return jsonify({"status": "error", "code": "campaign_id_previously_deleted"}), 409
         return jsonify({"status": "error", "code": "duplicate_campaign_id"}), 409
-    if _campaign_id_was_deleted(new_campaign_id):
-        return jsonify({"status": "error", "code": "campaign_id_previously_deleted"}), 409
 
     new_doc = dict(doc)
     new_doc.pop("_id", None)
@@ -706,37 +754,69 @@ def duplicate_campaign(campaign_id: str):
 def delete_campaign(campaign_id: str):
     """Permanently deletes a campaign. Only allowed once the campaign is no
     longer live/paused (see ``_DELETABLE_STATUSES``) — the status check and
-    the delete happen in one atomic ``find_one_and_delete`` so a campaign
-    cannot be published in the window between checking its status and
-    removing it.
+    the delete happen in one atomic ``find_one_and_update`` (status="deleted"
+    tombstone, see ``_TOMBSTONE_UNSET_FIELDS``) so a campaign cannot be
+    published in the window between checking its status and deleting it.
+
+    The document is never actually removed from ``gc_campaigns`` — it is
+    atomically converted in place into a minimal tombstone. This is what
+    makes the deletion, and the campaign_id reservation, one indivisible
+    operation: the collection's pre-existing unique index on campaign_id
+    (``ux_gc_campaigns_campaign_id``) permanently blocks any future insert
+    under that id the instant the tombstone exists, with no second
+    collection write that could itself fail and reopen a reuse window (see
+    ``_TOMBSTONE_UNSET_FIELDS`` for why). ``get_campaign()`` treats a
+    status="deleted" document as not found everywhere it's called from, so
+    the campaign is simultaneously invisible/inert to every admin, public,
+    and processing code path the moment this update lands.
 
     Historical winner/claim/reward/registration rows (``mission_entries``,
     ``mission_identity_claims``, ``campaign_rewards``, ``tournament_results``,
     ``campaign_registrations``) are deliberately left in place for
     traceability — they stay valid, campaign_id-keyed rows after the parent
-    campaign document is gone. Only campaign-exclusive *operational* state
+    campaign becomes a tombstone. Only campaign-exclusive *operational* state
     that has no meaning without the campaign (``campaign_registration_state``
     — per-user dismissal/reminder state) is cascade-deleted, scoped by the
     exact campaign_id. Shared/provider-scoped collections (``gc_providers``,
     ``tournament_nonces``, ``campaign_provider_integration_status``,
     ``campaign_subscription_cache``) are untouched — they are keyed by
     provider/channel, not owned by any single campaign.
-
-    Because that history survives under the original campaign_id, the id
-    itself is permanently reserved afterwards (``_DELETED_IDS_COLLECTION``)
-    so create/duplicate can never recreate a campaign that would silently
-    inherit it (see ``_campaign_id_was_deleted``).
     """
     admin, err = _require_admin()
     if err:
         return err
 
-    doc = database.db["gc_campaigns"].find_one_and_delete(
-        {"campaign_id": campaign_id, "status": {"$in": sorted(_DELETABLE_STATUSES)}}
+    now = datetime.now(timezone.utc)
+    admin_identity = (admin or {}).get("usernameLower") or str((admin or {}).get("id", ""))
+
+    # The one atomic operation that both authorizes the deletion (status
+    # must still be draft/archived/ended) and performs it. return_document=
+    # BEFORE hands back the full pre-tombstone document — the correct
+    # snapshot source below — while the write already in flight strips it
+    # down to a minimal tombstone; there is no window between "checked
+    # eligible" and "deleted" for another request to land in.
+    doc = database.db["gc_campaigns"].find_one_and_update(
+        {"campaign_id": campaign_id, "status": {"$in": sorted(_DELETABLE_STATUSES)}},
+        {
+            "$set": {
+                "status": "deleted",
+                "deleted_at": now,
+                "deleted_by": admin_identity,
+                "updated_at": now,
+            },
+            "$unset": {field: "" for field in _TOMBSTONE_UNSET_FIELDS},
+        },
+        return_document=ReturnDocument.BEFORE,
     )
     if doc is None:
-        existing = get_campaign(campaign_id)
-        if existing is None:
+        # No document matched the atomic filter — either the campaign_id
+        # was never created, it's already a tombstone (status="deleted" is
+        # not in _DELETABLE_STATUSES, so both look identical to the filter
+        # above), or it's currently live/paused/scheduled. A raw read
+        # (bypassing get_campaign(), which would itself hide the tombstone)
+        # is needed to tell these apart for the right status code.
+        existing = database.db["gc_campaigns"].find_one({"campaign_id": campaign_id})
+        if existing is None or existing.get("status") == "deleted":
             return jsonify({"status": "error", "code": "not_found"}), 404
         return jsonify({
             "status": "error",
@@ -744,16 +824,16 @@ def delete_campaign(campaign_id: str):
             "campaign_status": existing.get("status"),
         }), 409
 
-    # The campaign document is already gone at this point — the atomic
-    # find_one_and_delete above is the only step that can turn this request
-    # into a 404/409, and its returned `doc` (not a fresh get_campaign()
-    # read, which could race with something else) is the source of truth
-    # for everything logged below. Every remaining step is best-effort
-    # bookkeeping for a deletion that has already happened, so none of it
-    # may surface as a 500 — that would tell the admin the delete failed
-    # and invite a retry of a campaign that's already gone. Each step is
-    # isolated and any failure is logged at error level for operational
-    # follow-up instead of raising.
+    # The campaign is already tombstoned at this point — the atomic
+    # find_one_and_update above is the only step that can turn this request
+    # into a 404/409, and its returned `doc` (the state immediately BEFORE
+    # the tombstone write, not a fresh read that could race with something
+    # else) is the source of truth for everything logged below. Every
+    # remaining step is best-effort bookkeeping for a deletion that has
+    # already happened, so none of it may surface as a 500 — that would
+    # tell the admin the delete failed and invite a retry of a campaign
+    # that's already gone. Each step is isolated and any failure is logged
+    # at error level for operational follow-up instead of raising.
     cleanup_warnings: list[str] = []
 
     try:
@@ -764,19 +844,6 @@ def delete_campaign(campaign_id: str):
             campaign_id, exc_info=True,
         )
         cleanup_warnings.append("registration_state_cleanup_failed")
-
-    try:
-        database.db[_DELETED_IDS_COLLECTION].update_one(
-            {"campaign_id": campaign_id},
-            {"$setOnInsert": {"campaign_id": campaign_id, "deleted_at": datetime.now(timezone.utc)}},
-            upsert=True,
-        )
-    except Exception:
-        logger.error(
-            "[CAMPAIGN_CENTRE] post_delete_id_reservation_failed campaign_id=%s",
-            campaign_id, exc_info=True,
-        )
-        cleanup_warnings.append("id_reservation_failed")
 
     snapshot = _serialize(doc)
     try:
