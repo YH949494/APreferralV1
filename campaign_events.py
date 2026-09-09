@@ -27,6 +27,7 @@ EVENT_TYPES = frozenset({
     # Campaign lifecycle
     "campaign_created", "campaign_updated", "campaign_published",
     "campaign_paused", "campaign_archived", "campaign_previewed",
+    "campaign_deleted",
     # Public funnel
     "campaign_view", "campaign_click", "subscribe_click",
     "subscription_check", "subscription_pass", "subscription_fail",

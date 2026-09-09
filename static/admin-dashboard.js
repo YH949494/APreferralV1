@@ -4858,6 +4858,109 @@
     "This will immediately hide currently active winner rewards for this campaign.\n\n" +
     "Allocated vouchers will remain recorded and will not be returned to inventory.";
 
+  // ---------- Permanent campaign deletion (Campaign Centre) ----------
+  //
+  // Deliberately not built on confirmTyped(): a delete can fail server-side
+  // (e.g. the campaign went live/paused in another tab a moment ago), and
+  // the requirement is to keep the modal open with the backend error
+  // visible rather than closing on submit like the generic confirm modals.
+  function openGcDeleteModal(campaignId, campaignName) {
+    // Built with createElement/appendChild (not the innerHTML+querySelector
+    // pattern confirmTyped/confirmSimple use) so every interactive node is
+    // reached by direct reference — no CSS-id lookups needed to wire it up.
+    var overlay = document.createElement("div");
+    overlay.className = "modal-overlay";
+
+    var box = document.createElement("div");
+    box.className = "modal-box";
+    overlay.appendChild(box);
+
+    var h3 = document.createElement("h3");
+    h3.textContent = "Delete campaign permanently?";
+    box.appendChild(h3);
+
+    var nameP = document.createElement("p");
+    nameP.innerHTML = "<strong>" + esc(campaignName || campaignId) + "</strong><br/><span class=\"sub\">" + esc(campaignId) + "</span>";
+    box.appendChild(nameP);
+
+    var warnP = document.createElement("p");
+    warnP.className = "sub";
+    warnP.textContent = "This permanently deletes the campaign and cannot be undone.";
+    box.appendChild(warnP);
+
+    var typeP = document.createElement("p");
+    typeP.innerHTML = "Type <strong>" + esc(campaignId) + "</strong> to confirm.";
+    box.appendChild(typeP);
+
+    var input = document.createElement("input");
+    input.className = "filter-input";
+    input.placeholder = "Type " + campaignId;
+    input.autocomplete = "off";
+    box.appendChild(input);
+
+    var errorEl = document.createElement("div");
+    errorEl.className = "sub";
+    errorEl.style.display = "none";
+    errorEl.style.color = "var(--bad)";
+    errorEl.style.marginTop = "6px";
+    box.appendChild(errorEl);
+
+    var actions = document.createElement("div");
+    actions.className = "modal-actions";
+    box.appendChild(actions);
+
+    var cancelBtn = document.createElement("button");
+    cancelBtn.className = "btn";
+    cancelBtn.textContent = "Cancel";
+    actions.appendChild(cancelBtn);
+
+    var confirmBtn = document.createElement("button");
+    confirmBtn.className = "btn danger";
+    confirmBtn.textContent = "Delete permanently";
+    confirmBtn.disabled = true;
+    actions.appendChild(confirmBtn);
+
+    document.body.appendChild(overlay);
+    if (input.focus) input.focus();
+
+    function matches() { return (input.value || "").trim() === campaignId; }
+    function syncEnabled() { confirmBtn.disabled = !matches(); }
+    input.addEventListener("input", syncEnabled);
+
+    function close() { overlay.remove(); }
+    cancelBtn.addEventListener("click", close);
+    overlay.addEventListener("click", function (e) { if (e.target === overlay) close(); });
+    input.addEventListener("keydown", function (e) { if (e.key === "Escape") close(); });
+
+    confirmBtn.addEventListener("click", function () {
+      if (confirmBtn.disabled || !matches() || confirmBtn.dataset.loading === "1") return;
+      errorEl.style.display = "none";
+      if (!btnStart(confirmBtn, "Deleting...")) return;
+      input.disabled = true;
+      apiDelete("/api/admin/campaign-centre/campaigns/" + encodeURIComponent(campaignId)).then(function (res) {
+        if (!res.ok || res.d.status !== "ok") {
+          btnStop(confirmBtn);
+          input.disabled = false;
+          syncEnabled();
+          errorEl.textContent = "❌ " + ((res.d && (res.d.code === "invalid_status_for_deletion"
+            ? "Cannot delete a " + res.d.campaign_status + " campaign — archive it first."
+            : res.d.code)) || "delete_failed");
+          errorEl.style.display = "block";
+          return;
+        }
+        close();
+        toast("✅ Campaign deleted", "success");
+        loadGcCampaigns(true);
+      }).catch(function (e) {
+        btnStop(confirmBtn);
+        input.disabled = false;
+        syncEnabled();
+        errorEl.textContent = "❌ " + e.message;
+        errorEl.style.display = "block";
+      });
+    });
+  }
+
   function loadGcCampaigns(force) {
     statePanel("gc-campaigns-body", "loading", "Loading campaigns…");
     api("/api/admin/gc-campaigns").then(function (data) {
@@ -4879,7 +4982,8 @@
           '<button class="btn" data-gc-action="preview" data-id="' + esc(c.campaign_id) + '">Preview Campaign</button> ' +
           '<button class="btn" data-gc-action="registration" data-id="' + esc(c.campaign_id) + '">' +
             ((c.registration && c.registration.enabled) ? "Registration ✅" : "Registration") + '</button> ' +
-          '<button class="btn" data-gc-action="duplicate" data-id="' + esc(c.campaign_id) + '">Duplicate</button>' +
+          '<button class="btn" data-gc-action="duplicate" data-id="' + esc(c.campaign_id) + '">Duplicate</button> ' +
+          '<button class="btn danger" data-gc-action="delete" data-id="' + esc(c.campaign_id) + '" data-name="' + esc(c.name || "") + '">Delete</button>' +
           (c.mechanic === "mission_pool"
             ? ' <button class="btn" data-gc-action="mission" data-id="' + esc(c.campaign_id) + '">Open</button>'
             : "") +
@@ -4990,6 +5094,7 @@
       else if (action === "preview") api("/api/admin/gc-campaigns/" + id + "/preview").then(function (r) {
         alert("Card: " + JSON.stringify(r.card, null, 2) + "\n\nBadges: " + (r.admin_badges || []).join(", ") + "\n\nVisibility: " + JSON.stringify(r.effective_visibility));
       });
+      else if (action === "delete") openGcDeleteModal(id, btn.dataset.name);
     });
   }
 

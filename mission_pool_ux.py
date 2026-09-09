@@ -629,10 +629,15 @@ def admin_mission_campaigns():
     # `mechanic` is stamped server-side by campaign_centre for every campaign
     # it writes; `type` is matched too so a document written before the
     # mechanic field existed (or by a direct DB fix) still appears here
-    # rather than silently vanishing from the operator's list.
+    # rather than silently vanishing from the operator's list. status !=
+    # "deleted" excludes tombstones (campaign_centre.delete_campaign converts
+    # a deleted campaign's document in place rather than removing it, and its
+    # `type` field survives that tombstoning — so the `type` clause above
+    # would otherwise still match it).
     docs = list(database.db["gc_campaigns"].find(
         {"$or": [{"mechanic": mp.MECHANIC_MISSION_POOL},
-                 {"type": mp.CAMPAIGN_TYPE_MISSION_POOL}]},
+                 {"type": mp.CAMPAIGN_TYPE_MISSION_POOL}],
+         "status": {"$ne": "deleted"}},
         sort=[("created_at", -1)],
         limit=200,
     ))
