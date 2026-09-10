@@ -5,7 +5,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
 import pytest
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, WebAppInfo
+from telegram import CopyTextButton, InlineKeyboardButton, InlineKeyboardMarkup, Update, WebAppInfo
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
@@ -53,6 +53,7 @@ def _load_env():
         "InlineKeyboardButton": InlineKeyboardButton,
         "InlineKeyboardMarkup": InlineKeyboardMarkup,
         "WebAppInfo": WebAppInfo,
+        "CopyTextButton": CopyTextButton,
         "ParseMode": ParseMode,
         "html_escape": html.escape,
         "quote": quote,
@@ -270,14 +271,27 @@ def test_new_user_referral_deeplink_does_not_send_normal_welcome_keyboard(deepli
     assert len(buttons) == 2  # Share button + Copy Link button
 
 
-def test_new_user_referral_deeplink_has_copy_link_button(deeplink_env):
+def test_new_user_referral_deeplink_has_native_copy_link_button(deeplink_env):
+    deeplink_env._state["result"] = {
+        "ok": True,
+        "message": "irrelevant",
+        "invite_link": "https://t.me/+nativeCopyHash",
+        "playback_url": None,
+        "hook_text": None,
+    }
     update = _FakeUpdate(user_id=207)
     asyncio.run(deeplink_env(update, _FakeContext()))
 
     buttons = _flat_buttons(deeplink_env._replies[0]["reply_markup"])
-    copy_btns = [b for b in buttons if b.text == "📋 Copy Link"]
+    copy_btns = [b for b in buttons if b.text == "📋 Copy Referral Link"]
     assert len(copy_btns) == 1
-    assert copy_btns[0].callback_data == "copy_referral_link"
+    # Real Telegram copy-to-clipboard button (Bot API 8.0 CopyTextButton),
+    # not a callback_data workaround -- and it copies the exact same
+    # canonical invite link the Share button uses, never a second link.
+    assert copy_btns[0].callback_data is None
+    assert copy_btns[0].url is None
+    assert copy_btns[0].copy_text is not None
+    assert copy_btns[0].copy_text.text == "https://t.me/+nativeCopyHash"
 
 
 # ---------------------------------------------------------------------------
@@ -339,7 +353,7 @@ def test_existing_user_referral_deeplink_no_normal_start_keyboard(deeplink_env):
     asyncio.run(deeplink_env(update, _FakeContext()))
 
     buttons = _flat_buttons(deeplink_env._replies[0]["reply_markup"])
-    assert all(b.text in ("📤 Share Referral Link", "📋 Copy Link") for b in buttons)
+    assert all(b.text in ("📤 Share Referral Link", "📋 Copy Referral Link") for b in buttons)
 
 
 # ---------------------------------------------------------------------------
