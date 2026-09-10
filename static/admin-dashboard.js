@@ -5376,17 +5376,21 @@
     return null;
   }
 
-  // Server reasons other than "not live yet" — that one is expected right up
-  // until publish and isn't a checklist mismatch. Any other reason left
-  // outstanding means the server disagrees with a checklist that otherwise
-  // reads "ready", and server truth wins (regression constraint #5).
-  function gcNonStatusServerReasons(campaign) {
-    var reasons = ((campaign && campaign.effective_visibility) || {}).reasons || [];
-    return reasons.filter(function (r) { return String(r).indexOf("status is") !== 0; });
+  // Whether campaign_centre._transition() would even accept a "live" target
+  // from this status — mirrors _VALID_STATUS_TRANSITIONS exactly ("live" is
+  // reachable from draft/scheduled/paused, and live->live is a no-op;
+  // never from ended/archived). Ready-to-Publish must be judged against
+  // this actual publish gate, not against effective_visibility.reasons:
+  // that field answers "is this live campaign publicly visible right now"
+  // (it includes schedule timing, e.g. "scheduled to start at <future
+  // date>"), a different question from "would clicking Publish succeed" —
+  // a campaign scheduled to start tomorrow is perfectly publishable today.
+  function gcCanTransitionToLive(status) {
+    return ["draft", "scheduled", "paused", "live"].indexOf(status) !== -1;
   }
 
   function gcIsReadyToPublish(rows, campaign) {
-    return !gcFirstIncompleteRequiredRow(rows) && gcNonStatusServerReasons(campaign).length === 0;
+    return !gcFirstIncompleteRequiredRow(rows) && gcCanTransitionToLive((campaign || {}).status);
   }
 
   // The deep link is only ever populated server-side for a registration-
@@ -5438,10 +5442,11 @@
     if (gcIsReadyToPublish(rows, campaign)) {
       return '<button class="btn" data-cd-goto="publish-list">✓ Ready to Publish — go to Campaigns list</button>';
     }
-    // Checklist reads complete but the server still reports a blocker
-    // (constraint #5) — never claim readiness here; point at the server's
-    // own reasons instead of guessing why.
-    return '<div class="sub">Setup looks complete, but the server reports outstanding issues — see Technical Details below.</div>';
+    // Every applicable row is complete, but the campaign's current status
+    // (ended/archived) can never transition to "live" — never claim
+    // readiness for a campaign that can't actually be published.
+    return '<div class="sub">Setup is complete, but a ‘' + esc((campaign && campaign.status) || "") +
+      '’ campaign can’t be published — see Technical Details below.</div>';
   }
 
   function gcCampaignDetailShareHtml(shareState) {

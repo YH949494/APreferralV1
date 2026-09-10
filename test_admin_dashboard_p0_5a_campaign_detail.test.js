@@ -76,7 +76,7 @@ const PURE_SRC = slice(
 
 function loadPure() {
   return runInSandbox(PURE_SRC + "\nthis.__x = { computeSetupChecklist, gcChecklistProgress, " +
-    "gcFirstIncompleteRequiredRow, gcNonStatusServerReasons, gcIsReadyToPublish, gcComputeShareState, " +
+    "gcFirstIncompleteRequiredRow, gcCanTransitionToLive, gcIsReadyToPublish, gcComputeShareState, " +
     "gcCampaignDetailChecklistHtml, gcCampaignDetailContinueHtml, gcCampaignDetailShareHtml, " +
     "gcCampaignDetailAdvancedHtml, gcCampaignDetailTechnicalHtml };", { esc, ccUtcToKlDisplay }).__x;
 }
@@ -318,16 +318,51 @@ test("all complete campaign -> Ready to Publish, not Continue Setup", () => {
   assert.doesNotMatch(html, /Continue Setup/);
 });
 
-test("checklist complete but server still reports a blocker: prefer server truth, no false Ready state", () => {
+// Regression for a Codex review finding on the first version of this PR:
+// Ready-to-Publish must be judged against the real publish gate
+// (_transition()'s status-transition validity + field completeness), never
+// against effective_visibility.reasons — that field encodes public-
+// visibility *timing* (has it started/ended yet), a different question
+// from "would clicking Publish succeed right now".
+
+test("draft campaign scheduled to start in the future is still Ready to Publish (not a visibility/timing question)", () => {
   const campaign = tournamentCampaign({
-    effective_visibility: { publicly_visible: false, reasons: ["status is 'draft', not 'live'", "linked provider is inactive"] },
+    schedule: { starts_at: "2027-01-01T00:00:00Z", ends_at: null },
+    effective_visibility: {
+      publicly_visible: false,
+      reasons: ["status is 'draft', not 'live'", "scheduled to start at 2027-01-01T00:00:00+00:00"],
+    },
   });
   const rows = M.computeSetupChecklist(campaign, [activeProvider], []);
-  assert.equal(M.gcFirstIncompleteRequiredRow(rows), null, "checklist itself reads complete");
-  assert.equal(M.gcIsReadyToPublish(rows, campaign), false, "server reason must override a false-ready checklist");
+  assert.equal(M.gcFirstIncompleteRequiredRow(rows), null);
+  assert.equal(M.gcIsReadyToPublish(rows, campaign), true);
+  const html = M.gcCampaignDetailContinueHtml(rows, campaign);
+  assert.match(html, /Ready to Publish/);
+});
+
+test("archived campaign with every field complete is never Ready to Publish (archived cannot transition to live)", () => {
+  const campaign = tournamentCampaign({ status: "archived" });
+  const rows = M.computeSetupChecklist(campaign, [activeProvider], []);
+  assert.equal(M.gcFirstIncompleteRequiredRow(rows), null, "fields are all complete");
+  assert.equal(M.gcCanTransitionToLive("archived"), false);
+  assert.equal(M.gcIsReadyToPublish(rows, campaign), false);
   const html = M.gcCampaignDetailContinueHtml(rows, campaign);
   assert.doesNotMatch(html, /Ready to Publish/);
-  assert.match(html, /Technical Details/);
+  assert.match(html, /can.t be published/);
+});
+
+test("ended campaign with every field complete is never Ready to Publish", () => {
+  const campaign = tournamentCampaign({ status: "ended" });
+  const rows = M.computeSetupChecklist(campaign, [activeProvider], []);
+  assert.equal(M.gcCanTransitionToLive("ended"), false);
+  assert.equal(M.gcIsReadyToPublish(rows, campaign), false);
+});
+
+test("paused campaign with every field complete is Ready to Publish (paused->live is valid)", () => {
+  const campaign = tournamentCampaign({ status: "paused" });
+  const rows = M.computeSetupChecklist(campaign, [activeProvider], []);
+  assert.equal(M.gcCanTransitionToLive("paused"), true);
+  assert.equal(M.gcIsReadyToPublish(rows, campaign), true);
 });
 
 // ---------------------------------------------------------------------
