@@ -7961,6 +7961,39 @@
     ]}
   ];
 
+  // Purely a sidebar-presentation grouping over MODULES — every module key
+  // must appear in exactly one group. Grouping does not change routing,
+  // views, or any module's tabs.
+  var MODULE_GROUPS = [
+    { label: "Operate", keys: ["dashboard", "segments", "analytics"] },
+    { label: "Campaigns", keys: ["campaign", "growth", "affiliate", "referral"] },
+    { label: "Engagement", keys: ["community", "welcome", "reactivation", "automation"] },
+    { label: "Vouchers", keys: ["voucher"] },
+    { label: "Settings", keys: ["settings"] }
+  ];
+
+  var COLLAPSED_GROUPS_KEY = "apr_admin_collapsed_groups";
+
+  function loadCollapsedGroups() {
+    try {
+      var raw = window.localStorage.getItem(COLLAPSED_GROUPS_KEY);
+      return raw ? JSON.parse(raw) : {};
+    } catch (e) { return {}; }
+  }
+
+  function saveCollapsedGroups(state) {
+    try { window.localStorage.setItem(COLLAPSED_GROUPS_KEY, JSON.stringify(state)); } catch (e) { /* best-effort only */ }
+  }
+
+  var collapsedGroups = loadCollapsedGroups();
+
+  function groupLabelForModule(moduleKey) {
+    for (var i = 0; i < MODULE_GROUPS.length; i++) {
+      if (MODULE_GROUPS[i].keys.indexOf(moduleKey) !== -1) return MODULE_GROUPS[i].label;
+    }
+    return null;
+  }
+
   var currentModuleKey = null;
   var currentTabIndex = 0;
   var currentSettingsCategory = null;
@@ -7990,15 +8023,32 @@
     var el = $("#nav-modules");
     if (!el) return;
     var html = "";
-    MODULES.forEach(function (m) {
-      html += '<button class="module-btn" data-module="' + m.key + '">' +
-        '<span class="module-icon">' + m.icon + '</span><span class="module-label">' + esc(m.label) + '</span></button>';
+    MODULE_GROUPS.forEach(function (g) {
+      var isCollapsed = !!collapsedGroups[g.label];
+      html += '<div class="nav-group' + (isCollapsed ? " collapsed" : "") + '" data-group="' + esc(g.label) + '">' +
+        '<button type="button" class="nav-group-header" data-group-toggle="' + esc(g.label) + '">' +
+        '<span class="nav-group-caret">▾</span><span class="nav-group-label">' + esc(g.label) + '</span></button>' +
+        '<div class="nav-group-body">';
+      g.keys.forEach(function (key) {
+        var m = moduleByKey(key);
+        if (!m) return;
+        html += '<button class="module-btn" data-module="' + m.key + '">' +
+          '<span class="module-icon">' + m.icon + '</span><span class="module-label">' + esc(m.label) + '</span></button>';
+      });
+      html += "</div></div>";
     });
     el.innerHTML = html;
   }
 
   function renderSidebarActive(moduleKey) {
     $all(".module-btn").forEach(function (b) { b.classList.toggle("active", b.dataset.module === moduleKey); });
+    var groupLabel = groupLabelForModule(moduleKey);
+    if (groupLabel && collapsedGroups[groupLabel]) {
+      delete collapsedGroups[groupLabel];
+      saveCollapsedGroups(collapsedGroups);
+      var groupEl = $('.nav-group[data-group="' + groupLabel + '"]');
+      if (groupEl) groupEl.classList.remove("collapsed");
+    }
   }
 
   function renderTabBar(moduleKey, activeIndex) {
@@ -8219,6 +8269,16 @@
     renderSidebar();
     $all(".module-btn").forEach(function (b) {
       b.addEventListener("click", function () { selectModule(b.dataset.module); });
+    });
+    $all(".nav-group-header").forEach(function (h) {
+      h.addEventListener("click", function () {
+        var label = h.dataset.groupToggle;
+        var groupEl = h.closest(".nav-group");
+        if (!groupEl) return;
+        var collapsed = groupEl.classList.toggle("collapsed");
+        if (collapsed) collapsedGroups[label] = true; else delete collapsedGroups[label];
+        saveCollapsedGroups(collapsedGroups);
+      });
     });
     $("#tab-bar").addEventListener("click", function (e) {
       var btn = e.target.closest(".tab-btn[data-tab-idx]");
