@@ -3273,8 +3273,19 @@
     return schema.category || null;
   }
 
-  function msRenderGroup(group, schema, values, fieldNames) {
+  // When a shared group (message_templates, urls) is filtered down to a
+  // subset of its fields for one Settings tab, prefer a label specific to
+  // that tab (category_labels) over the group's generic label — otherwise
+  // e.g. the Affiliate tab shows an accordion titled "Notification
+  // Templates" around a single, out-of-context field.
+  function msGroupLabel(schema, category) {
+    var overrides = schema.category_labels || {};
+    return (category && overrides[category]) || schema.label || "";
+  }
+
+  function msRenderGroup(group, schema, values, fieldNames, category) {
     var names = fieldNames || Object.keys(schema.fields);
+    var label = msGroupLabel(schema, category) || group;
     var fieldsHtml = names.map(function (name) {
       var def = schema.fields[name];
       var value = values[name];
@@ -3282,10 +3293,10 @@
     }).join("");
     return (
       '<details class="ms-group" id="ms-group-' + group + '" open>' +
-      "<summary>" + esc(schema.label || group) + "</summary>" +
+      "<summary>" + esc(label) + "</summary>" +
       (schema.description ? '<div class="ms-desc">' + esc(schema.description) + "</div>" : "") +
       '<div class="ms-body"><div class="ms-grid">' + fieldsHtml + "</div>" +
-      '<div class="ms-actions"><button class="btn primary" id="ms-save-' + group + '">Save ' + esc(schema.label || group) + '</button><span class="ms-status" id="ms-status-' + group + '"></span></div>' +
+      '<div class="ms-actions"><button class="btn primary" id="ms-save-' + group + '">Save ' + esc(label) + '</button><span class="ms-status" id="ms-status-' + group + '"></span></div>' +
       "</div></details>"
     );
   }
@@ -3309,7 +3320,7 @@
           });
           if (!fieldNames.length) return;
           matchedGroups.push(group);
-          html += msRenderGroup(group, schema, managedSettingsState.values[group] || {}, fieldNames);
+          html += msRenderGroup(group, schema, managedSettingsState.values[group] || {}, fieldNames, category);
         });
         if (!matchedGroups.length && category !== "voucher_rules") {
           $("#managed-settings-body").innerHTML = emptyState("No configurable settings are available in this category yet.");
