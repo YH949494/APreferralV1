@@ -307,6 +307,12 @@
     return SUBMIT_ERROR_COPY[code] || "We couldn't submit your answer. Please try again.";
   }
 
+  // Retry copy (§4, §8). Deliberately generic -- never the correct answer, a
+  // hint, or any detail derived from the comparison.
+  var RETRY_MSG = "❌ Not quite. Try again.";
+  var COOLDOWN_MSG = "❌ Not quite. Please wait a moment before trying again.";
+  var EXHAUSTED_MSG = "❌ No more attempts available for this mission.";
+
   // ---------------------------------------------------------------------
   // Rendering
   // ---------------------------------------------------------------------
@@ -452,6 +458,37 @@
         if (data.status === "ok" && data.submitted) {
           track("mission_submit_success", { campaign_id: view.campaign_id });
           showSubmitted(root, view);
+          return;
+        }
+        // Wrong answer on a correct-answer mission: no final entry was
+        // created server-side, so the form STAYS active and the user can
+        // try again (§8). Never rendered as "Mission completed".
+        if (data.status === "ok" && data.state === "incorrect_retry") {
+          track("mission_submit_incorrect", { campaign_id: view.campaign_id });
+          submitBtn.disabled = false;
+          submitBtn.textContent = "Submit Mission";
+          msg.className = "mp-msg mp-msg-error";
+          msg.textContent = RETRY_MSG + (typeof data.attempts_remaining === "number"
+            ? "\n" + data.attempts_remaining + " attempts remaining" : "");
+          msg.style.display = "block";
+          return;
+        }
+        if (data.status === "ok" && data.state === "retry_cooldown") {
+          track("mission_submit_incorrect", { campaign_id: view.campaign_id, cooldown: true });
+          submitBtn.disabled = false;
+          submitBtn.textContent = "Submit Mission";
+          msg.className = "mp-msg mp-msg-error";
+          msg.textContent = COOLDOWN_MSG;
+          msg.style.display = "block";
+          return;
+        }
+        if (data.status === "ok" && data.state === "attempts_exhausted") {
+          track("mission_submit_attempts_exhausted", { campaign_id: view.campaign_id });
+          submitBtn.disabled = true;
+          submitBtn.textContent = "No attempts remaining";
+          msg.className = "mp-msg mp-msg-error";
+          msg.textContent = EXHAUSTED_MSG;
+          msg.style.display = "block";
           return;
         }
         track("mission_submit_error", { campaign_id: view.campaign_id, code: (data && data.code) || "unknown" });
