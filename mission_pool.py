@@ -106,6 +106,35 @@ def mechanic_for_type(campaign_type: str | None) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Admin-only visibility (mirrors the standard-drop eligibility.mode ==
+# "admin_only" concept for Mission Pool campaigns)
+# ---------------------------------------------------------------------------
+
+VISIBILITY_PUBLIC = "public"
+VISIBILITY_ADMIN_ONLY = "admin_only"
+
+
+def campaign_visibility(campaign: dict | None) -> str:
+    raw = (campaign or {}).get("visibility")
+    return raw if raw == VISIBILITY_ADMIN_ONLY else VISIBILITY_PUBLIC
+
+
+def is_admin_only(campaign: dict | None) -> bool:
+    return campaign_visibility(campaign) == VISIBILITY_ADMIN_ONLY
+
+
+def is_cached_admin_user(user_json: dict) -> bool:
+    """The one canonical admin-identity check (vouchers._is_cached_admin —
+    the same source of truth the standard-drop admin preview and the admin
+    dashboard itself use), wrapped so callers here never need to reach into
+    vouchers' private internals more than once."""
+    from vouchers import _is_cached_admin
+
+    is_admin, _source = _is_cached_admin(user_json)
+    return is_admin
+
+
+# ---------------------------------------------------------------------------
 # Kill switch / feature flag (§30, §42)
 # ---------------------------------------------------------------------------
 
@@ -757,14 +786,20 @@ def get_mission(campaign_id: str):
     if not mission_pool_enabled():
         return jsonify({"status": "error", "code": "mission_pool_disabled"}), 503
 
-    from miniapp_identity import resolve_authenticated_telegram_user_id
+    from miniapp_identity import resolve_authenticated_telegram_user
 
-    uid, err = resolve_authenticated_telegram_user_id()
+    user_json, err = resolve_authenticated_telegram_user()
     if err:
         return err
+    uid = int(user_json["id"])
 
     campaign = _get_campaign(campaign_id)
     if not campaign or not is_mission_pool(campaign):
+        return jsonify({"status": "error", "code": "campaign_not_found"}), 404
+
+    # Same admin-only gate as /view and /submit: a non-admin caller must
+    # never confirm an admin-only mission exists, even via this older route.
+    if is_admin_only(campaign) and not is_cached_admin_user(user_json):
         return jsonify({"status": "error", "code": "campaign_not_found"}), 404
 
     open_now, reason = submission_state(campaign)
@@ -930,17 +965,35 @@ def submit_mission(campaign_id: str):
     if not mission_pool_enabled():
         return jsonify({"status": "error", "code": "mission_pool_disabled"}), 503
 
-    from miniapp_identity import resolve_authenticated_telegram_user_id
+    from miniapp_identity import resolve_authenticated_telegram_user
 
     # 1. Identity comes only from server-verified Telegram initData (§10).
-    uid, err = resolve_authenticated_telegram_user_id()
+    user_json, err = resolve_authenticated_telegram_user()
     if err:
         return err
+    uid = int(user_json["id"])
 
     # 2/3. Campaign + mechanic routing.
     campaign = _get_campaign(campaign_id)
     if not campaign or not is_mission_pool(campaign):
         return jsonify({"status": "error", "code": "campaign_not_found"}), 404
+
+    # An admin-only mission never accepts a real submission through this
+    # route. A non-admin caller (including one who somehow obtained the
+    # campaign_id despite it never being listed for them) gets the same
+    # "doesn't exist" answer as an unknown campaign_id — it must never
+    # confirm an admin-only mission exists. An admin caller is previewing:
+    # the mission preview is read-only, so it is rejected too, just with a
+    # distinct code the Mini App can render as "Preview Mission" rather than
+    # letting an admin-preview bypass create a real entry, consume a reward
+    # or enter the winner pool (no product requirement asks for admin test
+    # participation).
+    if is_admin_only(campaign):
+        if not is_cached_admin_user(user_json):
+            return jsonify({"status": "error", "code": "campaign_not_found"}), 404
+        _emit("mission_submission_rejected", campaign_id=campaign_id, user_id=uid,
+              status="fail", reason="admin_preview_read_only", source="miniapp")
+        return jsonify({"status": "error", "code": "admin_preview_read_only"}), 403
 
     body = request.get_json(silent=True) or {}
     if not isinstance(body, dict):

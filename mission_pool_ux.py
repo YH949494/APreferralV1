@@ -205,6 +205,17 @@ def user_state(campaign: dict | None, entry: dict | None,
     return STATE_CLOSED_PROCESSING if submitted else STATE_ENDED
 
 
+def _no_store_json(payload: dict, status_code: int = 200):
+    """Every response here carries the caller's OWN participation/preview
+    state, so it must never be cached and served to a different viewer."""
+    resp = jsonify(payload)
+    resp.status_code = status_code
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0, private"
+    resp.headers["Pragma"] = "no-cache"
+    resp.headers["Expires"] = "0"
+    return resp
+
+
 def _iso(value) -> str | None:
     """Datetime -> ISO string, always carrying an explicit UTC offset.
 
@@ -233,11 +244,12 @@ def mission_view(campaign_id: str):
     if not mp.mission_pool_enabled():
         return jsonify({"status": "error", "code": "mission_pool_disabled"}), 503
 
-    from miniapp_identity import resolve_authenticated_telegram_user_id
+    from miniapp_identity import resolve_authenticated_telegram_user
 
-    uid, err = resolve_authenticated_telegram_user_id()
+    user_json, err = resolve_authenticated_telegram_user()
     if err:
         return err
+    uid = int(user_json["id"])
 
     from campaign_centre import get_campaign
 
@@ -247,6 +259,14 @@ def mission_view(campaign_id: str):
     # identically to 404, so the Mission UI can never activate for a
     # non-Mission campaign (§5).
     if not campaign or not mp.is_mission_pool(campaign):
+        return jsonify({"status": "error", "code": "campaign_not_found"}), 404
+
+    # Admin-only missions never resolve for a non-admin caller — same
+    # "wrong campaign" 404 as an unknown/mismatched mechanic above, so a
+    # guessed/leaked campaign_id cannot confirm an admin-only mission exists.
+    admin_only = mp.is_admin_only(campaign)
+    is_admin = mp.is_cached_admin_user(user_json) if admin_only else False
+    if admin_only and not is_admin:
         return jsonify({"status": "error", "code": "campaign_not_found"}), 404
 
     entry = database.db[mp.ENTRIES_COLLECTION].find_one(
@@ -260,7 +280,7 @@ def mission_view(campaign_id: str):
     schedule = campaign.get("schedule") or {}
 
     cfg = campaign.get("mission_config") or {}
-    return jsonify({
+    payload = {
         "status": "ok",
         "campaign_id": campaign_id,
         "campaign_name": campaign.get("name", ""),
@@ -268,7 +288,10 @@ def mission_view(campaign_id: str):
         # Mission-shaped, instead of inferring the mechanic from a route.
         "mechanic": mp.MECHANIC_MISSION_POOL,
         "user_state": state,
-        "submissions_open": open_now,
+        # Admin preview is read-only: submission stays "open" per the
+        # mission's own schedule/status, but an admin previewing an
+        # admin-only mission may never actually submit (see /submit).
+        "submissions_open": open_now and not (admin_only and is_admin),
         "reason": reason,
         "already_submitted": entry is not None,
         "mission": {
@@ -287,7 +310,14 @@ def mission_view(campaign_id: str):
             "ends_at": _iso(schedule.get("ends_at")),
         },
         "winner_count": block.get("winner_count"),
-    })
+    }
+    if admin_only and is_admin:
+        payload["preview_mode"] = True
+        payload["visibility"] = "admin-only"
+        reason_text = campaign.get("visibility_reason")
+        if reason_text:
+            payload["visibility_reason"] = f"Not visible to users: {reason_text}"
+    return _no_store_json(payload)
 
 
 @mission_pool_ux_bp.get("/api/mission-pool/active")
@@ -327,29 +357,46 @@ def list_active_missions():
     no other user's submission.
     """
     if not mp.mission_pool_enabled():
-        return jsonify({"status": "ok", "missions": []})
+        return _no_store_json({"status": "ok", "missions": []})
 
-    from miniapp_identity import resolve_authenticated_telegram_user_id
+    from miniapp_identity import resolve_authenticated_telegram_user
 
-    uid, err = resolve_authenticated_telegram_user_id()
+    user_json, err = resolve_authenticated_telegram_user()
     if err:
         return err
+    uid = int(user_json["id"])
+
+    # Canonical admin-identity check (mission_pool.is_cached_admin_user ->
+    # vouchers._is_cached_admin) — the SAME source of truth the standard-drop
+    # admin preview and the admin dashboard use. Never derived from a
+    # frontend-supplied flag: is_admin=... on the query string/body is not
+    # consulted anywhere in this module.
+    is_admin = mp.is_cached_admin_user(user_json)
 
     now = datetime.now(timezone.utc)
+    query: dict = {
+        "status": "live",
+        "mission_pool.cancelled": {"$ne": True},
+        "schedule.starts_at": {"$lte": now},
+        "$and": [
+            {"$or": [{"mechanic": mp.MECHANIC_MISSION_POOL},
+                     {"type": mp.CAMPAIGN_TYPE_MISSION_POOL}]},
+            # A missing/null ends_at means "no scheduled end" (open
+            # indefinitely); $gt matches neither, so it is carried as an
+            # explicit alternative rather than silently excluded.
+            {"$or": [{"schedule.ends_at": None}, {"schedule.ends_at": {"$gt": now}}]},
+        ],
+    }
+    if not is_admin:
+        # The ONLY difference between the admin and normal-user query: a
+        # normal user never even receives an admin-only mission document,
+        # not just a stripped-down one. Every other public-visibility rule
+        # (live, schedule window, not cancelled) is untouched and applies
+        # identically to both — no separate rule invented for admins.
+        query["$and"].append({"visibility": {"$ne": mp.VISIBILITY_ADMIN_ONLY}})
+
     docs = database.db["gc_campaigns"].find(
-        {
-            "status": "live",
-            "mission_pool.cancelled": {"$ne": True},
-            "schedule.starts_at": {"$lte": now},
-            "$and": [
-                {"$or": [{"mechanic": mp.MECHANIC_MISSION_POOL},
-                         {"type": mp.CAMPAIGN_TYPE_MISSION_POOL}]},
-                # A missing/null ends_at means "no scheduled end" (open
-                # indefinitely); $gt matches neither, so it is carried as an
-                # explicit alternative rather than silently excluded.
-                {"$or": [{"schedule.ends_at": None}, {"schedule.ends_at": {"$gt": now}}]},
-            ],
-        },
+        query,
         sort=[("schedule.starts_at", 1)],
         limit=50,
     )
@@ -371,7 +418,8 @@ def list_active_missions():
         block = d.get("mission_pool") or {}
         schedule = d.get("schedule") or {}
         cfg = d.get("mission_config") or {}
-        missions.append({
+        admin_only = mp.is_admin_only(d)
+        card = {
             "campaign_id": campaign_id,
             "campaign_name": d.get("name", ""),
             "mission_type": cfg.get("mission_type"),
@@ -381,9 +429,20 @@ def list_active_missions():
             "winner_count": block.get("winner_count"),
             "user_state": user_state(d, entry, now),
             "already_submitted": entry is not None,
-        })
+        }
+        # These fields only ever appear on a card a normal user could never
+        # have received in the first place (admin_only is already excluded
+        # from `docs` for them) — no sensitive mission_config/mission_pool
+        # field, pool_id or eligibility_policy is added here.
+        if admin_only:
+            card["preview_mode"] = True
+            card["visibility"] = "admin-only"
+            reason_text = d.get("visibility_reason")
+            if reason_text:
+                card["visibility_reason"] = f"Not visible to users: {reason_text}"
+        missions.append(card)
 
-    return jsonify({"status": "ok", "missions": missions})
+    return _no_store_json({"status": "ok", "missions": missions})
 
 
 # ---------------------------------------------------------------------------

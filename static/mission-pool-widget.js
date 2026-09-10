@@ -264,6 +264,8 @@
       ".mp-live-reward{font-size:12px;opacity:.75;margin-bottom:10px;}",
       ".mp-live-btn{border:none;border-radius:8px;padding:9px 14px;font-size:13px;font-weight:700;cursor:pointer;width:100%;background:linear-gradient(90deg,#ff8a3d,#f5b63f);color:#1a1200;}",
       ".mp-live-btn[disabled]{opacity:.55;cursor:default;background:rgba(255,255,255,.08);color:inherit;}",
+      ".mp-admin-badge{display:inline-flex;align-items:center;font-size:10px;font-weight:700;letter-spacing:.04em;color:#1a1200;background:#f5b63f;border-radius:6px;padding:2px 6px;margin-left:8px;}",
+      ".mp-admin-reason{font-size:11px;opacity:.7;margin-top:6px;font-style:italic;}",
     ].join("\n");
     document.head.appendChild(style);
   }
@@ -343,8 +345,15 @@
   function renderMissionForm(root, view) {
     var mission = view.mission || {};
     var card = el("div", { class: "mp-card" });
-    card.appendChild(el("div", { class: "mp-title", text: "🎯 " + (view.campaign_name || "") }));
+    var title = el("div", { class: "mp-title", text: "🎯 " + (view.campaign_name || "") });
+    if (view.preview_mode) {
+      title.appendChild(el("span", { class: "mp-admin-badge", text: "ADMIN PREVIEW" }));
+    }
+    card.appendChild(title);
     card.appendChild(el("div", { class: "mp-prompt", text: mission.prompt || "" }));
+    if (view.preview_mode && view.visibility_reason) {
+      card.appendChild(el("div", { class: "mp-admin-reason", text: view.visibility_reason }));
+    }
 
     var readAnswer = null;
 
@@ -391,9 +400,19 @@
     }
 
     var msg = el("div", { class: "mp-msg", style: "display:none;" });
-    var submit = el("button", { class: "mp-btn", type: "button", text: "Submit Mission" });
+    // Admin preview is read-only: the CTA is disabled and relabelled, and
+    // never wired to doSubmit, so an admin previewing an admin-only mission
+    // can never create a real entry, consume a reward, or enter the winner
+    // pool (the backend /submit route independently rejects this too, as
+    // defense in depth).
+    var submit = el("button", {
+      class: "mp-btn", type: "button",
+      text: view.preview_mode ? "Preview Mission" : "Submit Mission",
+    });
+    if (view.preview_mode) submit.setAttribute("disabled", "disabled");
 
     submit.addEventListener("click", function () {
+      if (view.preview_mode) return;
       var answer = readAnswer();
       if (answer === null || answer === "") {
         msg.className = "mp-msg mp-msg-error";
@@ -571,6 +590,12 @@
   // longer `status=live` and therefore is not in this list in the first
   // place (§ ended missions are removed, never a dead CTA).
   function liveCtaFor(mission) {
+    // Admin preview is read-only (§ do not allow an admin-preview bypass to
+    // create a real submission) — this mirrors the disabled "Submitted"
+    // state visually, but is a distinct, always-disabled CTA.
+    if (mission.preview_mode) {
+      return { text: "Preview Mission", disabled: true };
+    }
     if (mission.user_state === "submitted" || mission.already_submitted) {
       return { text: "Submitted", disabled: true };
     }
@@ -580,10 +605,14 @@
   function renderLiveMissionCard(mission, listRoot) {
     var card = el("div", { class: "mp-live-card" });
     var top = el("div", { class: "mp-live-top" });
-    top.appendChild(el("span", { class: "mp-live-badge" }, [
+    var liveBadge = el("span", { class: "mp-live-badge" }, [
       el("span", { class: "mp-live-dot" }),
       el("span", { text: "LIVE" }),
-    ]));
+    ]);
+    if (mission.preview_mode) {
+      liveBadge.appendChild(el("span", { class: "mp-admin-badge", text: "ADMIN PREVIEW" }));
+    }
+    top.appendChild(liveBadge);
     var remaining = remainingText(mission.ends_at);
     if (remaining) top.appendChild(el("span", { class: "mp-live-remaining", text: "⏳ " + remaining }));
     card.appendChild(top);
@@ -592,6 +621,9 @@
     if (mission.prompt) card.appendChild(el("div", { class: "mp-live-desc", text: mission.prompt }));
     if (mission.winner_count) {
       card.appendChild(el("div", { class: "mp-live-reward", text: "🏆 " + mission.winner_count + " winners" }));
+    }
+    if (mission.preview_mode && mission.visibility_reason) {
+      card.appendChild(el("div", { class: "mp-admin-reason", text: mission.visibility_reason }));
     }
 
     var cta = liveCtaFor(mission);
