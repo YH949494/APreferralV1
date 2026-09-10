@@ -1697,14 +1697,15 @@
         <div class="section" style="margin-bottom:16px;">
           <div class="section-title">Create Campaign</div>
           <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px;">
-            <input class="filter-input" id="gc-c-id" placeholder="campaign_id (slug)" style="margin:0;" />
-            <input class="filter-input" id="gc-c-name" placeholder="Name" style="margin:0;" />
+            <input class="filter-input" id="gc-c-name" placeholder="Campaign name" style="margin:0;" />
             <select class="filter-input" id="gc-c-type" style="margin:0;">
               <option value="tournament">tournament</option>
               <option value="external_subscription_verification">external_subscription_verification</option>
               <option value="external_website">external_website</option>
             </select>
-            <input class="filter-input" id="gc-c-provider" placeholder="provider_id" style="margin:0;" />
+            <select class="filter-input" id="gc-c-provider" style="margin:0;">
+              <option value="">No provider (configure later)</option>
+            </select>
             <input class="filter-input" id="gc-c-path" placeholder="destination path e.g. /july-tournament" style="margin:0;" />
             <input class="filter-input" id="gc-c-channel" placeholder="channel_username" style="margin:0;" />
             <input class="filter-input" id="gc-c-starts" type="datetime-local" step="1" style="margin:0;" />
@@ -1717,6 +1718,14 @@
                Sharing this form between creating a campaign and editing an
                existing one is exactly what produced the wrong-campaign writes
                this split removes. -->
+          <details style="margin-top:10px;">
+            <summary style="cursor:pointer;font-size:12px;font-weight:600;">Advanced / Technical Details</summary>
+            <div style="margin-top:8px;max-width:320px;">
+              <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Campaign ID</label>
+              <input class="filter-input" id="gc-c-id" placeholder="auto-generated from name" style="margin:0;width:100%;box-sizing:border-box;" />
+              <div class="sub" style="margin-top:4px;">Auto-generated from the campaign name above. Only override this if you need a specific technical identifier — it is immutable once created and, once deleted, cannot be reused.</div>
+            </div>
+          </details>
           <button class="btn primary" id="gc-create-campaign-btn" style="margin-top:10px;">Create draft</button>
           <button class="btn" id="gc-new-campaign-btn" style="margin-top:10px;">Clear form</button>
           <div class="sub" style="margin-top:6px;">New campaigns always start as <b>draft</b> and stay admin-only until published — see Providers tab to mark a destination ready.</div>
@@ -2055,7 +2064,9 @@
               <option value="referral_rewards">referral_rewards</option>
               <option value="shared">shared — allocatable by multiple subsystems</option>
             </select>
-            <input class="filter-input" id="gc-pool-campaign" placeholder="campaign_id" style="margin:0;" />
+            <select class="filter-input" id="gc-pool-campaign" style="margin:0;">
+              <option value="">No campaign link</option>
+            </select>
           </div>
           <button class="btn primary" id="gc-create-pool-btn" style="margin-top:10px;">Register pool</button>
           <div class="sub" style="margin-top:4px;">Allocation scope controls which subsystem may allocate codes from this pool — it cannot be changed later once codes exist, except via an explicit migration operation.</div>
