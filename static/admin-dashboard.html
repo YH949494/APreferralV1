@@ -155,14 +155,14 @@
           <div class="section" style="max-width:720px;">
             <div class="section-title" id="campaigns-editor-title">New Campaign</div>
 
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;">
-              <div>
-                <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Campaign Name *</label>
-                <input class="filter-input" id="ce-name" placeholder="e.g. VIP Retention June" style="width:100%;box-sizing:border-box;" />
+            <div class="field-grid field-grid-2">
+              <div class="field">
+                <label class="field-label" for="ce-name">Campaign Name <span class="req">*</span></label>
+                <input class="filter-input" id="ce-name" placeholder="e.g. VIP Retention June" />
               </div>
-              <div>
-                <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Campaign Type</label>
-                <select id="ce-type" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg);color:var(--text);">
+              <div class="field">
+                <label class="field-label" for="ce-type">Campaign Type</label>
+                <select id="ce-type" class="filter-input">
                   <option value="">— select —</option>
                   <option value="vip_campaign">VIP Campaign</option>
                   <option value="exclusive_voucher">Exclusive Voucher</option>
@@ -180,16 +180,16 @@
               </div>
             </div>
 
-            <div style="margin-bottom:12px;">
-              <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Description</label>
-              <textarea id="ce-description" rows="2" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg);color:var(--text);box-sizing:border-box;resize:vertical;" placeholder="Optional internal notes…"></textarea>
+            <div class="field" style="margin-bottom:16px;">
+              <label class="field-label" for="ce-description">Description</label>
+              <textarea id="ce-description" rows="2" class="filter-input" style="resize:vertical;" placeholder="Optional internal notes…"></textarea>
             </div>
 
-            <div class="section-title" style="font-size:13px;margin-bottom:8px;">Targeting Filters</div>
+            <div class="section-title" style="font-size:13px;margin-bottom:8px;">Who should get this campaign?</div>
 
-            <div style="margin-bottom:10px;">
-              <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Segments (multi-select)</label>
-              <div id="ce-segments" style="display:flex;flex-wrap:wrap;gap:6px;">
+            <div class="field" style="margin-bottom:14px;">
+              <label class="field-label">Segments (multi-select)</label>
+              <div id="ce-segments" class="chip-row">
                 <label class="ce-chip-label"><input type="checkbox" value="high_value" /> High Value</label>
                 <label class="ce-chip-label"><input type="checkbox" value="normal_actual" /> Normal Actual</label>
                 <label class="ce-chip-label"><input type="checkbox" value="active_community_player" /> Active Community</label>
@@ -200,17 +200,17 @@
               </div>
             </div>
 
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:10px;">
-              <div>
-                <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Player Age Type</label>
-                <div style="display:flex;gap:8px;">
+            <div class="field-grid field-grid-2" style="margin-bottom:16px;">
+              <div class="field">
+                <label class="field-label">Player Age Type</label>
+                <div class="chip-row">
                   <label class="ce-chip-label"><input type="checkbox" id="ce-age-new" value="new_player" /> New Player</label>
                   <label class="ce-chip-label"><input type="checkbox" id="ce-age-old" value="old_player" /> Old Player</label>
                 </div>
               </div>
-              <div>
-                <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Claim Risk Level</label>
-                <div style="display:flex;flex-wrap:wrap;gap:6px;">
+              <div class="field">
+                <label class="field-label">Claim Risk Level</label>
+                <div class="chip-row">
                   <label class="ce-chip-label"><input type="checkbox" value="normal" class="ce-risk-cb" /> Normal</label>
                   <label class="ce-chip-label"><input type="checkbox" value="medium_risk" class="ce-risk-cb" /> Medium Risk</label>
                   <label class="ce-chip-label"><input type="checkbox" value="high_risk_review" class="ce-risk-cb" /> High Risk</label>
@@ -219,37 +219,39 @@
               </div>
             </div>
 
-            <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:10px;margin-bottom:10px;">
-              <div>
-                <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Referrals ≥</label>
-                <input type="number" id="ce-ref-min" class="filter-input" min="0" placeholder="any" style="width:100%;box-sizing:border-box;" />
+            <details class="panel-group">
+              <summary>Advanced Targeting <span class="field-hint" style="margin:0;">(optional — leave blank to skip)</span></summary>
+              <div class="panel-group-body">
+                <div class="field-grid field-grid-2">
+                  <div class="field">
+                    <label class="field-label" for="ce-ref-min">Referrals ≥</label>
+                    <input type="number" id="ce-ref-min" class="filter-input" min="0" placeholder="any" />
+                  </div>
+                  <div class="field">
+                    <label class="field-label" for="ce-ref-max">Referrals ≤</label>
+                    <input type="number" id="ce-ref-max" class="filter-input" min="0" placeholder="any" />
+                  </div>
+                  <div class="field">
+                    <label class="field-label" for="ce-chk-min">Check-ins ≥</label>
+                    <input type="number" id="ce-chk-min" class="filter-input" min="0" placeholder="any" />
+                  </div>
+                  <div class="field">
+                    <label class="field-label" for="ce-chk-max">Check-ins ≤</label>
+                    <input type="number" id="ce-chk-max" class="filter-input" min="0" placeholder="any" />
+                  </div>
+                  <div class="field">
+                    <label class="field-label" for="ce-recency">Active within (days)</label>
+                    <input type="number" id="ce-recency" class="filter-input" min="1" placeholder="e.g. 30" />
+                  </div>
+                  <div class="field">
+                    <label class="field-label" for="ce-voucher-value">Expected Voucher Value (MYR)</label>
+                    <input type="number" id="ce-voucher-value" class="filter-input" min="0" step="0.01" placeholder="0.00" />
+                  </div>
+                </div>
               </div>
-              <div>
-                <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Referrals ≤</label>
-                <input type="number" id="ce-ref-max" class="filter-input" min="0" placeholder="any" style="width:100%;box-sizing:border-box;" />
-              </div>
-              <div>
-                <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Check-ins ≥</label>
-                <input type="number" id="ce-chk-min" class="filter-input" min="0" placeholder="any" style="width:100%;box-sizing:border-box;" />
-              </div>
-              <div>
-                <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Check-ins ≤</label>
-                <input type="number" id="ce-chk-max" class="filter-input" min="0" placeholder="any" style="width:100%;box-sizing:border-box;" />
-              </div>
-            </div>
+            </details>
 
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
-              <div>
-                <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Active within (days)</label>
-                <input type="number" id="ce-recency" class="filter-input" min="1" placeholder="e.g. 30" style="width:100%;box-sizing:border-box;" />
-              </div>
-              <div>
-                <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Expected Voucher Value (MYR)</label>
-                <input type="number" id="ce-voucher-value" class="filter-input" min="0" step="0.01" placeholder="0.00" style="width:100%;box-sizing:border-box;" />
-              </div>
-            </div>
-
-            <div style="display:flex;gap:8px;margin-bottom:16px;">
+            <div style="display:flex;gap:8px;margin:16px 0;">
               <button class="btn" id="ce-preview-btn">Preview Audience</button>
               <button class="btn primary" id="ce-save-btn">Save Campaign</button>
               <button class="btn" id="ce-cancel-btn" style="background:transparent;border:1px solid var(--border);">Cancel</button>
@@ -621,12 +623,14 @@
               <button class="btn primary" id="rsc-hook-add-btn">Add Hook</button>
             </div>
           </div>
-          <div class="section" style="margin-bottom:16px;">
-            <div class="section-title">Bulk Import <span class="sub">(one hook per non-empty line)</span></div>
-            <textarea id="rsc-hooks-bulk-text" rows="4" class="filter-input" style="width:100%;box-sizing:border-box;" placeholder="Hook one&#10;Hook two&#10;Hook three"></textarea>
-            <button class="btn" id="rsc-hooks-bulk-btn" style="margin-top:8px;">Import</button>
-            <div id="rsc-hooks-bulk-result"></div>
-          </div>
+          <details class="panel-group">
+            <summary>Bulk Import <span class="field-hint" style="margin:0;">(one hook per line)</span></summary>
+            <div class="panel-group-body">
+              <textarea id="rsc-hooks-bulk-text" rows="4" class="filter-input" style="width:100%;box-sizing:border-box;margin-top:10px;" placeholder="Hook one&#10;Hook two&#10;Hook three"></textarea>
+              <button class="btn" id="rsc-hooks-bulk-btn" style="margin-top:8px;">Import</button>
+              <div id="rsc-hooks-bulk-result"></div>
+            </div>
+          </details>
           <div class="controls" style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
             <input class="filter-input" id="rsc-hooks-search" placeholder="Search hook text…" style="margin:0;max-width:260px;" />
             <button class="btn" id="rsc-hooks-search-btn">Search</button>
@@ -668,12 +672,14 @@
               <button class="btn primary" id="rsc-playback-add-btn">Add</button>
             </div>
           </div>
-          <div class="section" style="margin-bottom:16px;">
-            <div class="section-title">Bulk Import <span class="sub">(one URL or playback_id per non-empty line)</span></div>
-            <textarea id="rsc-playback-bulk-text" rows="4" class="filter-input" style="width:100%;box-sizing:border-box;" placeholder="https://rx.apreplay.com/Abc12345&#10;Xyz98765"></textarea>
-            <button class="btn" id="rsc-playback-bulk-btn" style="margin-top:8px;">Import</button>
-            <div id="rsc-playback-bulk-result"></div>
-          </div>
+          <details class="panel-group">
+            <summary>Bulk Import <span class="field-hint" style="margin:0;">(one URL or playback_id per line)</span></summary>
+            <div class="panel-group-body">
+              <textarea id="rsc-playback-bulk-text" rows="4" class="filter-input" style="width:100%;box-sizing:border-box;margin-top:10px;" placeholder="https://rx.apreplay.com/Abc12345&#10;Xyz98765"></textarea>
+              <button class="btn" id="rsc-playback-bulk-btn" style="margin-top:8px;">Import</button>
+              <div id="rsc-playback-bulk-result"></div>
+            </div>
+          </details>
           <div class="controls" style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
             <input class="filter-input" id="rsc-playback-search" placeholder="Search URL / ID / game name…" style="margin:0;max-width:260px;" />
             <button class="btn" id="rsc-playback-search-btn">Search</button>
@@ -720,15 +726,18 @@
 
           <div class="section" style="margin-bottom:16px;">
             <div class="section-title">Creator Access Chat</div>
-            <div class="sub" style="margin-bottom:8px;">Supported types: group, supergroup, or channel.</div>
-            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px;">
-              <input class="filter-input" id="rsc-creator-group-chat-id" placeholder="Creator Access Chat ID, e.g. -1001234567890" style="min-width:240px;margin:0;" />
-              <label class="sub" style="display:flex;align-items:center;gap:6px;">
-                <input type="checkbox" id="rsc-creator-group-check-enabled" />
-                Membership verification enabled
-              </label>
+            <div class="field-hint" style="margin-bottom:10px;">Supported types: group, supergroup, or channel.</div>
+            <div class="field" style="max-width:420px;margin-bottom:10px;">
+              <label class="field-label" for="rsc-creator-group-chat-id">Creator Access Chat ID</label>
+              <input class="filter-input" id="rsc-creator-group-chat-id" placeholder="e.g. -1001234567890" />
             </div>
-            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <div class="switch-row">
+              <div class="switch-row-text">
+                <div class="switch-row-label">Membership verification enabled</div>
+              </div>
+              <label class="switch"><input type="checkbox" id="rsc-creator-group-check-enabled" /><span class="slider"></span></label>
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:12px 0 4px;">
               <button class="btn" id="rsc-creator-group-verify-btn">Verify Group</button>
               <button class="btn primary" id="rsc-creator-group-save-btn">Save Changes</button>
               <label class="sub" style="display:flex;align-items:center;gap:6px;">
@@ -736,13 +745,25 @@
                 Force save without verification
               </label>
             </div>
-            <div id="rsc-creator-group-verify-result" class="sub" style="margin-top:8px;"></div>
-            <div class="sub" style="margin-top:10px;">
-              Chat: <span id="rsc-creator-group-chat-title">—</span> (<span id="rsc-creator-group-chat-type">—</span>)
+            <div id="rsc-creator-group-verify-result" class="sub" style="margin-bottom:10px;"></div>
+            <div class="field-grid field-grid-2" style="margin-bottom:0;">
+              <div class="field">
+                <span class="field-label">Chat</span>
+                <span><span id="rsc-creator-group-chat-title">—</span> (<span id="rsc-creator-group-chat-type">—</span>)</span>
+              </div>
+              <div class="field">
+                <span class="field-label">Bot membership status</span>
+                <span id="rsc-creator-group-bot-status">—</span>
+              </div>
+              <div class="field">
+                <span class="field-label">Last verified</span>
+                <span id="rsc-creator-group-verified-at">—</span>
+              </div>
+              <div class="field">
+                <span class="field-label">Source · Config version</span>
+                <span><span id="rsc-creator-group-source">—</span> · <span id="rsc-creator-group-version">—</span></span>
+              </div>
             </div>
-            <div class="sub">Bot membership status: <span id="rsc-creator-group-bot-status">—</span></div>
-            <div class="sub">Last verified: <span id="rsc-creator-group-verified-at">—</span></div>
-            <div class="sub">Source: <span id="rsc-creator-group-source">—</span> · Config version: <span id="rsc-creator-group-version">—</span></div>
           </div>
 
           <div class="section" style="margin-bottom:16px;">
@@ -754,12 +775,14 @@
               <button class="btn primary" id="rsc-creator-add-btn">Approve</button>
             </div>
           </div>
-          <div class="section" style="margin-bottom:16px;">
-            <div class="section-title">Bulk Import <span class="sub">(optional manual override — one Telegram user ID per non-empty line)</span></div>
-            <textarea id="rsc-creators-bulk-text" rows="4" class="filter-input" style="width:100%;box-sizing:border-box;" placeholder="123456789&#10;987654321"></textarea>
-            <button class="btn" id="rsc-creators-bulk-btn" style="margin-top:8px;">Import</button>
-            <div id="rsc-creators-bulk-result"></div>
-          </div>
+          <details class="panel-group">
+            <summary>Bulk Import <span class="field-hint" style="margin:0;">(optional — one Telegram user ID per line)</span></summary>
+            <div class="panel-group-body">
+              <textarea id="rsc-creators-bulk-text" rows="4" class="filter-input" style="width:100%;box-sizing:border-box;margin-top:10px;" placeholder="123456789&#10;987654321"></textarea>
+              <button class="btn" id="rsc-creators-bulk-btn" style="margin-top:8px;">Import</button>
+              <div id="rsc-creators-bulk-result"></div>
+            </div>
+          </details>
           <div class="controls" style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
             <input class="filter-input" id="rsc-creators-search" placeholder="Search by user ID or username…" style="margin:0;max-width:260px;" />
             <button class="btn" id="rsc-creators-search-btn">Search</button>
@@ -830,7 +853,10 @@
                 <option value="MarkdownV2">MarkdownV2</option>
               </select>
             </label>
-            <label id="cc-link-preview-wrap"><input type="checkbox" id="cc-disable-preview" /> Disable link preview</label>
+            <div class="switch-row" id="cc-link-preview-wrap" style="border-bottom:none;">
+              <div class="switch-row-text"><div class="switch-row-label">Disable link preview</div></div>
+              <label class="switch"><input type="checkbox" id="cc-disable-preview" /><span class="slider"></span></label>
+            </div>
           </div>
           <div class="sub" id="cc-text-counter" style="margin-top:4px;"></div>
         </div>
@@ -849,10 +875,19 @@
           <button class="btn" id="cc-poll-option-add-btn" type="button">Add Option</button>
           <div class="sub" id="cc-poll-options-counter"></div>
 
-          <div class="cc-grid" style="margin-top:12px;">
-            <label><input type="checkbox" id="cc-poll-anonymous" checked /> Anonymous voting</label>
-            <label id="cc-poll-multi-wrap"><input type="checkbox" id="cc-poll-multiple" /> Allow multiple answers</label>
-            <label><input type="checkbox" id="cc-poll-members-only" /> Members-only (where supported)</label>
+          <div style="margin-top:12px;">
+            <div class="switch-row">
+              <div class="switch-row-text"><div class="switch-row-label">Anonymous voting</div></div>
+              <label class="switch"><input type="checkbox" id="cc-poll-anonymous" checked /><span class="slider"></span></label>
+            </div>
+            <div class="switch-row" id="cc-poll-multi-wrap">
+              <div class="switch-row-text"><div class="switch-row-label">Allow multiple answers</div></div>
+              <label class="switch"><input type="checkbox" id="cc-poll-multiple" /><span class="slider"></span></label>
+            </div>
+            <div class="switch-row">
+              <div class="switch-row-text"><div class="switch-row-label">Members-only (where supported)</div></div>
+              <label class="switch"><input type="checkbox" id="cc-poll-members-only" /><span class="slider"></span></label>
+            </div>
           </div>
 
           <div id="cc-quiz-fields" class="hidden" style="margin-top:8px;">
@@ -885,15 +920,21 @@
 
         <div class="section" style="margin-bottom:16px;">
           <div class="section-title">Delivery Options</div>
-          <div class="cc-grid">
-            <label><input type="checkbox" id="cc-disable-notification" /> Silent notification</label>
-            <label><input type="checkbox" id="cc-protect-content" /> Protect content</label>
-            <label><input type="checkbox" id="cc-pin-after-send" /> Pin after publishing</label>
+          <div class="switch-row">
+            <div class="switch-row-text"><div class="switch-row-label">Silent notification</div></div>
+            <label class="switch"><input type="checkbox" id="cc-disable-notification" /><span class="slider"></span></label>
           </div>
-          <div id="cc-unpin-wrap" class="hidden" style="margin-top:8px;">
-            <label>Auto-unpin at (Kuala Lumpur time)
-              <input class="filter-input" id="cc-unpin-at" type="datetime-local" style="max-width:260px;" />
-            </label>
+          <div class="switch-row">
+            <div class="switch-row-text"><div class="switch-row-label">Protect content</div></div>
+            <label class="switch"><input type="checkbox" id="cc-protect-content" /><span class="slider"></span></label>
+          </div>
+          <div class="switch-row" style="border-bottom:none;">
+            <div class="switch-row-text"><div class="switch-row-label">Pin after publishing</div></div>
+            <label class="switch"><input type="checkbox" id="cc-pin-after-send" /><span class="slider"></span></label>
+          </div>
+          <div id="cc-unpin-wrap" class="hidden field" style="margin-top:8px;">
+            <label class="field-label" for="cc-unpin-at">Auto-unpin at (Kuala Lumpur time)</label>
+            <input class="filter-input" id="cc-unpin-at" type="datetime-local" style="max-width:260px;" />
           </div>
         </div>
 
@@ -917,14 +958,14 @@
               <option value="daily">Daily</option>
               <option value="weekly">Weekly</option>
             </select>
-            <div id="cc-recurrence-weekdays" class="hidden" style="margin-top:8px;">
-              <label><input type="checkbox" value="mon" /> Mon</label>
-              <label><input type="checkbox" value="tue" /> Tue</label>
-              <label><input type="checkbox" value="wed" /> Wed</label>
-              <label><input type="checkbox" value="thu" /> Thu</label>
-              <label><input type="checkbox" value="fri" /> Fri</label>
-              <label><input type="checkbox" value="sat" /> Sat</label>
-              <label><input type="checkbox" value="sun" /> Sun</label>
+            <div id="cc-recurrence-weekdays" class="hidden chip-row" style="margin-top:8px;">
+              <label class="ce-chip-label"><input type="checkbox" value="mon" /> Mon</label>
+              <label class="ce-chip-label"><input type="checkbox" value="tue" /> Tue</label>
+              <label class="ce-chip-label"><input type="checkbox" value="wed" /> Wed</label>
+              <label class="ce-chip-label"><input type="checkbox" value="thu" /> Thu</label>
+              <label class="ce-chip-label"><input type="checkbox" value="fri" /> Fri</label>
+              <label class="ce-chip-label"><input type="checkbox" value="sat" /> Sat</label>
+              <label class="ce-chip-label"><input type="checkbox" value="sun" /> Sun</label>
             </div>
           </div>
         </div>
