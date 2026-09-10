@@ -3138,70 +3138,94 @@
         </td>`;
     }
 
+    async function adm_fetchStandardDrops(tail) {
+      const res = await v2Fetch(`${API_V2}/admin/drops_v2${tail}`);
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      const data = await res.json();
+      if (data.status !== "ok") throw new Error(JSON.stringify(data));
+      return data.items || [];
+    }
+
+    function adm_dropRowHtml(d) {
+      const id = d.dropId || d.id || d._id;
+      const stats = d.type === "pooled"
+        ? `${d.codesFree}/${d.codesTotal} free`
+        : `${d.claimed}/${d.assigned} claimed`;
+      const totalCodes = d.type === "pooled" ? (d.codesTotal || 0) : (d.assigned || 0);
+      const claimedCodes = d.type === "pooled" ? Math.max(0, (d.codesTotal || 0) - (d.codesFree || 0)) : (d.claimed || 0);
+      const isDeleting = d.deletionStatus === "deleting";
+      const dis = isDeleting ? "disabled" : "";
+      return `
+        <td style="text-align:left; padding:6px;">${d.name} <span style="font-size:12px;color:#666;">[${d.priority}]</span></td>
+        <td>${d.type}</td>
+        <td>${isDeleting ? "deleting…" : d.status}</td>
+        <td>${fmtKL(d.startsAt)} → ${fmtKL(d.endsAt)}</td>
+        <td>${stats}</td>
+        <td>
+          <button data-op="start_now" data-id="${id}" ${dis}>Start</button>
+          <button data-op="pause"     data-id="${id}" ${dis}>Pause</button>
+          <button data-op="end_now"   data-id="${id}" ${dis}>End</button>
+          <button type="button" class="btn btn-secondary adm-edit-dates-btn" data-id="${id}" data-name="${escapeHtml(d.name || "")}" data-starts="${escapeHtml(d.startsAt || "")}" data-ends="${escapeHtml(d.endsAt || "")}" ${dis}>🖊 Edit</button>
+          <button type="button" class="btn btn-secondary copy-drop-id-btn" data-copy-dropid="${id}">📋 Copy ID</button>
+          <button type="button" class="btn btn-danger adm-delete-drop-btn" data-id="${id}" data-name="${escapeHtml(d.name || "")}" data-total="${totalCodes}" data-claimed="${claimedCodes}" data-deleting="${isDeleting ? "1" : ""}" style="background:#dc2626;color:#fff;border:none;border-radius:6px;padding:6px 10px;cursor:pointer;">${isDeleting ? "⏳ Retry delete" : "🗑 Delete"}</button>
+        </td>`;
+    }
+
+    // Bumped on every adm_list() call so a call superseded by a newer one
+    // (there are several non-awaited call sites: admin init, post-action
+    // refreshes, etc.) can detect that and bail out after its awaits
+    // instead of clobbering or duplicating what the newer call rendered.
+    let admListGen = 0;
+
     async function adm_list() {
       const tbody = document.querySelector("#adm_table tbody");
       if (!tbody) return;
+      const myGen = ++admListGen;
       tbody.innerHTML = `<tr><td colspan="6" style="padding:6px;">Loading…</td></tr>`;
 
       const userId = getAdminUserId();
       if (!userId) {
+        if (myGen !== admListGen) return;
         tbody.innerHTML = `<tr><td colspan="6" style="padding:6px;">Admin user ID required. Open via Telegram to manage drops.</td></tr>`;
         return;
       }
       const tail = buildAdminQueryTail();
 
-      let drops;
-      try {
-        const res = await v2Fetch(`${API_V2}/admin/drops_v2${tail}`);
-        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-        const data = await res.json();
-        if (data.status !== "ok") throw new Error(JSON.stringify(data));
-        drops = data.items || [];
-      } catch (e) {
-        tbody.innerHTML = `<tr><td colspan="6" style="padding:6px;">Voucher endpoint error: ${e.message}</td></tr>`;
-        return;
-      }
+      // Standard drops and mission-pool campaigns are independent data
+      // sources fetched concurrently: one failing must never hide the
+      // other (a transient drops_v2 outage shouldn't blank out missions,
+      // and vice versa — the exact symptom this table already had).
+      const [dropsResult, missionsResult] = await Promise.allSettled([
+        adm_fetchStandardDrops(tail),
+        adm_fetchMissionCampaigns(tail),
+      ]);
+
+      if (myGen !== admListGen) return; // a newer adm_list() call already owns the table
 
       tbody.innerHTML = "";
-      drops.forEach((d) => {
-        const id = d.dropId || d.id || d._id;
-        const stats = d.type === "pooled"
-          ? `${d.codesFree}/${d.codesTotal} free`
-          : `${d.claimed}/${d.assigned} claimed`;
-        const totalCodes = d.type === "pooled" ? (d.codesTotal || 0) : (d.assigned || 0);
-        const claimedCodes = d.type === "pooled" ? Math.max(0, (d.codesTotal || 0) - (d.codesFree || 0)) : (d.claimed || 0);
-        const isDeleting = d.deletionStatus === "deleting";
-        const dis = isDeleting ? "disabled" : "";
 
+      if (dropsResult.status === "fulfilled") {
+        dropsResult.value.forEach((d) => {
+          const tr = document.createElement("tr");
+          tr.innerHTML = adm_dropRowHtml(d);
+          tbody.appendChild(tr);
+        });
+      } else {
         const tr = document.createElement("tr");
-        tr.innerHTML = `
-          <td style="text-align:left; padding:6px;">${d.name} <span style="font-size:12px;color:#666;">[${d.priority}]</span></td>
-          <td>${d.type}</td>
-          <td>${isDeleting ? "deleting…" : d.status}</td>
-          <td>${fmtKL(d.startsAt)} → ${fmtKL(d.endsAt)}</td>
-          <td>${stats}</td>
-          <td>
-            <button data-op="start_now" data-id="${id}" ${dis}>Start</button>
-            <button data-op="pause"     data-id="${id}" ${dis}>Pause</button>
-            <button data-op="end_now"   data-id="${id}" ${dis}>End</button>
-            <button type="button" class="btn btn-secondary adm-edit-dates-btn" data-id="${id}" data-name="${escapeHtml(d.name || "")}" data-starts="${escapeHtml(d.startsAt || "")}" data-ends="${escapeHtml(d.endsAt || "")}" ${dis}>🖊 Edit</button>
-            <button type="button" class="btn btn-secondary copy-drop-id-btn" data-copy-dropid="${id}">📋 Copy ID</button>
-            <button type="button" class="btn btn-danger adm-delete-drop-btn" data-id="${id}" data-name="${escapeHtml(d.name || "")}" data-total="${totalCodes}" data-claimed="${claimedCodes}" data-deleting="${isDeleting ? "1" : ""}" style="background:#dc2626;color:#fff;border:none;border-radius:6px;padding:6px 10px;cursor:pointer;">${isDeleting ? "⏳ Retry delete" : "🗑 Delete"}</button>
-          </td>`;
+        tr.innerHTML = `<td colspan="6" style="padding:6px;">Voucher endpoint error: ${escapeHtml(dropsResult.reason.message)}</td>`;
         tbody.appendChild(tr);
-      });
+      }
 
-      try {
-        const missions = await adm_fetchMissionCampaigns(tail);
-        missions.forEach((c) => {
+      if (missionsResult.status === "fulfilled") {
+        missionsResult.value.forEach((c) => {
           const tr = document.createElement("tr");
           tr.innerHTML = adm_missionRowHtml(c);
           tbody.appendChild(tr);
         });
-      } catch (e) {
-        console.error("[adm_list] mission-pool/campaigns failed:", e.message);
+      } else {
+        console.error("[adm_list] mission-pool/campaigns failed:", missionsResult.reason.message);
         const tr = document.createElement("tr");
-        tr.innerHTML = `<td colspan="6" style="padding:6px;color:#b45309;">⚠ Mission Pool campaigns failed to load (standard drops above are unaffected): ${escapeHtml(e.message)}</td>`;
+        tr.innerHTML = `<td colspan="6" style="padding:6px;color:#b45309;">⚠ Mission Pool campaigns failed to load (standard drops above are unaffected): ${escapeHtml(missionsResult.reason.message)}</td>`;
         tbody.appendChild(tr);
       }
 

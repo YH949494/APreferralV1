@@ -338,3 +338,67 @@ test("mission row HTML never wires start_now/pause/end_now (the drops_v2 lifecyc
   assert.doesNotMatch(row.innerHTML, /data-op="pause"/);
   assert.doesNotMatch(row.innerHTML, /data-op="end_now"/);
 });
+
+// ---------------------------------------------------------------------
+// Codex review follow-ups: the two data sources must be fetched
+// independently (one failing must not hide the other), and overlapping
+// adm_list() calls must not duplicate or clobber each other's rows.
+// ---------------------------------------------------------------------
+
+test("drops_v2 failing (500) still shows mission rows, not just a voucher error", async () => {
+  const missions = [mission({ campaign_id: "camp1", name: "SurpriseVoucherDrop_Bonus$1_260917" })];
+  const { sandbox, tbody } = buildSandbox({
+    fetchImpl: async (url) => {
+      if (String(url).includes("/admin/drops_v2")) {
+        return { ok: false, status: 500, statusText: "Internal Server Error" };
+      }
+      if (String(url).includes("/mission-pool/campaigns")) {
+        return { ok: true, status: 200, json: async () => ({ status: "ok", campaigns: missions }), text: async () => JSON.stringify({ status: "ok", campaigns: missions }) };
+      }
+      throw new Error("unexpected fetch: " + url);
+    },
+  });
+  run(sandbox);
+
+  await sandbox.adm_list();
+
+  const html = allText(tbody).join("\n");
+  assert.match(html, /SurpriseVoucherDrop_Bonus\$1_260917/, "a drops_v2 outage must not hide mission rows");
+  assert.match(html, /Voucher endpoint error/);
+});
+
+test("an older adm_list() call finishing after a newer one does not duplicate or clobber rows", async () => {
+  let resolveFirstDrops;
+  let call = 0;
+  const { sandbox, tbody } = buildSandbox({
+    fetchImpl: async (url) => {
+      if (String(url).includes("/admin/drops_v2")) {
+        call += 1;
+        if (call === 1) {
+          // First (stale) call's drops_v2 hangs until released below, well
+          // after the second call has already finished and rendered.
+          await new Promise((resolve) => { resolveFirstDrops = resolve; });
+        }
+        return { ok: true, status: 200, json: async () => ({ status: "ok", items: [drop({ dropId: "d" + call, name: "Drop " + call })] }) };
+      }
+      if (String(url).includes("/mission-pool/campaigns")) {
+        return { ok: true, status: 200, json: async () => ({ status: "ok", campaigns: [] }), text: async () => JSON.stringify({ status: "ok", campaigns: [] }) };
+      }
+      throw new Error("unexpected fetch: " + url);
+    },
+  });
+  run(sandbox);
+
+  const first = sandbox.adm_list(); // stale call: its drops_v2 fetch is still pending
+  const second = await sandbox.adm_list(); // newer call: completes first
+  void second;
+
+  assert.equal(tbody.children.length, 1, "the newer call's single row must be the only row present");
+  assert.match(allText(tbody).join("\n"), /Drop 2/);
+
+  resolveFirstDrops({}); // let the stale call's fetch resolve
+  await first;
+
+  assert.equal(tbody.children.length, 1, "the stale call must not append/clobber after being superseded");
+  assert.match(allText(tbody).join("\n"), /Drop 2/, "the table must still show the newer call's row, not the stale one's");
+});
