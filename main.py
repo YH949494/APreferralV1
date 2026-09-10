@@ -4,7 +4,7 @@ from flask import (
 )
 from flask_cors import CORS 
 from threading import Thread 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo, CopyTextButton
 from telegram.constants import ChatType, ParseMode
 from html import escape as html_escape
 from telegram.ext import (
@@ -8554,6 +8554,24 @@ async def send_referral_link_with_share_button(update: Update, context: ContextT
     uid = user.id
     username = user.username or ""
 
+    logger.info("[REFERRAL_DEEPLINK][OPEN] uid=%s", uid)
+
+    # Read-only pre-check: mirrors the same lookup get_or_create_referral_invite_link_sync
+    # performs internally, used here purely to report reused=true/false in the
+    # LINK_READY log below -- never mutates invite_link_map itself. Run off
+    # the polling event loop (same as the generation call below) so a slow
+    # or unavailable Mongo never blocks other bot updates on this find_one.
+    def _check_link_existed_before():
+        dest_chat_id, _dest_type = get_referral_destination()
+        return invite_link_map_collection.find_one(
+            {"chat_id": dest_chat_id, "inviter_id": uid, "is_active": True}
+        ) is not None
+
+    try:
+        link_existed_before = await asyncio.to_thread(_check_link_existed_before)
+    except Exception:
+        link_existed_before = False
+
     from referral_share_content import MINIAPP_SHARE_SOURCE, generate_share_package
 
     try:
@@ -8564,8 +8582,9 @@ async def send_referral_link_with_share_button(update: Update, context: ContextT
             generated_by=MINIAPP_SHARE_SOURCE,
             include_content_pools=False,
         )
-    except Exception:
+    except Exception as e:
         logger.exception("[REFERRAL][DEEPLINK_FAILED] uid=%s", uid)
+        logger.error("[REFERRAL_DEEPLINK][ERROR] uid=%s err=%s", uid, e)
         await safe_reply_text(
             update.effective_message,
             "Unable to generate your referral link right now. Please try again.",
@@ -8582,6 +8601,7 @@ async def send_referral_link_with_share_button(update: Update, context: ContextT
         else:
             text = "Unable to generate your referral link right now. Please try again."
         logger.error("[REFERRAL][DEEPLINK_FAILED] uid=%s code=%s", uid, code)
+        logger.error("[REFERRAL_DEEPLINK][ERROR] uid=%s err=%s", uid, code)
         await safe_reply_text(
             update.effective_message,
             text,
@@ -8592,6 +8612,7 @@ async def send_referral_link_with_share_button(update: Update, context: ContextT
         return
 
     invite_link = result["invite_link"]
+    logger.info("[REFERRAL_DEEPLINK][LINK_READY] uid=%s reused=%s", uid, link_existed_before)
 
     # Telegram's share/url composes the prefilled message as
     # "{url}\n{text}" (url first, then text) -- not the other way around.
@@ -8610,7 +8631,10 @@ async def send_referral_link_with_share_button(update: Update, context: ContextT
         f"&text={quote(share_text, safe='')}"
     )
     keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("📤 Share Referral Link", url=share_url)]]
+        [
+            [InlineKeyboardButton("📤 Share Referral Link", url=share_url)],
+            [InlineKeyboardButton("📋 Copy Referral Link", copy_text=CopyTextButton(text=invite_link))],
+        ]
     )
 
     caption_html = build_miniapp_referral_text(
