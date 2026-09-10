@@ -3715,6 +3715,13 @@
         loadCampaigns(true);
       });
     });
+
+    $all("#ac-status-filter button").forEach(function (b) {
+      b.addEventListener("click", function () {
+        $all("#ac-status-filter button").forEach(function (x) { x.classList.toggle("active", x === b); });
+        loadActiveCampaigns(true);
+      });
+    });
   }
 
   // ---------- Campaign Builder (P2) ----------
@@ -3800,30 +3807,35 @@
     }).catch(function (e) { banner("Failed to load campaign builder: " + e.message, "error"); });
   }
 
+  // Single Campaigns list backing the "Campaigns" tab. The status filter
+  // buttons (#ac-status-filter) select which /api/admin/campaign-builder
+  // status to query — Running (active) and Draft were previously separate
+  // tabs over the exact same endpoint/loader/renderer, so they are merged
+  // here into one list + filter instead of two near-identical views.
   function loadActiveCampaigns(force) {
-    cbApi("/api/admin/campaign-builder/campaigns?status=active").then(function (res) {
-      _cbRenderCampaignList("ac-list-body", (res.body && res.body.campaigns) || [], "active");
+    var statusFilter = "active";
+    var activeBtn = $("#ac-status-filter .active");
+    if (activeBtn) statusFilter = activeBtn.dataset.status || "";
+    cbApi("/api/admin/campaign-builder/campaigns" + (statusFilter ? "?status=" + encodeURIComponent(statusFilter) : "")).then(function (res) {
+      _cbRenderCampaignList("ac-list-body", (res.body && res.body.campaigns) || [], statusFilter || "all");
     });
   }
 
-  function loadDraftCampaigns(force) {
-    cbApi("/api/admin/campaign-builder/campaigns?status=draft").then(function (res) {
-      _cbRenderCampaignList("dc-list-body", (res.body && res.body.campaigns) || [], "draft");
-    });
-  }
-
-  function _cbRenderCampaignList(elId, items, status) {
+  function _cbRenderCampaignList(elId, items, requestedStatus) {
     var body = $("#" + elId);
     if (!items.length) {
-      body.innerHTML = status === "active"
+      body.innerHTML = requestedStatus === "active"
         ? emptyState({
             icon: "🚀", title: "No active campaigns", sub: "Create your first campaign to start reaching players.",
             ctaHtml: '<button class="btn primary" onclick="goToViewAndClick(\'campaignBuilder\',\'cb-new-btn\')">+ Create Campaign</button>',
           })
-        : emptyState("No " + status + " campaigns.");
+        : emptyState(requestedStatus === "all" ? "No campaigns yet." : "No " + requestedStatus + " campaigns.");
       return;
     }
     body.innerHTML = items.map(function (c) {
+      // Each item carries its own status field from the backend, so a mixed
+      // "All" list still renders the correct pill/actions per campaign.
+      var status = c.status || requestedStatus;
       var drops = c.compiled_drop_ids || [];
       var isBatch = !!c.release_type;
       return '<div class="campaign-card">' +
@@ -7828,7 +7840,7 @@
     });
   }
 
-  var VIEWS =["summary", "moduleOverview", "funnel", "abuse", "campaignBuilder", "campaignPerformance", "campaignIntelligence", "activeCampaigns", "draftCampaigns", "compiledDrops", "campaigns", "gcCampaigns", "campaignRegistrations", "deepLinks", "missionPool", "gcProviders", "gcResults", "gcRewards", "gcVerification", "gcActivity", "campaignDisplay", "eventBanners", "luckyGames", "vouchers", "drops", "referrals", "affiliate", "affiliatePools", "affiliateBatches", "affiliatePending", "reactivation", "audit", "segmentProbabilityConfig", "segmentRoi", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "voucherHunterFalsePositive", "voucherHunterRuleSimulator", "vhPriorityImpact", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "joinRequests", "xpAdjust", "settings", "referralShareContent", "referralShareEngagement", "ccComposer", "ccCalendar", "ccBoard"];
+  var VIEWS =["summary", "moduleOverview", "funnel", "abuse", "campaignBuilder", "campaignPerformance", "campaignIntelligence", "activeCampaigns", "compiledDrops", "campaigns", "gcCampaigns", "campaignRegistrations", "deepLinks", "missionPool", "gcProviders", "gcResults", "gcRewards", "gcVerification", "gcActivity", "campaignDisplay", "eventBanners", "luckyGames", "vouchers", "drops", "referrals", "affiliate", "affiliatePools", "affiliateBatches", "affiliatePending", "reactivation", "audit", "segmentProbabilityConfig", "segmentRoi", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "voucherHunterFalsePositive", "voucherHunterRuleSimulator", "vhPriorityImpact", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "joinRequests", "xpAdjust", "settings", "referralShareContent", "referralShareEngagement", "ccComposer", "ccCalendar", "ccBoard", "ccPollResults"];
 
   // ---------------------------------------------------------------------
   // Information architecture: sidebar Business Modules, each with its own
@@ -7847,9 +7859,8 @@
     ]},
     { key: "campaign", icon: "🎯", label: "Campaign Centre", tabs: [
       { label: "Overview", view: "moduleOverview", overviewKey: "campaign" },
-      { label: "Running", view: "activeCampaigns" },
-      { label: "Scheduled", view: "campaigns" },
-      { label: "Drafts", view: "draftCampaigns" },
+      { label: "Campaigns", view: "activeCampaigns" },
+      { label: "Legacy Targeting", view: "campaigns" },
       { label: "Templates", view: "campaignBuilder", live: true },
       { label: "Performance", view: "campaignPerformance" },
       { label: "Intelligence", view: "campaignIntelligence" }
@@ -7876,12 +7887,8 @@
     { key: "community", icon: "👥", label: "Community Centre", tabs: [
       { label: "Composer", view: "ccComposer", live: true },
       { label: "Calendar", view: "ccCalendar" },
-      { label: "Scheduled", view: "ccBoard", ccBoard: "scheduled" },
-      { label: "Drafts", view: "ccBoard", ccBoard: "draft" },
-      { label: "Pending Approval", view: "ccBoard", ccBoard: "pending_approval" },
-      { label: "Published", view: "ccBoard", ccBoard: "published" },
-      { label: "Poll Results", view: "ccBoard", ccBoard: "poll_results" },
-      { label: "Failed", view: "ccBoard", ccBoard: "failed" },
+      { label: "Posts", view: "ccBoard" },
+      { label: "Poll Results", view: "ccPollResults" },
       { label: "Leaderboard", external: "/static/index.html#admin-panel" }
     ]},
     { key: "affiliate", icon: "🤝", label: "Affiliate Centre", tabs: [
@@ -7980,7 +7987,6 @@
   var currentModuleKey = null;
   var currentTabIndex = 0;
   var currentSettingsCategory = null;
-  var currentCcBoard = null;
 
   function moduleByKey(key) {
     for (var i = 0; i < MODULES.length; i++) if (MODULES[i].key === key) return MODULES[i];
@@ -7989,10 +7995,10 @@
 
   // Reverse-lookup so any direct switchView(viewId) call (from empty-state
   // CTAs, cross-links, etc.) still highlights the right module/tab chrome.
-  // moduleOverview/ccBoard are ambiguous (shared by many tabs) and are
-  // intentionally excluded — those are always entered via activateTab().
+  // moduleOverview is ambiguous (shared by many tabs) and is intentionally
+  // excluded — that one is always entered via activateTab().
   function findTabForView(view) {
-    if (view === "moduleOverview" || view === "ccBoard") return null;
+    if (view === "moduleOverview") return null;
     for (var i = 0; i < MODULES.length; i++) {
       var mod = MODULES[i];
       for (var j = 0; j < mod.tabs.length; j++) {
@@ -8076,7 +8082,6 @@
     currentModuleKey = moduleKey;
     currentTabIndex = tabIndex;
     currentSettingsCategory = tab.settingsCategory || null;
-    currentCcBoard = tab.ccBoard || null;
     renderSidebarActive(moduleKey);
     renderTabBar(moduleKey, tabIndex);
     updateBreadcrumb(moduleKey, tabIndex);
@@ -8144,8 +8149,8 @@
       summary: "Executive Summary", moduleOverview: "Overview",
       funnel: "Activation Funnel", abuse: "Abuse Overview",
       campaignBuilder: "Campaign Builder (P2)", campaignPerformance: "Campaign Performance (P4)",
-      campaignIntelligence: "Campaign Intelligence (P5)", activeCampaigns: "Active Campaigns",
-      draftCampaigns: "Draft Campaigns", compiledDrops: "Compiled Voucher Drops",
+      campaignIntelligence: "Campaign Intelligence (P5)", activeCampaigns: "Campaigns",
+      compiledDrops: "Compiled Voucher Drops",
       campaigns: "Campaigns (Legacy Targeting)",
       gcCampaigns: "Player Campaigns", campaignRegistrations: "Campaign Registrations", deepLinks: "Deep Links", missionPool: "Mission Reward Pool", gcProviders: "Providers", gcResults: "Tournament Results",
       gcRewards: "Rewards", gcVerification: "Verification Integrations", gcActivity: "Activity Log",
@@ -8171,7 +8176,7 @@
       settings: "Settings", referralShareContent: "Referral Centre — Share Content",
       referralShareEngagement: "Referral Centre — Share Engagement",
       ccComposer: "Community Centre — Composer", ccCalendar: "Community Centre — Calendar",
-      ccBoard: "Community Centre"
+      ccBoard: "Community Centre — Posts", ccPollResults: "Community Centre — Poll Results"
     };
     if (!found && !inActivateTab) $("#view-title").textContent = titles[view] || view;
     banner(null);
@@ -8186,7 +8191,6 @@
     else if (state.view === "campaignPerformance") loadCampaignPerformance(force);
     else if (state.view === "campaignIntelligence") loadCampaignIntelligence(force);
     else if (state.view === "activeCampaigns") loadActiveCampaigns(force);
-    else if (state.view === "draftCampaigns") loadDraftCampaigns(force);
     else if (state.view === "compiledDrops") loadCompiledDrops(force);
     else if (state.view === "campaigns") loadCampaigns(force);
     else if (state.view === "gcCampaigns") loadGcCampaigns(force);
@@ -8242,6 +8246,7 @@
     else if (state.view === "ccComposer") loadCcComposer(force);
     else if (state.view === "ccCalendar") loadCcCalendar(force);
     else if (state.view === "ccBoard") loadCcBoard(force);
+    else if (state.view === "ccPollResults") loadCcPollResults(force);
   }
 
   function bind() {
@@ -9642,7 +9647,7 @@
             toast(mode === "now" ? "✅ Queued for immediate publish" : "✅ Scheduled", "success");
             done();
             ccResetComposer();
-            if (currentModuleKey === "community") loadCcBoard(true);
+            if (currentModuleKey === "community") ccRefreshBoard();
           });
         });
       }
@@ -9785,20 +9790,39 @@
     return '<table class="data-table"><thead><tr><th>Question</th><th>Destination</th><th>Published</th><th>Status</th><th>Type</th><th>Actions</th></tr></thead><tbody>' + rows + "</tbody></table>";
   }
 
+  // Single Posts list backing the "Posts" tab. The status filter buttons
+  // (#cc-board-filter) select which /api/admin/community/posts status to
+  // query — Scheduled/Draft/Pending Approval/Published/Failed were previously
+  // separate tabs over the exact same endpoint/loader/renderer, so they are
+  // merged here into one list + filter. Poll Results is intentionally NOT
+  // included: it calls a different endpoint (/api/admin/community/polls)
+  // and renders with a different table (ccRenderPollResultsTable), so it
+  // stays a separate view/tab (see loadCcPollResults).
   function loadCcBoard() {
-    var board = currentCcBoard || "scheduled";
+    var board = "";
+    var activeBtn = $("#cc-board-filter .active");
+    if (activeBtn) board = activeBtn.dataset.status || "";
     statePanel("cc-board-body", "loading", "Loading…");
-    if (board === "poll_results") {
-      api("/api/admin/community/polls?limit=100").then(function (d) {
-        $("#cc-board-body").innerHTML = ccRenderPollResultsTable(d.posts || []);
-      }).catch(function (e) { statePanel("cc-board-body", "error", "Failed to load: " + e.message); });
-      return;
-    }
-    var q = CC_BOARD_QUERY[board] || CC_BOARD_QUERY.scheduled;
+    var q = CC_BOARD_QUERY[board] || {};
     var qs = Object.keys(q).map(function (k) { return k + "=" + encodeURIComponent(q[k]); }).join("&");
-    api("/api/admin/community/posts?limit=100&" + qs).then(function (d) {
-      $("#cc-board-body").innerHTML = ccRenderPostsTable(d.posts || [], { showError: board === "failed" });
+    api("/api/admin/community/posts?limit=100" + (qs ? "&" + qs : "")).then(function (d) {
+      $("#cc-board-body").innerHTML = ccRenderPostsTable(d.posts || [], { showError: board === "failed" || board === "" });
     }).catch(function (e) { statePanel("cc-board-body", "error", "Failed to load: " + e.message); });
+  }
+
+  function loadCcPollResults() {
+    statePanel("cc-poll-results-body", "loading", "Loading…");
+    api("/api/admin/community/polls?limit=100").then(function (d) {
+      $("#cc-poll-results-body").innerHTML = ccRenderPollResultsTable(d.posts || []);
+    }).catch(function (e) { statePanel("cc-poll-results-body", "error", "Failed to load: " + e.message); });
+  }
+
+  // Some post actions (stop-poll, view-results) are reachable from both the
+  // Posts board and the separate Poll Results view, since a published poll
+  // can appear in either. Refresh whichever one is actually on screen.
+  function ccRefreshBoard() {
+    if (state.view === "ccPollResults") loadCcPollResults(true);
+    else loadCcBoard(true);
   }
 
   function ccShowPollResultsModal(postId) {
@@ -9960,11 +9984,11 @@
               // "already_published" means the content actually delivered —
               // the row belongs in Published now, not Failed, so refresh
               // even though the retry call itself reported a conflict.
-              if (code === "already_published") loadCcBoard(true);
+              if (code === "already_published") ccRefreshBoard();
               return;
             }
             toast("✅ Post queued for retry", "success");
-            loadCcBoard(true);
+            ccRefreshBoard();
           }).catch(function () {
             toast("❌ Retry failed", "error");
           }).finally(function () {
@@ -9993,7 +10017,7 @@
       apiPostJson("/api/admin/community/posts/" + id + "/reject", { reason: reason }).then(function (r) {
         if (!r.ok) { toast("❌ " + (r.d && r.d.code || "reject_failed"), "error"); return; }
         toast("✅ Returned to draft", "success");
-        loadCcBoard(true);
+        ccRefreshBoard();
       });
       return;
     }
@@ -10003,7 +10027,7 @@
         apiPost("/api/admin/community/posts/" + id + "/stop-poll").then(function (r) {
           if (!r.success) { toast("❌ " + (r.code || "stop_poll_failed"), "error"); return; }
           toast("✅ Poll stopped", "success");
-          loadCcBoard(true);
+          ccRefreshBoard();
         }).catch(function () { toast("❌ Failed to stop poll", "error"); });
       });
       return;
@@ -10012,7 +10036,7 @@
       confirmSimple("Cancel this post?", "This post will be moved to Cancelled and will not be published.").then(function (ok) {
         if (!ok) return;
         apiPost("/api/admin/community/posts/" + id + "/cancel")
-          .then(function () { toast("✅ Cancelled", "success"); loadCcBoard(true); })
+          .then(function () { toast("✅ Cancelled", "success"); ccRefreshBoard(); })
           .catch(function () { toast("❌ Cancel failed", "error"); });
       });
       return;
@@ -10021,7 +10045,7 @@
     apiPost("/api/admin/community/posts/" + id + "/" + action).then(function (r) {
       if (!r.success) { toast("❌ " + (r.code || (action + "_failed")), "error"); return; }
       toast("✅ Done", "success");
-      loadCcBoard(true);
+      ccRefreshBoard();
     }).catch(function () { toast("❌ Action failed", "error"); });
   }
 
@@ -10217,6 +10241,19 @@
     });
 
     $("#cc-board-body").addEventListener("click", function (e) {
+      var btn = e.target.closest && e.target.closest("[data-cc-post-action]");
+      if (!btn) return;
+      ccHandlePostAction(btn.dataset.ccPostAction, btn.dataset.id, btn);
+    });
+
+    $all("#cc-board-filter button").forEach(function (b) {
+      b.addEventListener("click", function () {
+        $all("#cc-board-filter button").forEach(function (x) { x.classList.toggle("active", x === b); });
+        loadCcBoard(true);
+      });
+    });
+
+    $("#cc-poll-results-body").addEventListener("click", function (e) {
       var btn = e.target.closest && e.target.closest("[data-cc-post-action]");
       if (!btn) return;
       ccHandlePostAction(btn.dataset.ccPostAction, btn.dataset.id, btn);
