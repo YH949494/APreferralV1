@@ -23,9 +23,16 @@ import json
 from flask import jsonify, request
 
 
-def resolve_authenticated_telegram_user_id() -> tuple[int | None, tuple | None]:
-    """Returns (telegram_user_id, None) on success, or (None, (response, status))
-    on failure. Never derives identity from a client-supplied user_id/uid."""
+def resolve_authenticated_telegram_user() -> tuple[dict | None, tuple | None]:
+    """Returns (verified_telegram_user_json, None) on success, or
+    (None, (response, status)) on failure. Never derives identity from a
+    client-supplied user_id/uid.
+
+    Use this instead of :func:`resolve_authenticated_telegram_user_id` when a
+    caller also needs the caller's admin status — that requires the caller's
+    Telegram id/username (mission_pool.is_cached_admin_user /
+    vouchers._is_cached_admin), not just the bare id.
+    """
     from vouchers import extract_raw_init_data_from_query, verify_telegram_init_data
 
     init_data_raw = extract_raw_init_data_from_query(request)
@@ -42,8 +49,17 @@ def resolve_authenticated_telegram_user_id() -> tuple[int | None, tuple | None]:
 
     try:
         user_json = json.loads(data.get("user", "{}"))
-        uid = int(user_json.get("id"))
+        int(user_json.get("id"))
     except Exception:
         return None, (jsonify({"status": "error", "code": "not_authenticated:invalid_user"}), 401)
 
-    return uid, None
+    return user_json, None
+
+
+def resolve_authenticated_telegram_user_id() -> tuple[int | None, tuple | None]:
+    """Returns (telegram_user_id, None) on success, or (None, (response, status))
+    on failure. Never derives identity from a client-supplied user_id/uid."""
+    user_json, err = resolve_authenticated_telegram_user()
+    if err:
+        return None, err
+    return int(user_json["id"]), None
