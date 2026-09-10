@@ -275,6 +275,17 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
             "affiliate_unlock": "affiliate",
             "reactivation_reminder": "reactivation",
         },
+        # When only a subset of this group's fields render under a given
+        # Settings tab (see field_categories above), show a label specific
+        # to that tab instead of the generic group label — otherwise a tab
+        # like Affiliate shows an accordion titled "Notification Templates"
+        # with a single, out-of-context field inside it.
+        "category_labels": {
+            "voucher_rules": "Voucher Notification Template",
+            "referral": "Referral Notification Template",
+            "affiliate": "Affiliate Notification Template",
+            "reactivation": "Reactivation Notification Template",
+        },
         "fields": {
             "welcome_success": {"type": "str", "label": "Welcome Success", "default": "🎉 Welcome! Your account is verified.", "env": None, "multiline": True},
             "checkin_reminder": {"type": "str", "label": "Check-in Reminder", "default": "🎁 Your AdvantPlay Welcome Voucher is waiting.\n\nFinish your check-ins to claim it before it expires.\n{link}", "env": None, "multiline": True},
@@ -310,6 +321,9 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
         "category": "general",
         "field_categories": {
             "affiliate_group_invite_url": "affiliate",
+        },
+        "category_labels": {
+            "affiliate": "Affiliate Invite Link",
         },
         "fields": {
             "official_channel_url": {"type": "str", "label": "Official Channel URL", "default": "", "env": "OFFICIAL_CHANNEL_URL"},

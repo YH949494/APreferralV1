@@ -306,6 +306,7 @@ const FIXTURE_SCHEMA = {
   message_templates: {
     label: "Notification Templates",
     field_categories: { affiliate_unlock: "affiliate", referral_near_miss: "referral" },
+    category_labels: { affiliate: "Affiliate Notification Template" },
     fields: {
       affiliate_unlock: { type: "str", label: "Affiliate Unlock", default: "x" },
       referral_near_miss: { type: "str", label: "Referral Near Miss", default: "y" },
@@ -355,6 +356,23 @@ test("loadManagedSettings splits a single group across categories via field_cate
   const referralBody = sandbox.$("#managed-settings-body").innerHTML;
   assert.ok(referralBody.includes("Referral Near Miss"));
   assert.ok(!referralBody.includes("Affiliate Unlock"));
+});
+
+test("msRenderGroup: category_labels overrides the generic group label for a filtered tab", async () => {
+  const sandbox = makeSandbox({
+    apiResponses: { "/api/admin/settings": { schema: FIXTURE_SCHEMA, settings: FIXTURE_VALUES } },
+  });
+  // Affiliate has a category_labels override -> should not show the
+  // generic "Notification Templates" heading around its one field.
+  await vm.runInContext('loadManagedSettings("affiliate")', sandbox);
+  const affiliateBody = sandbox.$("#managed-settings-body").innerHTML;
+  assert.ok(affiliateBody.includes("Affiliate Notification Template"));
+  assert.ok(!affiliateBody.includes(">Notification Templates<"));
+
+  // Referral has no override -> falls back to the group's generic label.
+  await vm.runInContext('loadManagedSettings("referral")', sandbox);
+  const referralBody = sandbox.$("#managed-settings-body").innerHTML;
+  assert.ok(referralBody.includes(">Notification Templates<"));
 });
 
 // ---------------------------------------------------------------------------
