@@ -8554,6 +8554,19 @@ async def send_referral_link_with_share_button(update: Update, context: ContextT
     uid = user.id
     username = user.username or ""
 
+    logger.info("[REFERRAL_DEEPLINK][OPEN] uid=%s", uid)
+
+    # Read-only pre-check: mirrors the same lookup get_or_create_referral_invite_link_sync
+    # performs internally, used here purely to report reused=true/false in the
+    # LINK_READY log below -- never mutates invite_link_map itself.
+    try:
+        dest_chat_id, _dest_type = get_referral_destination()
+        link_existed_before = invite_link_map_collection.find_one(
+            {"chat_id": dest_chat_id, "inviter_id": uid, "is_active": True}
+        ) is not None
+    except Exception:
+        link_existed_before = False
+
     from referral_share_content import MINIAPP_SHARE_SOURCE, generate_share_package
 
     try:
@@ -8564,8 +8577,9 @@ async def send_referral_link_with_share_button(update: Update, context: ContextT
             generated_by=MINIAPP_SHARE_SOURCE,
             include_content_pools=False,
         )
-    except Exception:
+    except Exception as e:
         logger.exception("[REFERRAL][DEEPLINK_FAILED] uid=%s", uid)
+        logger.error("[REFERRAL_DEEPLINK][ERROR] uid=%s err=%s", uid, e)
         await safe_reply_text(
             update.effective_message,
             "Unable to generate your referral link right now. Please try again.",
@@ -8582,6 +8596,7 @@ async def send_referral_link_with_share_button(update: Update, context: ContextT
         else:
             text = "Unable to generate your referral link right now. Please try again."
         logger.error("[REFERRAL][DEEPLINK_FAILED] uid=%s code=%s", uid, code)
+        logger.error("[REFERRAL_DEEPLINK][ERROR] uid=%s err=%s", uid, code)
         await safe_reply_text(
             update.effective_message,
             text,
@@ -8592,6 +8607,7 @@ async def send_referral_link_with_share_button(update: Update, context: ContextT
         return
 
     invite_link = result["invite_link"]
+    logger.info("[REFERRAL_DEEPLINK][LINK_READY] uid=%s reused=%s", uid, link_existed_before)
 
     # Telegram's share/url composes the prefilled message as
     # "{url}\n{text}" (url first, then text) -- not the other way around.
@@ -8610,7 +8626,10 @@ async def send_referral_link_with_share_button(update: Update, context: ContextT
         f"&text={quote(share_text, safe='')}"
     )
     keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("📤 Share Referral Link", url=share_url)]]
+        [
+            [InlineKeyboardButton("📤 Share Referral Link", url=share_url)],
+            [InlineKeyboardButton("📋 Copy Link", callback_data="copy_referral_link")],
+        ]
     )
 
     caption_html = build_miniapp_referral_text(
@@ -8628,6 +8647,29 @@ async def send_referral_link_with_share_button(update: Update, context: ContextT
         raise_on_non_transient=False,
     )
     logger.info("[REFERRAL][DEEPLINK_OK] uid=%s", uid)
+
+
+async def copy_referral_link_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles the '📋 Copy Link' button on the /start?start=referral CTA.
+
+    python-telegram-bot==20.8 (Bot API < 8.0) has no native copy-to-clipboard
+    button, so this answers the callback with a show_alert popup containing
+    the plain link the user can select and copy manually. Reuses
+    get_or_create_referral_invite_link_sync -- the same canonical
+    reuse/creation logic as the Share button -- so it always returns the
+    user's existing link and never mints a second one.
+    """
+    query = update.callback_query
+    user = query.from_user
+    uid = user.id
+    try:
+        link = await asyncio.to_thread(
+            get_or_create_referral_invite_link_sync, uid, user.username or ""
+        )
+        await query.answer(link, show_alert=True)
+    except Exception as e:
+        logger.error("[REFERRAL_DEEPLINK][ERROR] uid=%s err=%s", uid, e)
+        await query.answer("Unable to fetch your link. Please try again.", show_alert=True)
 
 
 CREATOR_SHARE_WEBAPP_URL = "https://apreferralv1.fly.dev/creator-share"
@@ -9426,6 +9468,7 @@ def run_worker():
     )
     app_bot.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, private_message_handler))
     app_bot.add_handler(CallbackQueryHandler(generate_referral_link_callback, pattern=r"^generate_referral_link$"))
+    app_bot.add_handler(CallbackQueryHandler(copy_referral_link_callback, pattern=r"^copy_referral_link$"))
     app_bot.add_handler(CallbackQueryHandler(admin_media_rename_callback, pattern=r"^cml_rename:"))
     app_bot.add_handler(CallbackQueryHandler(button_handler))
     from community_centre import register_handlers as _register_community_centre_handlers

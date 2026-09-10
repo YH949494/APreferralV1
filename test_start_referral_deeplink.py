@@ -148,6 +148,15 @@ def deeplink_env(monkeypatch):
     class _FakeAsyncioModule:
         to_thread = staticmethod(fake_to_thread)
 
+    class _InviteLinkMapCollection:
+        def __init__(self, existing_inviter_ids=None):
+            self._existing = set(existing_inviter_ids or [])
+
+        def find_one(self, filt, sort=None):  # noqa: ARG002
+            if filt.get("inviter_id") in self._existing:
+                return {"invite_link": "https://t.me/+preexisting"}
+            return None
+
     fn.__globals__.update(
         {
             "logger": logger,
@@ -162,6 +171,8 @@ def deeplink_env(monkeypatch):
             "_send_welcome_unclaimed_reminder_if_needed": fake_send_welcome_unclaimed_reminder_if_needed,
             "asyncio": _FakeAsyncioModule(),
             "GROUP_ID": -100999,
+            "get_referral_destination": lambda: (-100999, "group"),
+            "invite_link_map_collection": _InviteLinkMapCollection(),
         }
     )
     fn._logger = logger
@@ -256,7 +267,17 @@ def test_new_user_referral_deeplink_does_not_send_normal_welcome_keyboard(deepli
     button_texts = {b.text for b in buttons}
     assert "📢 Join Official Channel" not in button_texts
     assert "🚀 Open AdvantPlay Mini-App" not in button_texts
-    assert len(buttons) == 1  # only the Share button
+    assert len(buttons) == 2  # Share button + Copy Link button
+
+
+def test_new_user_referral_deeplink_has_copy_link_button(deeplink_env):
+    update = _FakeUpdate(user_id=207)
+    asyncio.run(deeplink_env(update, _FakeContext()))
+
+    buttons = _flat_buttons(deeplink_env._replies[0]["reply_markup"])
+    copy_btns = [b for b in buttons if b.text == "📋 Copy Link"]
+    assert len(copy_btns) == 1
+    assert copy_btns[0].callback_data == "copy_referral_link"
 
 
 # ---------------------------------------------------------------------------
@@ -318,7 +339,7 @@ def test_existing_user_referral_deeplink_no_normal_start_keyboard(deeplink_env):
     asyncio.run(deeplink_env(update, _FakeContext()))
 
     buttons = _flat_buttons(deeplink_env._replies[0]["reply_markup"])
-    assert all(b.text == "📤 Share Referral Link" for b in buttons)
+    assert all(b.text in ("📤 Share Referral Link", "📋 Copy Link") for b in buttons)
 
 
 # ---------------------------------------------------------------------------
@@ -507,6 +528,61 @@ def test_referral_deeplink_never_renders_hook_or_playback(deeplink_env):
     assert "👑 VIP-only announcements" in reply["text"]
     assert "🏆 Weekly ranking rewards" in reply["text"]
     assert reply["text"].count("https://t.me/+regressionHash") == 1
+
+
+# ---------------------------------------------------------------------------
+# New structured [REFERRAL_DEEPLINK] logging.
+# ---------------------------------------------------------------------------
+
+
+def test_referral_deeplink_logs_open(deeplink_env):
+    update = _FakeUpdate(user_id=230)
+    asyncio.run(deeplink_env(update, _FakeContext()))
+
+    opened = [a for a in deeplink_env._logger.infos if a and a[0] == "[REFERRAL_DEEPLINK][OPEN] uid=%s"]
+    assert opened
+    assert opened[-1][1] == 230
+
+
+def test_referral_deeplink_logs_link_ready_not_reused_for_new_link(deeplink_env):
+    update = _FakeUpdate(user_id=231)
+    asyncio.run(deeplink_env(update, _FakeContext()))
+
+    ready = [
+        a
+        for a in deeplink_env._logger.infos
+        if a and a[0] == "[REFERRAL_DEEPLINK][LINK_READY] uid=%s reused=%s"
+    ]
+    assert ready
+    assert ready[-1][1:] == (231, False)
+
+
+def test_referral_deeplink_logs_link_ready_reused_for_existing_link(deeplink_env):
+    class _ExistingInviteLinkMap:
+        def find_one(self, filt, sort=None):  # noqa: ARG002
+            return {"invite_link": "https://t.me/+preexisting"}
+
+    deeplink_env.__globals__["invite_link_map_collection"] = _ExistingInviteLinkMap()
+    update = _FakeUpdate(user_id=232)
+    asyncio.run(deeplink_env(update, _FakeContext()))
+
+    ready = [
+        a
+        for a in deeplink_env._logger.infos
+        if a and a[0] == "[REFERRAL_DEEPLINK][LINK_READY] uid=%s reused=%s"
+    ]
+    assert ready
+    assert ready[-1][1:] == (232, True)
+
+
+def test_referral_deeplink_logs_error_on_generation_failure(deeplink_env):
+    deeplink_env._state["raise_error"] = RuntimeError("createChatInviteLink failed")
+    update = _FakeUpdate(user_id=233)
+    asyncio.run(deeplink_env(update, _FakeContext()))
+
+    errored = [a for a in deeplink_env._logger.errors if a and a[0] == "[REFERRAL_DEEPLINK][ERROR] uid=%s err=%s"]
+    assert errored
+    assert errored[-1][1] == 233
 
 
 def test_referral_deeplink_requests_share_package_without_creator_content_pools(deeplink_env):
