@@ -231,7 +231,18 @@ def is_publicly_active(campaign: dict, provider: dict | None, now: datetime | No
 
 
 def visibility_explanation(campaign: dict, provider: dict | None, now: datetime | None = None) -> dict:
-    """Admin-preview-only breakdown of why a campaign is/isn't publicly visible."""
+    """Admin-preview-only breakdown of why a campaign is/isn't publicly visible.
+
+    The destination/provider checks below must mirror exactly the two cases
+    where _transition()'s own publish gate never requires a destination:
+    Mission Pool (its gate is mission_config + mission_pool.pool_id instead —
+    see mission_pool.py) and any campaign with registration.enabled (it has
+    no external destination to be "ready" — campaign_registration.
+    registration_is_open() never consults destination/provider either).
+    Reporting a destination/provider "reason" in either case would disagree
+    with the actual publish gate and falsely tell an admin their campaign
+    isn't ready when _transition() would happily publish it.
+    """
     now = _as_utc(now) or datetime.now(timezone.utc)
     schedule = campaign.get("schedule") or {}
     starts_at = _as_utc(schedule.get("starts_at"))
@@ -247,12 +258,18 @@ def visibility_explanation(campaign: dict, provider: dict | None, now: datetime 
         reasons.append(f"scheduled to start at {starts_at.isoformat()}")
     if ends_at and now >= ends_at:
         reasons.append(f"ended at {ends_at.isoformat()}")
-    if not destination.get("ready"):
-        reasons.append("destination.ready is false")
-    if not provider:
-        reasons.append("linked provider does not exist")
-    elif not provider_is_usable_for_results(provider):
-        reasons.append("linked provider is inactive")
+
+    destination_required = (
+        campaign.get("type") not in _SELF_REWARDING_TYPES
+        and not (campaign.get("registration") or {}).get("enabled")
+    )
+    if destination_required:
+        if not destination.get("ready"):
+            reasons.append("destination.ready is false")
+        if not provider:
+            reasons.append("linked provider does not exist")
+        elif not provider_is_usable_for_results(provider):
+            reasons.append("linked provider is inactive")
 
     return {
         "publicly_visible": len(reasons) == 0,

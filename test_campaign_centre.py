@@ -135,6 +135,82 @@ def test_visibility_explanation_clean_for_active_campaign():
 
 
 # ---------------------------------------------------------------------------
+# visibility_explanation() vs _transition()'s publish gate: a registration-
+# enabled campaign (any type) and a mission_pool campaign never require a
+# destination/provider in the real publish gate, so visibility_explanation
+# must not report one as a "reason" either (P0.5a follow-up).
+# ---------------------------------------------------------------------------
+
+def test_visibility_explanation_registration_enabled_no_destination_no_provider():
+    """Registration-enabled campaign with no destination and no provider,
+    otherwise fully live/in-window: must NOT report a destination/provider
+    blocker — _transition()'s registration_only bypass never requires one."""
+    c = _campaign(
+        registration={"enabled": True},
+        destination={"provider_id": "", "open_mode": "telegram_web_app", "path": "", "ready": False},
+    )
+    explanation = cc.visibility_explanation(c, None)
+    assert explanation == {"publicly_visible": True, "reasons": []}
+
+
+def test_visibility_explanation_registration_enabled_destination_not_ready_no_blocker():
+    c = _campaign(registration={"enabled": True})
+    c["destination"]["ready"] = False
+    explanation = cc.visibility_explanation(c, _provider())
+    assert not any("destination" in r for r in explanation["reasons"])
+    assert not any("provider" in r for r in explanation["reasons"])
+
+
+def test_visibility_explanation_registration_disabled_destination_not_ready_still_blocks():
+    """Normal (non-registration) campaign: destination.ready is still
+    enforced exactly as before."""
+    c = _campaign(registration={"enabled": False})
+    c["destination"]["ready"] = False
+    explanation = cc.visibility_explanation(c, _provider())
+    assert explanation["publicly_visible"] is False
+    assert any("destination.ready is false" in r for r in explanation["reasons"])
+
+
+def test_visibility_explanation_registration_disabled_missing_provider_still_blocks():
+    c = _campaign(registration={"enabled": False})
+    explanation = cc.visibility_explanation(c, None)
+    assert explanation["publicly_visible"] is False
+    assert any("linked provider does not exist" in r for r in explanation["reasons"])
+
+
+def test_visibility_explanation_registration_disabled_inactive_provider_still_blocks():
+    c = _campaign(registration={"enabled": False})
+    explanation = cc.visibility_explanation(c, _provider(active=False))
+    assert explanation["publicly_visible"] is False
+    assert any("linked provider is inactive" in r for r in explanation["reasons"])
+
+
+def test_visibility_explanation_mission_pool_no_destination_no_provider():
+    """Mission Pool has no destination/provider in its publish gate at all
+    (mission_config + mission_pool.pool_id instead) — must never report a
+    destination/provider blocker regardless of registration."""
+    c = _campaign(
+        type="mission_pool",
+        mechanic="mission_pool",
+        destination={"provider_id": "", "open_mode": "telegram_web_app", "path": "", "ready": False},
+        registration={"enabled": False},
+    )
+    explanation = cc.visibility_explanation(c, None)
+    assert explanation == {"publicly_visible": True, "reasons": []}
+
+
+def test_visibility_explanation_mission_pool_still_reports_schedule_and_status_reasons():
+    """Mission Pool's bypass is destination/provider-only — status/schedule
+    reasons are unaffected."""
+    c = _campaign(type="mission_pool", mechanic="mission_pool", status="draft")
+    explanation = cc.visibility_explanation(c, None)
+    assert explanation["publicly_visible"] is False
+    assert any("status" in r for r in explanation["reasons"])
+    assert not any("destination" in r for r in explanation["reasons"])
+    assert not any("provider" in r for r in explanation["reasons"])
+
+
+# ---------------------------------------------------------------------------
 # _as_utc / naive-vs-aware datetime regression (production TypeError fix)
 # ---------------------------------------------------------------------------
 
