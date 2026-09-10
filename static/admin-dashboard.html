@@ -1735,6 +1735,16 @@
         <div id="gc-campaigns-body"></div>
       </section>
 
+      <!-- CAMPAIGN DETAIL VIEW (P0.5a) — READ-ONLY guided-setup container for
+           a single gc_campaigns document. Entered via "View Details" on the
+           Campaigns table (renderCampaignDetail(campaignId) in
+           admin-dashboard.js); its entire content is rebuilt into #cd-body
+           by loadCampaignDetail() on every load — no other fixed ids are
+           needed here. No form control, PUT, or POST exists on this view. -->
+      <section id="view-campaignDetail" class="hidden">
+        <div id="cd-body"></div>
+      </section>
+
       <!-- CAMPAIGN REGISTRATIONS VIEW (campaign_registration.py) -->
       <section id="view-campaignRegistrations" class="hidden">
         <!-- A. REGISTRATION CONFIGURATION -->

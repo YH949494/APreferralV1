@@ -548,6 +548,13 @@ def get_campaign_route(campaign_id: str):
     provider = get_provider((doc.get("destination") or {}).get("provider_id") or "")
     out = _serialize(doc)
     out["effective_visibility"] = visibility_explanation(doc, provider)
+    # Mirrors list_campaigns' identical computation below — kept in sync so a
+    # single-campaign fetch (e.g. the Campaign Detail admin page) never has to
+    # fall back to the list endpoint just to learn a campaign's share link.
+    if (doc.get("registration") or {}).get("enabled"):
+        import campaign_registration
+
+        out["registration_deep_link"] = campaign_registration.campaign_deep_link(doc["campaign_id"])
     return jsonify({"status": "ok", "campaign": out})
 
 

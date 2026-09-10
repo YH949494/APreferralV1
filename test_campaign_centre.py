@@ -405,6 +405,40 @@ def test_admin_get_single_campaign_does_not_500(fake_db):
     assert body["campaign"]["effective_visibility"]["publicly_visible"] is False
 
 
+def test_admin_get_single_campaign_exposes_deep_link_when_registration_enabled(fake_db, monkeypatch):
+    """Parity with list_campaigns: the single-campaign GET must expose the
+    same registration_deep_link so the Campaign Detail page's Share section
+    doesn't need a second request to the list endpoint (P0.5a)."""
+    from unittest.mock import patch
+
+    monkeypatch.setenv("BOT_USERNAME", "AdvantPlayBot")
+    fake_db["gc_providers"].insert_one(_provider())
+    fake_db["gc_campaigns"].insert_one(_campaign(
+        campaign_id="c-reg", status="draft", registration={"enabled": True}
+    ))
+
+    admin_app = Flask(__name__)
+    admin_app.register_blueprint(cc.campaign_centre_bp)
+    with patch("vouchers.require_admin", return_value=({"id": 1}, None)):
+        resp = admin_app.test_client().get("/api/admin/gc-campaigns/c-reg")
+    body = resp.get_json()
+    assert body["campaign"]["registration_deep_link"] == "https://t.me/AdvantPlayBot?startapp=campaign_c-reg"
+
+
+def test_admin_get_single_campaign_omits_deep_link_when_registration_not_enabled(fake_db):
+    from unittest.mock import patch
+
+    fake_db["gc_providers"].insert_one(_provider())
+    fake_db["gc_campaigns"].insert_one(_campaign(campaign_id="c-no-reg", status="draft"))
+
+    admin_app = Flask(__name__)
+    admin_app.register_blueprint(cc.campaign_centre_bp)
+    with patch("vouchers.require_admin", return_value=({"id": 1}, None)):
+        resp = admin_app.test_client().get("/api/admin/gc-campaigns/c-no-reg")
+    body = resp.get_json()
+    assert "registration_deep_link" not in body["campaign"]
+
+
 # ---------------------------------------------------------------------------
 # gc-campaigns list: mission_active_rewards field for the Campaign Centre
 # table's "End Rewards" visibility (no N+1 fan-out)
