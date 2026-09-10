@@ -5012,10 +5012,127 @@
     });
   }
 
+  // ---------- Shared option caches for the "select instead of typing an
+  // ID" fields below (P0.3). Reused across the Create Campaign / Reward
+  // Pools forms so switching tabs or re-rendering a form doesn't refetch
+  // data another part of the same view already has. ----------
+  var gcOptionsCache = {
+    providers: null, providersPromise: null,
+    campaigns: null, campaignsPromise: null,
+  };
+  var gcKnownCampaignIds = {};
+
+  function fetchGcProviders(force) {
+    if (force) { gcOptionsCache.providers = null; gcOptionsCache.providersPromise = null; }
+    if (gcOptionsCache.providersPromise) return gcOptionsCache.providersPromise;
+    gcOptionsCache.providersPromise = api("/api/admin/providers").then(function (data) {
+      gcOptionsCache.providers = data.providers || [];
+      return gcOptionsCache.providers;
+    }).catch(function (e) { gcOptionsCache.providersPromise = null; throw e; });
+    return gcOptionsCache.providersPromise;
+  }
+
+  function fetchGcCampaignsList(force) {
+    if (force) { gcOptionsCache.campaigns = null; gcOptionsCache.campaignsPromise = null; }
+    if (gcOptionsCache.campaignsPromise) return gcOptionsCache.campaignsPromise;
+    gcOptionsCache.campaignsPromise = api("/api/admin/gc-campaigns").then(function (data) {
+      var items = data.campaigns || [];
+      gcOptionsCache.campaigns = items;
+      gcKnownCampaignIds = {};
+      items.forEach(function (c) { gcKnownCampaignIds[c.campaign_id] = true; });
+      renderGcPoolCampaignSelect();
+      return items;
+    }).catch(function (e) { gcOptionsCache.campaignsPromise = null; throw e; });
+    return gcOptionsCache.campaignsPromise;
+  }
+
+  function gcProviderOptionLabel(p) {
+    var state = p.active ? "active" : "inactive";
+    return (p.name || p.provider_id) + " — " + (p.type || "") + " (" + state + ")";
+  }
+
+  function renderGcProviderSelect() {
+    var select = $("#gc-c-provider");
+    if (!select) return;
+    var current = select.value;
+    var items = gcOptionsCache.providers || [];
+    select.innerHTML = '<option value="">No provider (configure later)</option>' +
+      items.map(function (p) {
+        return '<option value="' + esc(p.provider_id) + '">' + esc(gcProviderOptionLabel(p)) + '</option>';
+      }).join("");
+    if (current && items.some(function (p) { return p.provider_id === current; })) select.value = current;
+  }
+
+  function loadGcProviderSelect(force) {
+    var select = $("#gc-c-provider");
+    // Only show the loading placeholder before the first load — once the
+    // cache is populated, re-entering this tab must not clobber whatever
+    // the admin already has selected while the (cached, near-instant)
+    // fetch resolves.
+    if (select && !gcOptionsCache.providers) select.innerHTML = '<option value="">Loading providers…</option>';
+    return fetchGcProviders(force).then(renderGcProviderSelect).catch(function () {
+      if (select) select.innerHTML = '<option value="">Couldn\'t load providers. Try again.</option>';
+    });
+  }
+
+  function gcCampaignOptionLabel(c) {
+    return (c.name || c.campaign_id) + " (" + c.campaign_id + ")";
+  }
+
+  function renderGcPoolCampaignSelect() {
+    var select = $("#gc-pool-campaign");
+    if (!select) return;
+    var current = select.value;
+    var items = gcOptionsCache.campaigns || [];
+    select.innerHTML = '<option value="">No campaign link</option>' +
+      items.map(function (c) {
+        return '<option value="' + esc(c.campaign_id) + '">' + esc(gcCampaignOptionLabel(c)) + '</option>';
+      }).join("");
+    if (current && items.some(function (c) { return c.campaign_id === current; })) select.value = current;
+  }
+
+  // ---------- Campaign ID slug generation (P0.3) ----------
+  // Deterministic, URL-safe: lowercase, hyphen-separated, unsafe characters
+  // stripped, repeated/leading/trailing separators collapsed. Only ever
+  // runs client-side to prefill the Technical Details field for a NEW
+  // campaign — editing an existing campaign never touches this.
+  function gcSlugify(name) {
+    var s = (name || "").toString();
+    if (typeof s.normalize === "function") {
+      s = s.normalize("NFKD").replace(/[̀-ͯ]/g, "");
+    }
+    return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  }
+
+  function gcSlugCandidate(base, n) {
+    return n <= 1 ? base : base + "-" + n;
+  }
+
+  // Skips ids already known to be in active use (from the last campaigns
+  // list fetch) before ever hitting the network — the safest pre-submit
+  // collision check available, though it can't see tombstoned ids (the
+  // list endpoint excludes deleted campaigns), which is why the submit
+  // path below still retries on a 409 from the server.
+  function gcFirstAvailableSuffix(base) {
+    var n = 1;
+    while (gcKnownCampaignIds[gcSlugCandidate(base, n)]) n++;
+    return n;
+  }
+
+  var gcCampaignIdManuallyEdited = false;
+
+  function gcUpdateAutoSlugPreview() {
+    if (gcCampaignIdManuallyEdited) return;
+    var idField = $("#gc-c-id");
+    if (!idField) return;
+    var base = gcSlugify($("#gc-c-name") ? $("#gc-c-name").value : "");
+    idField.value = base ? gcSlugCandidate(base, gcFirstAvailableSuffix(base)) : "";
+  }
+
   function loadGcCampaigns(force) {
     statePanel("gc-campaigns-body", "loading", "Loading campaigns…");
-    api("/api/admin/gc-campaigns").then(function (data) {
-      var items = data.campaigns || [];
+    loadGcProviderSelect(force);
+    fetchGcCampaignsList(force).then(function (items) {
       if (!items.length) { $("#gc-campaigns-body").innerHTML = emptyState("No campaigns yet — create one above."); return; }
       var rows = items.map(function (c) {
         var vis = c.effective_visibility || {};
@@ -5078,7 +5195,55 @@
     if (mod) mod.open(campaignId);
   }
 
+  // Attempts creation with an auto-generated slug, retrying with the next
+  // "-N" suffix on a collision response (duplicate id still in use, or a
+  // tombstoned/previously-deleted id) since creation isn't yet applied and
+  // is therefore safe to retry with a different id. A manually-entered id
+  // (Advanced) is never suffixed — the admin chose it on purpose, so a
+  // collision there is reported back for them to change it themselves.
+  function gcCreateCampaignAttempt(baseBody, base, n, manualId, createBtn) {
+    var maxAttempts = 25;
+    var candidateId = manualId != null ? manualId : gcSlugCandidate(base, n);
+    var body = {
+      campaign_id: candidateId,
+      name: baseBody.name,
+      type: baseBody.type,
+      schedule: baseBody.schedule,
+      telegram: baseBody.telegram,
+      destination: baseBody.destination,
+    };
+    return apiPostJson("/api/admin/gc-campaigns", body).then(function (res) {
+      if (res.ok && res.d && res.d.status === "ok") {
+        toast("✅ Campaign created as draft (" + candidateId + ")", "success");
+        var idField = $("#gc-c-id");
+        if (idField) idField.value = candidateId;
+        loadGcCampaigns(true);
+        return;
+      }
+      var code = res.d && res.d.code;
+      var collision = code === "duplicate_campaign_id" || code === "campaign_id_previously_deleted";
+      if (collision && manualId == null && n < maxAttempts) {
+        return gcCreateCampaignAttempt(baseBody, base, n + 1, null, createBtn);
+      }
+      if (collision) {
+        toast(manualId != null
+          ? "❌ That Campaign ID is already taken (or was used before and retired). Try a different one under Technical Details."
+          : "❌ Couldn't find a free campaign ID for this name after several tries. Set one manually under Technical Details.",
+          "error");
+      } else {
+        toast("❌ " + (code || "create_failed"), "error");
+      }
+    }).catch(function (e) {
+      toast("❌ Couldn't create the campaign. Try again.", "error");
+    });
+  }
+
   function bindGcCampaigns() {
+    var nameField = $("#gc-c-name");
+    if (nameField) nameField.addEventListener("input", gcUpdateAutoSlugPreview);
+    var idField = $("#gc-c-id");
+    if (idField) idField.addEventListener("input", function () { gcCampaignIdManuallyEdited = true; });
+
     var newBtn = $("#gc-new-campaign-btn");
     if (newBtn) newBtn.addEventListener("click", function () {
       ["gc-c-id", "gc-c-name", "gc-c-provider", "gc-c-path", "gc-c-channel",
@@ -5086,15 +5251,17 @@
         var node = $("#" + id);
         if (node) node.value = "";
       });
+      gcCampaignIdManuallyEdited = false;
     });
 
     var createBtn = $("#gc-create-campaign-btn");
     if (createBtn) {
       createBtn.addEventListener("click", function () {
+        var name = ($("#gc-c-name").value || "").trim();
+        if (!name) { toast("❌ Campaign name is required.", "error"); return; }
         var type = $("#gc-c-type").value;
-        var body = {
-          campaign_id: ($("#gc-c-id").value || "").trim(),
-          name: ($("#gc-c-name").value || "").trim(),
+        var baseBody = {
+          name: name,
           type: type,
           schedule: {
             starts_at: $("#gc-c-starts").value ? new Date($("#gc-c-starts").value).toISOString() : null,
@@ -5103,11 +5270,18 @@
           telegram: { channel_username: ($("#gc-c-channel").value || "").trim() },
           destination: { provider_id: ($("#gc-c-provider").value || "").trim(), path: ($("#gc-c-path").value || "").trim(), open_mode: "telegram_web_app", ready: false },
         };
-        apiPostJson("/api/admin/gc-campaigns", body).then(function (res) {
-          if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "create_failed"), "error"); return; }
-          toast("✅ Campaign created as draft", "success");
-          loadGcCampaigns(true);
-        });
+
+        createBtn.disabled = true;
+        var done = function () { createBtn.disabled = false; };
+        if (gcCampaignIdManuallyEdited) {
+          var manualId = ($("#gc-c-id").value || "").trim();
+          if (!manualId) { toast("❌ Campaign ID cannot be empty.", "error"); done(); return; }
+          gcCreateCampaignAttempt(baseBody, null, 1, manualId, createBtn).then(done);
+        } else {
+          var base = gcSlugify(name);
+          if (!base) { toast("❌ Couldn't generate a campaign ID from that name — add letters or numbers, or set one manually under Technical Details.", "error"); done(); return; }
+          gcCreateCampaignAttempt(baseBody, base, gcFirstAvailableSuffix(base), null, createBtn).then(done);
+        }
       });
     }
 
@@ -6144,8 +6318,8 @@
 
   function loadGcProviders(force) {
     statePanel("gc-providers-body", "loading", "Loading providers…");
-    api("/api/admin/providers").then(function (data) {
-      var items = data.providers || [];
+    fetchGcProviders(force).then(function (items) {
+      renderGcProviderSelect();
       if (!items.length) { $("#gc-providers-body").innerHTML = emptyState("No providers yet — create one above."); return; }
       var rows = items.map(function (p) {
         return '<tr><td>' + esc(p.name) + '<div class="sub">' + esc(p.provider_id) + '</div><div class="sub">' + esc(p.base_url || "") + '</div></td>' +
@@ -6231,8 +6405,17 @@
     return warnings;
   }
 
+  function loadGcPoolCampaignSelect(force) {
+    var select = $("#gc-pool-campaign");
+    if (select && !gcOptionsCache.campaigns) select.innerHTML = '<option value="">Loading campaigns…</option>';
+    fetchGcCampaignsList(force).catch(function () {
+      if (select) select.innerHTML = '<option value="">Couldn\'t load campaigns. Try again.</option>';
+    });
+  }
+
   function loadGcRewards(force) {
     statePanel("gc-rewards-body", "loading", "Loading reward pools…");
+    loadGcPoolCampaignSelect(force);
     api("/api/admin/reward-pools").then(function (data) {
       var pools = data.pools || [];
       if (!pools.length) { $("#gc-pools-body").innerHTML = emptyState("No reward pools registered yet."); return; }
@@ -6271,12 +6454,17 @@
     var createPoolBtn = $("#gc-create-pool-btn");
     if (createPoolBtn) {
       createPoolBtn.addEventListener("click", function () {
+        // The dropdown only lists the most recent campaigns (the admin
+        // list endpoint caps at 200) — a manually-typed id under Advanced
+        // always wins so an older/lower-priority campaign not shown there
+        // can still be linked.
+        var manualCampaignId = ($("#gc-pool-campaign-manual") ? $("#gc-pool-campaign-manual").value : "").trim();
         var body = {
           pool_id: ($("#gc-pool-id").value || "").trim(),
           name: ($("#gc-pool-name").value || "").trim(),
           pool_type: $("#gc-pool-type").value,
           allocation_scope: $("#gc-pool-scope") ? $("#gc-pool-scope").value : "campaign_rewards",
-          campaign_id: ($("#gc-pool-campaign").value || "").trim(),
+          campaign_id: manualCampaignId || ($("#gc-pool-campaign").value || "").trim(),
         };
         apiPostJson("/api/admin/reward-pools", body).then(function (res) {
           if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "create_failed"), "error"); return; }
