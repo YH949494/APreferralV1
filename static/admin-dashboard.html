@@ -435,14 +435,16 @@
         <div id="ci-tab-body"></div>
       </section>
 
-      <!-- ACTIVE CAMPAIGNS VIEW -->
+      <!-- CAMPAIGNS VIEW (Campaign Builder: Running + Draft, one list + status filter) -->
       <section id="view-activeCampaigns" class="hidden">
+        <div class="controls" style="margin-bottom:16px;">
+          <div class="seg" id="ac-status-filter">
+            <button data-status="active" class="active">Running</button>
+            <button data-status="draft">Draft</button>
+            <button data-status="">All</button>
+          </div>
+        </div>
         <div id="ac-list-body"></div>
-      </section>
-
-      <!-- DRAFT CAMPAIGNS VIEW -->
-      <section id="view-draftCampaigns" class="hidden">
-        <div id="dc-list-body"></div>
       </section>
 
       <!-- COMPILED VOUCHER DROPS VIEW -->
@@ -935,10 +937,25 @@
         <div id="cc-calendar-body"></div>
       </section>
 
-      <!-- COMMUNITY CENTRE: SHARED BOARD (Scheduled / Drafts / Pending Approval / Published / Poll Results / Failed) -->
+      <!-- COMMUNITY CENTRE: POSTS BOARD (Scheduled / Draft / Pending Approval / Published / Failed — one list + status filter) -->
       <section id="view-ccBoard" class="hidden">
+        <div class="controls" style="margin-bottom:16px;">
+          <div class="seg" id="cc-board-filter">
+            <button data-status="" class="active">All</button>
+            <button data-status="scheduled">Scheduled</button>
+            <button data-status="draft">Draft</button>
+            <button data-status="pending_approval">Pending Approval</button>
+            <button data-status="published">Published</button>
+            <button data-status="failed">Failed</button>
+          </div>
+        </div>
         <div class="card-grid" id="cc-board-summary"></div>
         <div id="cc-board-body"></div>
+      </section>
+
+      <!-- COMMUNITY CENTRE: POLL RESULTS (separate data source/renderer — not a status filter) -->
+      <section id="view-ccPollResults" class="hidden">
+        <div id="cc-poll-results-body"></div>
       </section>
 
       <!-- AFFILIATE VIEW -->
