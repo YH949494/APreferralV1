@@ -151,6 +151,13 @@ function loadModules() {
   return sandbox.__RESULT__;
 }
 
+function loadModuleGroups() {
+  const sandbox = { console };
+  vm.createContext(sandbox);
+  vm.runInContext(MODULES_SRC + "\nvar __RESULT__ = MODULE_GROUPS;", sandbox);
+  return sandbox.__RESULT__;
+}
+
 function settingsTabs() {
   const modules = loadModules();
   const settingsModule = modules.find((m) => m.key === "settings");
@@ -211,6 +218,26 @@ test("no two Settings-module tabs share the same settingsCategory", () => {
   const categories = tabs.map((t) => t.settingsCategory).filter(Boolean);
   const unique = new Set(categories);
   assert.equal(unique.size, categories.length, "duplicate settingsCategory across Settings tabs");
+});
+
+// ---------------------------------------------------------------------------
+// Sidebar grouping (MODULE_GROUPS) - every MODULES key must be grouped
+// exactly once; grouping is presentation-only and must not drop a module.
+// ---------------------------------------------------------------------------
+
+test("every MODULES key appears in exactly one MODULE_GROUPS entry", () => {
+  const modules = loadModules();
+  const groups = loadModuleGroups();
+  const moduleKeys = modules.map((m) => m.key);
+  const groupedKeys = groups.flatMap((g) => g.keys);
+
+  moduleKeys.forEach((key) => {
+    const count = groupedKeys.filter((k) => k === key).length;
+    assert.equal(count, 1, `module "${key}" should appear in exactly one group, found ${count}`);
+  });
+  groupedKeys.forEach((key) => {
+    assert.ok(moduleKeys.includes(key), `MODULE_GROUPS references unknown module key "${key}"`);
+  });
 });
 
 // ---------------------------------------------------------------------------
