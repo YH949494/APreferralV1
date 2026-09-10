@@ -1611,28 +1611,44 @@ test("success refreshes the Campaign Centre table for both Mission row actions",
     /loadGcCampaigns\(true\)/);
 });
 
-test('"Open in Mission Reward Pool" is shortened to "Open" in the dense table', () => {
-  assert.ok(DASH_JS.includes(">Open</button>"));
-  assert.ok(!DASH_JS.includes(">Open in Mission Reward Pool<"),
-    "the long label must not still be rendered in the row");
+// P0.4 moved the row's "Open in Mission Reward Pool" / "Open" link (and
+// every other secondary action) off the dense table row into the "•••"
+// overflow menu (gcOverflowMenuHtml), which reuses gcMissionActionsHtml()
+// unchanged for Close Mission / End Rewards legality — see
+// test_admin_dashboard_p0_4_campaign_list.test.js for the full P0.4 suite.
+// The two tests below are updated in place (not deleted) because they
+// pin behavior that still matters post-redesign: a standalone, unambiguous
+// label for the mission link, and Close Mission / End Rewards still sitting
+// between Pause and Archive — just inside the menu now, not a flat row.
+function loadGcOverflowMenuHtml() {
+  const esc = (s) => String(s == null ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  const missionFn = new Function("esc", "return (" + extractFunctionSource(DASH_JS, "gcMissionActionsHtml") + ")")(esc);
+  return new Function("esc", "gcMissionActionsHtml",
+    "return (" + extractFunctionSource(DASH_JS, "gcOverflowMenuHtml") + ")")(esc, missionFn);
+}
+
+test('"Open in Mission Reward Pool" is "Open Mission" in the overflow menu, not the bare old "Open"', () => {
+  const gcOverflowMenuHtml = loadGcOverflowMenuHtml();
+  const html = gcOverflowMenuHtml(
+    { campaign_id: "m1", mechanic: "mission_pool", status: "live", mission_active_rewards: 0 },
+    { canPublish: false, publishLabel: "Publish", canPause: false, canArchive: false, canDelete: false, isMission: true }
+  );
+  assert.match(html, /data-gc-action="mission"[^>]*>Open Mission</);
+  assert.ok(!html.includes(">Open<"), "the bare table-cell label must not survive into the overflow menu");
+  assert.ok(!html.includes("Open in Mission Reward Pool"), "the long label must not be reintroduced");
 });
 
-test("row action order keeps Close Mission / End Rewards between Pause and Archive", () => {
-  const start = DASH_JS.indexOf('data-gc-action="publish"');
-  const end = DASH_JS.indexOf('data-gc-action="preview"', start);
-  const block = DASH_JS.slice(start, end);
-  const order = ["publish", "pause", "close-mission", "end-rewards", "archive"]
-    .map((a) => block.indexOf('data-gc-action="' + a + '"'));
-  // close-mission/end-rewards come from gcMissionActionsHtml() spliced in
-  // between pause and archive; their markers are absent from the static
-  // template but present in the function above, so just check the anchors
-  // that ARE static (publish, pause, archive) keep their relative order and
-  // that the mission actions helper call sits between them.
-  assert.ok(order[0] < order[1], "publish must precede pause");
-  const pauseToArchive = DASH_JS.slice(
-    DASH_JS.indexOf('data-gc-action="pause"'),
-    DASH_JS.indexOf('data-gc-action="archive"')
+test("overflow menu keeps Close Mission / End Rewards between Pause and Archive", () => {
+  const gcOverflowMenuHtml = loadGcOverflowMenuHtml();
+  const html = gcOverflowMenuHtml(
+    { campaign_id: "m1", mechanic: "mission_pool", status: "live", mission_active_rewards: 3 },
+    { canPublish: false, publishLabel: "Publish", canPause: true, canArchive: true, canDelete: false, isMission: true }
   );
-  assert.ok(pauseToArchive.includes("gcMissionActionsHtml(c)"),
-    "Mission actions must be spliced between Pause and Archive");
+  const order = ["pause", "close-mission", "end-rewards", "archive"]
+    .map((a) => html.indexOf('data-gc-action="' + a + '"'));
+  assert.ok(order.every((i) => i !== -1), "expected all four actions present: " + JSON.stringify(order));
+  assert.ok(order[0] < order[1] && order[1] < order[2] && order[2] < order[3],
+    "Close Mission / End Rewards must stay between Pause and Archive");
 });

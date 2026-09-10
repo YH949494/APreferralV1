@@ -5334,37 +5334,48 @@
     idField.value = base ? gcSlugCandidate(base, gcFirstAvailableSuffix(base)) : "";
   }
 
+  // Campaigns list (P0.4). Performance: exactly 2-3 requests regardless of
+  // how many campaigns are on screen — never one per row. The campaigns
+  // list, providers list and reward-pools list are each fetched (and
+  // cached) once per page load; providers/pools are only lookups
+  // computeSetupChecklist() joins against locally, the same lookups already
+  // shared with Campaign Detail (P0.5a) and the Create Campaign form (P0.3).
+  // Reward pools are skipped entirely when no row on the page is a Mission
+  // Pool campaign, so a page with no missions costs one less request.
   function loadGcCampaigns(force) {
     statePanel("gc-campaigns-body", "loading", "Loading campaigns…");
     loadGcProviderSelect(force);
-    fetchGcCampaignsList(force).then(function (items) {
-      if (!items.length) { $("#gc-campaigns-body").innerHTML = emptyState("No campaigns yet — create one above."); return; }
-      var rows = items.map(function (c) {
-        var vis = c.effective_visibility || {};
-        var visBadge = vis.publicly_visible ? '<span class="pill approved">public</span>' : '<span class="pill pending">admin-only</span>';
-        var reasons = (vis.reasons || []).map(function (r) { return '<div class="sub">' + esc(r) + '</div>'; }).join("");
-        return '<tr><td>' + esc(c.name || "") + '<div class="sub">' + esc(c.campaign_id) + '</div></td>' +
-          '<td>' + esc(c.type || "") + '</td>' +
-          '<td>' + gcPill(c.status) + '</td>' +
-          '<td>' + visBadge + reasons + '</td>' +
-          '<td>' +
-          '<button class="btn" data-gc-action="detail" data-id="' + esc(c.campaign_id) + '">View Details</button> ' +
-          '<button class="btn" data-gc-action="publish" data-id="' + esc(c.campaign_id) + '">Publish</button> ' +
-          '<button class="btn" data-gc-action="pause" data-id="' + esc(c.campaign_id) + '">Pause</button>' +
-          gcMissionActionsHtml(c) +
-          ' <button class="btn" data-gc-action="archive" data-id="' + esc(c.campaign_id) + '">Archive</button> ' +
-          '<button class="btn" data-gc-action="preview" data-id="' + esc(c.campaign_id) + '">Preview Campaign</button> ' +
-          '<button class="btn" data-gc-action="registration" data-id="' + esc(c.campaign_id) + '">' +
-            ((c.registration && c.registration.enabled) ? "Registration ✅" : "Registration") + '</button> ' +
-          '<button class="btn" data-gc-action="duplicate" data-id="' + esc(c.campaign_id) + '">Duplicate</button> ' +
-          '<button class="btn danger" data-gc-action="delete" data-id="' + esc(c.campaign_id) + '" data-name="' + esc(c.name || "") + '">Delete</button>' +
-          (c.mechanic === "mission_pool"
-            ? ' <button class="btn" data-gc-action="mission" data-id="' + esc(c.campaign_id) + '">Open</button>'
-            : "") +
-          '</td></tr>';
+    var filterBtn = $("#gc-status-filter .active");
+    var statusFilter = filterBtn ? (filterBtn.dataset.status || "") : "";
+    Promise.all([fetchGcCampaignsList(force), fetchGcProviders(force)]).then(function (deps) {
+      var allItems = deps[0] || [], providers = deps[1] || [];
+      var needsPools = allItems.some(function (c) { return c.mechanic === "mission_pool" || c.type === "mission_pool"; });
+      return (needsPools ? fetchGcRewardPools(force) : Promise.resolve([])).then(function (pools) {
+        return { allItems: allItems, providers: providers, pools: pools || [] };
+      });
+    }).then(function (ctx) {
+      if (!ctx.allItems.length) {
+        $("#gc-campaigns-body").innerHTML = emptyState(gcEmptyStateForFilter(""));
+        return;
+      }
+      var items = statusFilter ? ctx.allItems.filter(function (c) { return c.status === statusFilter; }) : ctx.allItems;
+      if (!items.length) {
+        $("#gc-campaigns-body").innerHTML = emptyState(gcEmptyStateForFilter(statusFilter));
+        return;
+      }
+      var groups = gcGroupCampaigns(items, statusFilter);
+      $("#gc-campaigns-body").innerHTML = groups.map(function (g) {
+        var heading = g.heading
+          ? '<div class="section-title" style="margin:18px 0 8px;font-size:12px;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);">' + esc(g.heading) + '</div>'
+          : "";
+        return heading + g.items.map(function (c) {
+          var rows = computeSetupChecklist(c, ctx.providers, ctx.pools);
+          return gcCampaignRowHtml(c, rows);
+        }).join("");
       }).join("");
-      $("#gc-campaigns-body").innerHTML = '<table class="data-table"><thead><tr><th>Campaign</th><th>Type</th><th>Status</th><th>Visibility</th><th>Actions</th></tr></thead><tbody>' + rows + '</tbody></table>';
-    }).catch(function (e) { statePanel("gc-campaigns-body", "error", "Failed to load campaigns: " + e.message); });
+    }).catch(function () {
+      statePanel("gc-campaigns-body", "error", "Couldn't load campaigns. Try again.");
+    });
   }
 
   // ---------------------------------------------------------------------
@@ -5392,7 +5403,16 @@
     mission_pool: "Mission",
   };
 
-  function gcTypeLabel(type) { return GC_TYPE_LABELS[type] || type || "Unknown type"; }
+  // Unknown/future campaign types (added server-side before this map is
+  // updated) degrade to a cleaned-up label instead of a raw snake_case enum
+  // — never the literal `type` string itself (P0.4 §8).
+  function gcHumanizeFallback(s) {
+    s = (s || "").toString().trim();
+    if (!s) return "Unknown type";
+    return s.replace(/_/g, " ").replace(/\b\w/g, function (c) { return c.toUpperCase(); });
+  }
+
+  function gcTypeLabel(type) { return GC_TYPE_LABELS[type] || gcHumanizeFallback(type); }
 
   var GC_MISSION_TYPE_LABELS = {
     multiple_choice: "Multiple choice question",
@@ -5565,17 +5585,96 @@
     return null;
   }
 
+  // Mirrors campaign_centre._VALID_STATUS_TRANSITIONS exactly — the single
+  // source of truth for which status-changing overflow actions the
+  // Campaigns list (and Ready-to-Publish above) may ever offer. Never
+  // hardcode a status transition anywhere else in this file; add a new
+  // status here first, then derive from it.
+  var GC_VALID_STATUS_TRANSITIONS = {
+    draft: ["draft", "scheduled", "live", "archived"],
+    scheduled: ["scheduled", "live", "draft", "paused", "archived"],
+    live: ["live", "paused", "ended", "archived"],
+    paused: ["paused", "live", "ended", "archived"],
+    ended: ["ended", "archived"],
+    archived: ["archived"],
+  };
+
+  function gcCanTransitionTo(status, target) {
+    return (GC_VALID_STATUS_TRANSITIONS[status] || []).indexOf(target) !== -1;
+  }
+
+  // Mirrors campaign_centre._DELETABLE_STATUSES — permanent deletion is only
+  // ever offered once a campaign can no longer be publicly active.
+  var GC_DELETABLE_STATUSES = ["draft", "archived", "ended"];
+
   // Whether campaign_centre._transition() would even accept a "live" target
-  // from this status — mirrors _VALID_STATUS_TRANSITIONS exactly ("live" is
-  // reachable from draft/scheduled/paused, and live->live is a no-op;
-  // never from ended/archived). Ready-to-Publish must be judged against
-  // this actual publish gate, not against effective_visibility.reasons:
-  // that field answers "is this live campaign publicly visible right now"
-  // (it includes schedule timing, e.g. "scheduled to start at <future
-  // date>"), a different question from "would clicking Publish succeed" —
-  // a campaign scheduled to start tomorrow is perfectly publishable today.
+  // from this status ("live" is reachable from draft/scheduled/paused, and
+  // live->live is a no-op; never from ended/archived). Ready-to-Publish must
+  // be judged against this actual publish gate, not against
+  // effective_visibility.reasons: that field answers "is this live campaign
+  // publicly visible right now" (it includes schedule timing, e.g.
+  // "scheduled to start at <future date>"), a different question from
+  // "would clicking Publish succeed" — a campaign scheduled to start
+  // tomorrow is perfectly publishable today.
   function gcCanTransitionToLive(status) {
-    return ["draft", "scheduled", "paused", "live"].indexOf(status) !== -1;
+    return gcCanTransitionTo(status, "live");
+  }
+
+  // ---- Campaign list (P0.4): legal overflow actions + setup summary -----
+  //
+  // Every status-gated action button below is derived from
+  // GC_VALID_STATUS_TRANSITIONS / GC_DELETABLE_STATUSES, never invented per
+  // status — so an illegal transition (e.g. Publish on an ended campaign)
+  // can never render. Mission Pool's Close Mission / End Rewards legality
+  // stays owned by gcMissionActionsHtml() above (reused as-is, not
+  // reimplemented here) so there is exactly one place that decides it.
+  function gcListActions(campaign) {
+    campaign = campaign || {};
+    var status = campaign.status;
+    return {
+      canPublish: gcCanTransitionTo(status, "live") && status !== "live",
+      publishLabel: status === "paused" ? "Resume" : "Publish",
+      canPause: gcCanTransitionTo(status, "paused") && status !== "paused",
+      canArchive: gcCanTransitionTo(status, "archived") && status !== "archived",
+      canDelete: GC_DELETABLE_STATUSES.indexOf(status) !== -1,
+      isMission: campaign.mechanic === "mission_pool",
+    };
+  }
+
+  // Concise setup readiness for a list row — reuses computeSetupChecklist()
+  // (the exact publish-gate checklist P0.5a's Campaign Detail already
+  // shows), never a second/looser notion of "ready". The full row-by-row
+  // checklist stays Campaign Detail-only; the list only ever shows this one
+  // line (P0.4 §4).
+  function gcSetupSummary(rows) {
+    var progress = gcChecklistProgress(rows);
+    if (!progress.total || progress.completed === progress.total) return "Setup complete";
+    var missing = (rows || [])
+      .filter(function (r) { return r.applicable && r.required && !r.complete; })
+      .map(function (r) { return r.label; });
+    return progress.completed + " / " + progress.total + " setup complete" +
+      (missing.length ? " · " + missing.join(", ") + " missing" : "");
+  }
+
+  // Compact KL-date-only range for the list row (Campaign Detail's "When"
+  // row already shows the full date+time via ccUtcToKlDisplay — the list
+  // only needs the date). Self-contained (no ccPad2/ccUtcToKlDisplay
+  // dependency) so this pure block stays extractable on its own.
+  function gcListDateSummary(schedule) {
+    schedule = schedule || {};
+    function klDate(iso) {
+      if (!iso) return null;
+      var d = new Date(iso);
+      if (isNaN(d.getTime())) return null;
+      var kl = new Date(d.getTime() + 8 * 3600 * 1000);
+      var m = kl.getUTCMonth() + 1, day = kl.getUTCDate();
+      return kl.getUTCFullYear() + "-" + (m < 10 ? "0" : "") + m + "-" + (day < 10 ? "0" : "") + day;
+    }
+    var start = klDate(schedule.starts_at);
+    var end = klDate(schedule.ends_at);
+    if (!start) return "No dates set";
+    if (!end) return "Starts " + start;
+    return start + "  →  " + end;
   }
 
   function gcIsReadyToPublish(rows, campaign) {
@@ -5596,6 +5695,111 @@
         ? "Share link is temporarily unavailable — the bot username isn't configured yet."
         : "This campaign type doesn't have a shareable link.",
     };
+  }
+
+  // ---- Pure HTML builders — Campaigns list row (P0.4) -------------------
+  //
+  // A row exposes exactly one primary action (Manage, which opens the
+  // existing read-only Campaign Detail) plus a "•••" overflow of the rare/
+  // destructive actions, gated by gcListActions() above. It never renders
+  // campaign_id/provider_id/pool_id/raw type-or-mechanic enums as visible
+  // text (those stay Campaign Detail → Technical Details only) — ids only
+  // ever appear in data-id attributes, which drive click handlers, not
+  // beginner-facing copy.
+
+  function gcOverflowMenuHtml(campaign, actions) {
+    var id = esc(campaign.campaign_id), name = esc(campaign.name || campaign.campaign_id || "");
+    var items = [];
+    if (actions.canPublish) {
+      items.push('<button data-gc-action="publish" data-id="' + id + '">' + esc(actions.publishLabel) + '</button>');
+    }
+    if (actions.canPause) items.push('<button data-gc-action="pause" data-id="' + id + '">Pause</button>');
+    // Close Mission / End Rewards legality stays owned by gcMissionActionsHtml
+    // (defined above, shared with the pre-P0.4 table) — its <button class="btn"
+    // ...> markup drops straight into this menu, same list position (between
+    // Pause and Archive) it always had.
+    items.push(gcMissionActionsHtml(campaign));
+    if (actions.canArchive) items.push('<button data-gc-action="archive" data-id="' + id + '">Archive</button>');
+    items.push('<button data-gc-action="preview" data-id="' + id + '">Preview</button>');
+    items.push('<button data-gc-action="registration" data-id="' + id + '">' +
+      ((campaign.registration && campaign.registration.enabled) ? "Registration ✅" : "Registration") + '</button>');
+    items.push('<button data-gc-action="duplicate" data-id="' + id + '">Duplicate</button>');
+    if (actions.canDelete) {
+      items.push('<button class="danger" data-gc-action="delete" data-id="' + id + '" data-name="' + name + '">Delete</button>');
+    }
+    if (actions.isMission) items.push('<button data-gc-action="mission" data-id="' + id + '">Open Mission</button>');
+    return '<div class="gc-row-menu hidden">' + items.join("") + '</div>';
+  }
+
+  function gcCampaignRowHtml(campaign, rows) {
+    campaign = campaign || {};
+    var actions = gcListActions(campaign);
+    var summary = gcSetupSummary(rows);
+    var displayName = esc(campaign.name || campaign.campaign_id || "Untitled campaign");
+    return '<div class="campaign-card" data-gc-row-id="' + esc(campaign.campaign_id) + '" tabindex="0" role="button" aria-label="Manage ' + displayName + '">' +
+      '<div class="campaign-card-header">' +
+        '<div class="campaign-card-title">' + displayName + '</div>' +
+        gcPill(campaign.status) +
+      '</div>' +
+      '<div class="campaign-card-meta">' +
+        '<span>' + esc(gcTypeLabel(campaign.type)) + '</span>' +
+        '<span>' + esc(gcListDateSummary(campaign.schedule)) + '</span>' +
+      '</div>' +
+      '<div class="sub" style="margin-top:6px;">' + esc(summary) + '</div>' +
+      '<div class="campaign-card-actions">' +
+        '<button class="btn primary" data-gc-action="detail" data-id="' + esc(campaign.campaign_id) + '">Manage</button>' +
+        '<div class="gc-row-menu-wrap">' +
+          '<button class="gc-kebab-btn" type="button" data-gc-kebab="1" aria-haspopup="true" aria-label="More actions">•••</button>' +
+          gcOverflowMenuHtml(campaign, actions) +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  }
+
+  // Grouping (P0.4 §5) is only ever applied to the unfiltered "All" list —
+  // once a specific status filter is selected there is exactly one status
+  // on screen, so a group heading would be redundant noise. CAMPAIGN_STATUSES
+  // is a closed backend enum (draft/scheduled/live/paused/ended/archived,
+  // see campaign_centre.py) and every value maps into exactly one bucket
+  // below, so there is no "unmatched status" case to fall back on.
+  var GC_GROUP_ORDER = ["Active", "Upcoming", "Completed"];
+  var GC_GROUP_STATUSES = {
+    Active: ["live", "paused"],
+    Upcoming: ["draft", "scheduled"],
+    Completed: ["ended", "archived"],
+  };
+
+  function gcGroupCampaigns(items, statusFilter) {
+    if (statusFilter) return [{ heading: null, items: items }];
+    var buckets = { Active: [], Upcoming: [], Completed: [] };
+    (items || []).forEach(function (c) {
+      GC_GROUP_ORDER.some(function (g) {
+        if (GC_GROUP_STATUSES[g].indexOf(c.status) === -1) return false;
+        buckets[g].push(c);
+        return true;
+      });
+    });
+    return GC_GROUP_ORDER
+      .filter(function (g) { return buckets[g].length; })
+      .map(function (g) { return { heading: g, items: buckets[g] }; });
+  }
+
+  // Every filtered view stays useful (P0.4 §7) — never a blank table. The
+  // "+ New Campaign" CTA reuses the existing inline Create Campaign form
+  // (gcScrollToCreateForm), not a new creation flow.
+  var GC_NEW_CAMPAIGN_CTA = '<button class="btn primary" onclick="gcScrollToCreateForm()">+ New Campaign</button>';
+  var GC_EMPTY_STATES_BY_FILTER = {
+    live: { icon: "🚀", title: "No live campaigns", sub: "There are no campaigns running right now.", ctaHtml: GC_NEW_CAMPAIGN_CTA },
+    scheduled: { icon: "🗓", title: "No scheduled campaigns", sub: "Campaigns scheduled for a future date will show up here.", ctaHtml: GC_NEW_CAMPAIGN_CTA },
+    draft: { icon: "📝", title: "No drafts", sub: "You don't have any draft campaigns.", ctaHtml: GC_NEW_CAMPAIGN_CTA },
+    paused: { icon: "⏸", title: "No paused campaigns", sub: "Campaigns you pause will show up here." },
+    ended: { icon: "🏁", title: "No completed campaigns", sub: "Campaigns that have ended will show up here." },
+    archived: { icon: "🗄", title: "No archived campaigns", sub: "Campaigns you archive will show up here." },
+  };
+
+  function gcEmptyStateForFilter(statusFilter) {
+    return GC_EMPTY_STATES_BY_FILTER[statusFilter] ||
+      { icon: "🎯", title: "No campaigns yet", sub: "Create your first campaign to start reaching players.", ctaHtml: GC_NEW_CAMPAIGN_CTA };
   }
 
   // ---- Pure HTML builders (beginner view — no backend ids) -------------
@@ -5975,7 +6179,61 @@
       });
       else if (action === "delete") openGcDeleteModal(id, btn.dataset.name);
     });
+
+    $all("#gc-status-filter button").forEach(function (b) {
+      b.addEventListener("click", function () {
+        $all("#gc-status-filter button").forEach(function (x) { x.classList.toggle("active", x === b); });
+        loadGcCampaigns(true);
+      });
+    });
+
+    var newCtaBtn = $("#gc-new-campaign-cta-btn");
+    if (newCtaBtn) newCtaBtn.addEventListener("click", gcScrollToCreateForm);
+
+    // Row "•••" overflow menu: toggle on the kebab, close any other open
+    // menu first (at most one open at a time), and close on outside click.
+    // Delegated on document (not bound per-row) because #gc-campaigns-body
+    // is fully re-rendered on every load — a direct listener would be lost.
+    document.addEventListener("click", function (e) {
+      var kebab = e.target && e.target.closest && e.target.closest("[data-gc-kebab]");
+      if (kebab) {
+        e.stopPropagation();
+        var menu = kebab.parentElement && kebab.parentElement.querySelector(".gc-row-menu");
+        var opening = !!menu && menu.classList.contains("hidden");
+        $all(".gc-row-menu").forEach(function (m) { m.classList.add("hidden"); });
+        if (opening) menu.classList.remove("hidden");
+        return;
+      }
+      if (!(e.target && e.target.closest && e.target.closest(".gc-row-menu"))) {
+        $all(".gc-row-menu").forEach(function (m) { m.classList.add("hidden"); });
+      }
+    });
+
+    // The row itself opens Manage too (P0.4 §2), except when the click
+    // landed on a real control (Manage button, kebab, or a menu item) —
+    // those already have their own data-gc-action handler above.
+    document.addEventListener("click", function (e) {
+      var card = e.target && e.target.closest && e.target.closest("[data-gc-row-id]");
+      if (!card) return;
+      if (e.target.closest("button") || e.target.closest(".gc-row-menu")) return;
+      renderCampaignDetail(card.dataset.gcRowId);
+    });
   }
+
+  // "+ New Campaign" (P0.4 §6) reuses the existing inline Create Campaign
+  // form/flow rather than a new creation wizard — it only scrolls to and
+  // focuses that form. Used by the list header CTA and every empty state's
+  // CTA button (embedded as an onclick= string in gcEmptyStateForFilter's
+  // HTML, so this must stay a global, not a closure-local function).
+  window.gcScrollToCreateForm = function () {
+    switchView("gcCampaigns");
+    setTimeout(function () {
+      var section = document.querySelector("#view-gcCampaigns .section");
+      if (section && section.scrollIntoView) section.scrollIntoView({ behavior: "smooth", block: "start" });
+      var nameField = $("#gc-c-name");
+      if (nameField && nameField.focus) nameField.focus();
+    }, 60);
+  };
 
   // ---------- Registration Configuration (moved off Create Campaign form;
   // reads/writes the same gc_campaigns.registration block via the existing
