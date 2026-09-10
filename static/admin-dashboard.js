@@ -7828,7 +7828,7 @@
     });
   }
 
-  var VIEWS =["summary", "moduleOverview", "placeholder", "funnel", "abuse", "campaignBuilder", "campaignPerformance", "campaignIntelligence", "activeCampaigns", "draftCampaigns", "compiledDrops", "campaigns", "gcCampaigns", "campaignRegistrations", "deepLinks", "missionPool", "gcProviders", "gcResults", "gcRewards", "gcVerification", "gcActivity", "campaignDisplay", "eventBanners", "luckyGames", "vouchers", "drops", "referrals", "affiliate", "affiliatePools", "affiliateBatches", "affiliatePending", "reactivation", "audit", "segmentProbabilityConfig", "segmentRoi", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "voucherHunterFalsePositive", "voucherHunterRuleSimulator", "vhPriorityImpact", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "joinRequests", "xpAdjust", "settings", "referralShareContent", "referralShareEngagement", "ccComposer", "ccCalendar", "ccBoard"];
+  var VIEWS =["summary", "moduleOverview", "funnel", "abuse", "campaignBuilder", "campaignPerformance", "campaignIntelligence", "activeCampaigns", "draftCampaigns", "compiledDrops", "campaigns", "gcCampaigns", "campaignRegistrations", "deepLinks", "missionPool", "gcProviders", "gcResults", "gcRewards", "gcVerification", "gcActivity", "campaignDisplay", "eventBanners", "luckyGames", "vouchers", "drops", "referrals", "affiliate", "affiliatePools", "affiliateBatches", "affiliatePending", "reactivation", "audit", "segmentProbabilityConfig", "segmentRoi", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "voucherHunterFalsePositive", "voucherHunterRuleSimulator", "vhPriorityImpact", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "joinRequests", "xpAdjust", "settings", "referralShareContent", "referralShareEngagement", "ccComposer", "ccCalendar", "ccBoard"];
 
   // ---------------------------------------------------------------------
   // Information architecture: sidebar Business Modules, each with its own
@@ -7882,7 +7882,6 @@
       { label: "Published", view: "ccBoard", ccBoard: "published" },
       { label: "Poll Results", view: "ccBoard", ccBoard: "poll_results" },
       { label: "Failed", view: "ccBoard", ccBoard: "failed" },
-      { label: "Members", view: "placeholder", ph: { title: "Members", desc: "Community member directory is not yet wired to an admin data source." } },
       { label: "Leaderboard", external: "/static/index.html#admin-panel" }
     ]},
     { key: "affiliate", icon: "🤝", label: "Affiliate Centre", tabs: [
@@ -7890,45 +7889,27 @@
       { label: "Pending Approval", view: "affiliatePending", live: true },
       { label: "Voucher Pools", view: "affiliatePools", live: true },
       { label: "Voucher Batches", view: "affiliateBatches", live: true },
-      { label: "Rewards", view: "placeholder", ph: { title: "Rewards", desc: "Affiliate reward ledger is not yet wired to an admin data source." } },
-      { label: "Payouts", view: "placeholder", ph: { title: "Payouts", desc: "Payout batches are not yet wired to an admin data source." } },
-      { label: "Analytics", view: "placeholder", ph: { title: "Analytics", desc: "Affiliate analytics is not yet wired to an admin data source." } },
       { label: "Campaign Display", view: "campaignDisplay", live: true }
     ]},
     { key: "referral", icon: "🔗", label: "Referral Centre", tabs: [
       { label: "Overview", view: "moduleOverview", overviewKey: "referral" },
       { label: "Performance", view: "referrals" },
       { label: "Share Content", view: "referralShareContent", live: true },
-      { label: "Share Engagement", view: "referralShareEngagement", live: true },
-      { label: "Pending", view: "placeholder", ph: { title: "Pending", desc: "Pending referral qualification queue is not yet wired to an admin data source." } },
-      { label: "Rewards", view: "placeholder", ph: { title: "Rewards", desc: "Referral reward ledger is not yet wired to an admin data source." } },
-      { label: "Leaderboard", view: "placeholder", ph: { title: "Leaderboard", desc: "Referral leaderboard is not yet wired to an admin data source." } },
-      { label: "Analytics", view: "placeholder", ph: { title: "Analytics", desc: "Referral analytics is not yet wired to an admin data source." } }
+      { label: "Share Engagement", view: "referralShareEngagement", live: true }
     ]},
     { key: "welcome", icon: "🎁", label: "Welcome Journey", tabs: [
       { label: "Overview", view: "moduleOverview", overviewKey: "welcome" },
       { label: "Journey", external: "/static/welcome-journey-runtime.html" },
-      { label: "Rewards", view: "placeholder", ph: { title: "Rewards", desc: "Welcome reward ledger is not yet wired to an admin data source." } },
-      { label: "Funnel", view: "funnel" },
-      { label: "Drop-off", view: "placeholder", ph: { title: "Drop-off", desc: "Drop-off analysis is not yet wired to an admin data source." } },
-      { label: "Analytics", view: "placeholder", ph: { title: "Analytics", desc: "Welcome journey analytics is not yet wired to an admin data source." } }
+      { label: "Funnel", view: "funnel" }
     ]},
     { key: "reactivation", icon: "🔄", label: "Reactivation Centre", tabs: [
       { label: "Overview", view: "moduleOverview", overviewKey: "reactivation" },
-      { label: "Campaigns", view: "reactivation", live: true },
-      { label: "Eligible Users", view: "placeholder", ph: { title: "Eligible Users", desc: "Eligible-user queue is not yet wired to an admin data source." } },
-      { label: "Queue", view: "placeholder", ph: { title: "Queue", desc: "Reactivation send queue is not yet wired to an admin data source." } },
-      { label: "Rewards", view: "placeholder", ph: { title: "Rewards", desc: "Reactivation reward ledger is not yet wired to an admin data source." } },
-      { label: "Performance", view: "placeholder", ph: { title: "Performance", desc: "Reactivation performance analytics is not yet wired to an admin data source." } }
+      { label: "Campaigns", view: "reactivation", live: true }
     ]},
     { key: "segments", icon: "👤", label: "Segments", tabs: [
       { label: "Overview", view: "segments" },
       { label: "All Players", view: "users" },
       { label: "Adjust XP", view: "xpAdjust", live: true },
-      { label: "High Value", view: "placeholder", ph: { title: "High Value", desc: "Per-segment drilldown is not yet wired to an admin data source — see Overview for distribution." } },
-      { label: "Low Value", view: "placeholder", ph: { title: "Low Value", desc: "Per-segment drilldown is not yet wired to an admin data source — see Overview for distribution." } },
-      { label: "Active Community", view: "placeholder", ph: { title: "Active Community", desc: "Per-segment drilldown is not yet wired to an admin data source — see Overview for distribution." } },
-      { label: "Ghost", view: "placeholder", ph: { title: "Ghost", desc: "Per-segment drilldown is not yet wired to an admin data source — see Overview for distribution." } },
       { label: "Simulator", view: "segmentRuleSimulator" },
       { label: "VH: Mismatch Audit", view: "voucherHunterAudit" },
       { label: "VH: Unclassified", view: "unclassifiedAudit" },
@@ -7938,20 +7919,11 @@
       { label: "VH: Priority Impact", view: "vhPriorityImpact" }
     ]},
     { key: "analytics", icon: "📊", label: "Analytics", tabs: [
-      { label: "Executive", view: "summary" },
-      { label: "Funnels", view: "funnel" },
-      { label: "Revenue", view: "placeholder", ph: { title: "Revenue", desc: "Revenue analytics is not yet wired to an admin data source." } },
-      { label: "Retention", view: "placeholder", ph: { title: "Retention", desc: "Retention analytics is not yet wired to an admin data source." } },
-      { label: "Campaign", view: "campaignPerformance" },
       { label: "ROI", view: "segmentRoi" },
       { label: "Cohorts", view: "backendSegmentEngine" },
       { label: "Data Validation", view: "validation" }
     ]},
     { key: "automation", icon: "🤖", label: "Automation", tabs: [
-      { label: "Scheduler", view: "placeholder", ph: { title: "Scheduler", desc: "Scheduler control panel is not yet wired to an admin data source." } },
-      { label: "Queue", view: "placeholder", ph: { title: "Queue", desc: "Job queue view is not yet wired to an admin data source." } },
-      { label: "Notifications", view: "placeholder", ph: { title: "Notifications", desc: "Notification log is not yet wired to an admin data source." } },
-      { label: "Retry Jobs", view: "placeholder", ph: { title: "Retry Jobs", desc: "Retry job view is not yet wired to an admin data source." } },
       { label: "Logs", view: "uploadHistory" },
       { label: "Health", external: "/static/runtime-status.html" },
       { label: "Upload Data", view: "uploadPlayerPerformance", live: true },
@@ -8017,10 +7989,10 @@
 
   // Reverse-lookup so any direct switchView(viewId) call (from empty-state
   // CTAs, cross-links, etc.) still highlights the right module/tab chrome.
-  // moduleOverview/placeholder are ambiguous (shared by many tabs) and are
+  // moduleOverview/ccBoard are ambiguous (shared by many tabs) and are
   // intentionally excluded — those are always entered via activateTab().
   function findTabForView(view) {
-    if (view === "moduleOverview" || view === "placeholder" || view === "ccBoard") return null;
+    if (view === "moduleOverview" || view === "ccBoard") return null;
     for (var i = 0; i < MODULES.length; i++) {
       var mod = MODULES[i];
       for (var j = 0; j < mod.tabs.length; j++) {
@@ -8109,10 +8081,6 @@
     renderTabBar(moduleKey, tabIndex);
     updateBreadcrumb(moduleKey, tabIndex);
     if (tab.external) { window.open(tab.external, "_blank", "noopener"); return; }
-    if (tab.view === "placeholder" && tab.ph) {
-      $("#placeholder-heading").textContent = tab.ph.title;
-      $("#placeholder-desc").textContent = tab.ph.desc;
-    }
     inActivateTab = true;
     switchView(tab.view);
     inActivateTab = false;
@@ -8173,7 +8141,7 @@
       updateBreadcrumb(found.moduleKey, found.tabIndex);
     }
     var titles = {
-      summary: "Executive Summary", moduleOverview: "Overview", placeholder: "Coming Soon",
+      summary: "Executive Summary", moduleOverview: "Overview",
       funnel: "Activation Funnel", abuse: "Abuse Overview",
       campaignBuilder: "Campaign Builder (P2)", campaignPerformance: "Campaign Performance (P4)",
       campaignIntelligence: "Campaign Intelligence (P5)", activeCampaigns: "Active Campaigns",
