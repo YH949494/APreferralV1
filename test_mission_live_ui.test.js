@@ -82,7 +82,8 @@ class FakeCustomEvent {
 }
 
 /** Builds a fresh vm sandbox with a scripted fetch, returns { window, calls }. */
-function makeSandbox(fetchImpl) {
+function makeSandbox(fetchImpl, sandboxOpts) {
+  sandboxOpts = sandboxOpts || {};
   const roots = {
     "mission-pool-root": makeNode("div"),
     "mission-live-root": makeNode("div"),
@@ -93,10 +94,17 @@ function makeSandbox(fetchImpl) {
     calls.push({ url, opts });
     return fetchImpl(url, opts);
   };
+  const locationStub = {
+    // init_data present synchronously by default so waitForInitData
+    // resolves on its first (immediate) check, keeping most tests fast —
+    // the initData-wait behavior itself is asserted separately below with
+    // withInitData: false.
+    search: sandboxOpts.withInitData === false ? "" : "?init_data=test-init-data",
+  };
   const sandbox = {
     window: {},
     document,
-    location: { search: "" },
+    location: locationStub,
     URLSearchParams,
     fetch: wrappedFetch,
     AbortController: typeof AbortController !== "undefined" ? AbortController : function () {
@@ -111,7 +119,7 @@ function makeSandbox(fetchImpl) {
   sandbox.window = sandbox;
   vm.createContext(sandbox);
   vm.runInContext(JS, sandbox, { filename: "mission-pool-widget.js" });
-  return { sandbox, roots, calls };
+  return { sandbox, roots, calls, location: locationStub };
 }
 
 function okJson(data) {
@@ -299,4 +307,29 @@ test("a mission that ends between list load and the CTA tap renders the server's
   // can't be answered from a stale card.
   const hasSubmitButton = JSON.stringify(formRoot._children).indexOf("Submit Mission") !== -1;
   assert.equal(hasSubmitButton, false);
+});
+
+// ---------------------------------------------------------------------------
+// mountLiveMissions waits for initData (fixed P1: on Telegram Web/Desktop the
+// signed initData can arrive after DOMContentLoaded; firing the authenticated
+// /active request immediately would 401 with no retry and leave Live
+// Missions permanently hidden for that session).
+// ---------------------------------------------------------------------------
+
+test("mountLiveMissions does not call /active before initData is available", async () => {
+  const { sandbox, calls } = makeSandbox(() => okJson({ status: "ok", missions: [] }), { withInitData: false });
+  sandbox.window.MissionPoolWidget.mountLiveMissions();
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(calls.length, 0, "must not fetch /active while initData is still missing");
+});
+
+test("mountLiveMissions fetches /active as soon as initData becomes available", async () => {
+  const { sandbox, calls, location } = makeSandbox(() => okJson({ status: "ok", missions: [] }), { withInitData: false });
+  sandbox.window.MissionPoolWidget.mountLiveMissions();
+  // Simulate the Telegram bridge delivering initData shortly after mount —
+  // waitForInitData polls every 100ms (START_PARAM_POLL_MS).
+  location.search = "?init_data=now-available";
+  await new Promise((r) => setTimeout(r, 150));
+  assert.equal(calls.length, 1);
+  assert.match(String(calls[0].url), /\/api\/mission-pool\/active/);
 });

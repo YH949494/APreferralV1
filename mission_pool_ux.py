@@ -206,7 +206,17 @@ def user_state(campaign: dict | None, entry: dict | None,
 
 
 def _iso(value) -> str | None:
-    return value.isoformat() if isinstance(value, datetime) else None
+    """Datetime -> ISO string, always carrying an explicit UTC offset.
+
+    PyMongo returns naive datetimes on read even for values written as
+    UTC-aware (mission_pool._as_utc's own docstring). Serializing a naive
+    value's ``.isoformat()`` directly omits the offset, which every JS
+    ``Date`` constructor then parses as *local* time — shifting any
+    remaining-time countdown built from it by the viewer's UTC offset. Every
+    caller here reuses ``mission_pool._as_utc`` rather than re-deriving the
+    normalisation."""
+    dt = mp._as_utc(value) if isinstance(value, datetime) else None
+    return dt.isoformat() if dt else None
 
 
 @mission_pool_ux_bp.get("/api/mission-pool/<campaign_id>/view")
@@ -299,6 +309,17 @@ def list_active_missions():
     because this reuses ``mission_pool._as_utc`` via ``submission_state``
     instead of re-implementing the comparison.
 
+    The schedule/cancellation bounds are also pushed into the Mongo query
+    itself (mirroring ``mission_pool_processor.find_due_campaigns``), not
+    just applied after the fact in Python: a ``status="live"`` campaign
+    never automatically leaves that status once its schedule elapses (the
+    worker only changes ``processing_stage``), so without this an
+    ever-growing set of expired-but-still-``live`` campaigns could fill the
+    query's ``limit`` and crowd out genuinely open missions sorted after
+    them. The Python-side ``submission_state`` check stays as defense in
+    depth — it remains the single source of truth for the rule, and
+    re-checking it costs nothing.
+
     Authenticated (unlike the standard-drop list) because every card also
     carries the caller's OWN participation state, computed the same way
     ``/view`` computes it. Only safe public fields are returned: no
@@ -317,9 +338,17 @@ def list_active_missions():
     now = datetime.now(timezone.utc)
     docs = database.db["gc_campaigns"].find(
         {
-            "$or": [{"mechanic": mp.MECHANIC_MISSION_POOL},
-                    {"type": mp.CAMPAIGN_TYPE_MISSION_POOL}],
             "status": "live",
+            "mission_pool.cancelled": {"$ne": True},
+            "schedule.starts_at": {"$lte": now},
+            "$and": [
+                {"$or": [{"mechanic": mp.MECHANIC_MISSION_POOL},
+                         {"type": mp.CAMPAIGN_TYPE_MISSION_POOL}]},
+                # A missing/null ends_at means "no scheduled end" (open
+                # indefinitely); $gt matches neither, so it is carried as an
+                # explicit alternative rather than silently excluded.
+                {"$or": [{"schedule.ends_at": None}, {"schedule.ends_at": {"$gt": now}}]},
+            ],
         },
         sort=[("schedule.starts_at", 1)],
         limit=50,

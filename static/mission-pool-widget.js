@@ -619,7 +619,18 @@
   }
 
   function mountLiveMissions() {
-    try { refreshLiveMissions(); } catch (e) {}
+    // Same race as the deep-link flow above (see waitForInitData): on
+    // Telegram Web/Desktop the signed initData can arrive after
+    // DOMContentLoaded, so firing this authenticated request immediately
+    // can 401 before Telegram has delivered it, leaving Live Missions
+    // hidden for the whole session with no retry. Waiting briefly (and
+    // still firing the request either way once the budget is spent) mirrors
+    // exactly how the single-mission /view call is gated.
+    try {
+      waitForInitData(function () {
+        try { refreshLiveMissions(); } catch (e) {}
+      });
+    } catch (e) {}
     // Refresh after any join/submission/completion/claim signal — both this
     // widget's own events (mission_submit_success/duplicate) and the
     // Campaign Rewards widget's (mission_reward_highlighted,
