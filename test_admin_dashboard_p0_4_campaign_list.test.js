@@ -376,15 +376,40 @@ test("setup summary reuses the exact P0.5a checklist — a campaign that can't p
 });
 
 test("loadGcCampaigns never issues a per-row detail/provider/pool request (no N+1)", () => {
-  const src = extractFunctionSource(JS, "loadGcCampaigns");
+  // Strip // line comments first — this function's own comments explain
+  // the caching/dedup behavior in prose and legitimately mention these
+  // function names, which would otherwise inflate the match counts below.
+  const rawSrc = extractFunctionSource(JS, "loadGcCampaigns");
+  const src = rawSrc.split("\n").map((line) => line.replace(/\/\/.*$/, "")).join("\n");
   // Exactly one call each to the list/providers/pools fetchers, and no
   // per-campaign endpoint (/api/admin/gc-campaigns/<id>) anywhere in the
   // loader.
   assert.equal((src.match(/fetchGcCampaignsList\(/g) || []).length, 1);
-  assert.equal((src.match(/fetchGcProviders\(/g) || []).length, 1);
+  assert.equal((src.match(/fetchGcProviders\(/g) || []).length, 1, "must reuse loadGcProviderSelect's own fetch, never force a second /api/admin/providers call");
   assert.equal((src.match(/fetchGcRewardPools\(/g) || []).length, 1, "pools must be fetched at most once per page load, not per row");
   assert.doesNotMatch(src, /\.forEach\([^)]*\bapi\(/, "no per-row fetch loop");
   assert.doesNotMatch(src, /\.map\([^)]*\bapi\(/, "no per-row fetch loop");
+});
+
+test("loadGcCampaigns never forces a second /api/admin/providers request on top of loadGcProviderSelect's own", () => {
+  const src = extractFunctionSource(JS, "loadGcCampaigns");
+  assert.match(src, /fetchGcProviders\(\)/, "the second call must be unforced so it reuses loadGcProviderSelect's in-flight/cached promise");
+  assert.doesNotMatch(src, /fetchGcProviders\(force\)/, "forcing it again here would discard the in-flight request and fire a duplicate call");
+});
+
+test("a specific status filter queries the backend's own ?status= filter, never a client-side filter over the (200-row-capped) unfiltered cache", () => {
+  const src = extractFunctionSource(JS, "loadGcCampaigns");
+  assert.match(src, /"\/api\/admin\/gc-campaigns\?status="\s*\+\s*encodeURIComponent\(statusFilter\)/);
+  assert.doesNotMatch(src, /\.filter\(function \(c\) \{ return c\.status === statusFilter/,
+    "must not silently drop campaigns beyond the unfiltered list's 200-row cap by filtering it client-side");
+});
+
+test("a stale (superseded) load never repaints the list, on success or on error", () => {
+  const src = extractFunctionSource(JS, "loadGcCampaigns");
+  assert.match(src, /var token = \+\+gcCampaignsLoadToken;/);
+  assert.match(src, /if \(token !== gcCampaignsLoadToken\) return;/g);
+  assert.equal((src.match(/if \(token !== gcCampaignsLoadToken\) return;/g) || []).length, 2,
+    "the stale-load guard must cover both the success path and the .catch error path");
 });
 
 // ---------------------------------------------------------------------
@@ -427,6 +452,13 @@ test("the filter bar's #gc-status-filter covers every backend status plus All", 
   ["", "live", "scheduled", "draft", "paused", "ended", "archived"].forEach((status) => {
     assert.match(block, new RegExp('data-status="' + status + '"'), "missing filter button for status=" + JSON.stringify(status));
   });
+});
+
+test("#gc-status-filter stays reachable on narrow screens (its 7 buttons can overflow .seg's non-wrapping, overflow:hidden bar)", () => {
+  const CSS = fs.readFileSync(path.join(__dirname, "static", "admin-dashboard.css"), "utf8");
+  const rule = CSS.slice(CSS.indexOf("#gc-status-filter"), CSS.indexOf("}", CSS.indexOf("#gc-status-filter")) + 1);
+  assert.notEqual(rule.indexOf("#gc-status-filter"), -1, "#gc-status-filter must have its own overflow rule");
+  assert.match(rule, /overflow-x:\s*auto/, "must be independently scrollable rather than clipped by .seg's overflow:hidden");
 });
 
 // ---------------------------------------------------------------------

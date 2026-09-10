@@ -5335,35 +5335,54 @@
   }
 
   // Campaigns list (P0.4). Performance: exactly 2-3 requests regardless of
-  // how many campaigns are on screen — never one per row. The campaigns
-  // list, providers list and reward-pools list are each fetched (and
-  // cached) once per page load; providers/pools are only lookups
-  // computeSetupChecklist() joins against locally, the same lookups already
-  // shared with Campaign Detail (P0.5a) and the Create Campaign form (P0.3).
-  // Reward pools are skipped entirely when no row on the page is a Mission
-  // Pool campaign, so a page with no missions costs one less request.
+  // how many campaigns are on screen — never one per row. Providers/pools
+  // are only lookups computeSetupChecklist() joins against locally, the
+  // same lookups already shared with Campaign Detail (P0.5a) and the
+  // Create Campaign form (P0.3). Reward pools are skipped entirely when no
+  // row on the page is a Mission Pool campaign, so a page with no missions
+  // costs one less request.
+  var gcCampaignsLoadToken = 0;
   function loadGcCampaigns(force) {
     statePanel("gc-campaigns-body", "loading", "Loading campaigns…");
+    // loadGcProviderSelect(force) already busts+refetches the providers
+    // cache when force is set; asking fetchGcProviders() to force it again
+    // right below would discard that same in-flight request and fire a
+    // second /api/admin/providers call. Since both calls happen
+    // synchronously here, the plain (unforced) fetchGcProviders() call
+    // below always resolves to the exact promise loadGcProviderSelect just
+    // started (or the existing cache, when force is false) — never a
+    // second request (Codex review).
     loadGcProviderSelect(force);
     var filterBtn = $("#gc-status-filter .active");
     var statusFilter = filterBtn ? (filterBtn.dataset.status || "") : "";
-    Promise.all([fetchGcCampaignsList(force), fetchGcProviders(force)]).then(function (deps) {
-      var allItems = deps[0] || [], providers = deps[1] || [];
-      var needsPools = allItems.some(function (c) { return c.mechanic === "mission_pool" || c.type === "mission_pool"; });
+    var token = ++gcCampaignsLoadToken;
+    // list_campaigns() caps its unfiltered response at 200 rows
+    // (priority/created_at order) — filtering that cached page client-side
+    // would silently hide older/lower-priority campaigns of the selected
+    // status once a workspace has more than 200 total. A specific filter
+    // therefore queries the backend's own ?status= directly instead of
+    // reusing the unfiltered cache (Codex review); "All" keeps using the
+    // shared cache other pickers on this page also read from.
+    var campaignsPromise = statusFilter
+      ? api("/api/admin/gc-campaigns?status=" + encodeURIComponent(statusFilter)).then(function (d) { return d.campaigns || []; })
+      : fetchGcCampaignsList(force);
+    Promise.all([campaignsPromise, fetchGcProviders()]).then(function (deps) {
+      var items = deps[0] || [], providers = deps[1] || [];
+      var needsPools = items.some(function (c) { return c.mechanic === "mission_pool" || c.type === "mission_pool"; });
       return (needsPools ? fetchGcRewardPools(force) : Promise.resolve([])).then(function (pools) {
-        return { allItems: allItems, providers: providers, pools: pools || [] };
+        return { items: items, providers: providers, pools: pools || [] };
       });
     }).then(function (ctx) {
-      if (!ctx.allItems.length) {
-        $("#gc-campaigns-body").innerHTML = emptyState(gcEmptyStateForFilter(""));
-        return;
-      }
-      var items = statusFilter ? ctx.allItems.filter(function (c) { return c.status === statusFilter; }) : ctx.allItems;
-      if (!items.length) {
+      // A newer load (a later filter click, or a mutation's loadGcCampaigns(true))
+      // started and is either still in flight or already painted — never let
+      // this now-stale response overwrite it (Codex review: out-of-order
+      // filter clicks on a slow connection).
+      if (token !== gcCampaignsLoadToken) return;
+      if (!ctx.items.length) {
         $("#gc-campaigns-body").innerHTML = emptyState(gcEmptyStateForFilter(statusFilter));
         return;
       }
-      var groups = gcGroupCampaigns(items, statusFilter);
+      var groups = gcGroupCampaigns(ctx.items, statusFilter);
       $("#gc-campaigns-body").innerHTML = groups.map(function (g) {
         var heading = g.heading
           ? '<div class="section-title" style="margin:18px 0 8px;font-size:12px;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);">' + esc(g.heading) + '</div>'
@@ -5374,6 +5393,7 @@
         }).join("");
       }).join("");
     }).catch(function () {
+      if (token !== gcCampaignsLoadToken) return;
       statePanel("gc-campaigns-body", "error", "Couldn't load campaigns. Try again.");
     });
   }
