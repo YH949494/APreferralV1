@@ -8558,12 +8558,17 @@ async def send_referral_link_with_share_button(update: Update, context: ContextT
 
     # Read-only pre-check: mirrors the same lookup get_or_create_referral_invite_link_sync
     # performs internally, used here purely to report reused=true/false in the
-    # LINK_READY log below -- never mutates invite_link_map itself.
-    try:
+    # LINK_READY log below -- never mutates invite_link_map itself. Run off
+    # the polling event loop (same as the generation call below) so a slow
+    # or unavailable Mongo never blocks other bot updates on this find_one.
+    def _check_link_existed_before():
         dest_chat_id, _dest_type = get_referral_destination()
-        link_existed_before = invite_link_map_collection.find_one(
+        return invite_link_map_collection.find_one(
             {"chat_id": dest_chat_id, "inviter_id": uid, "is_active": True}
         ) is not None
+
+    try:
+        link_existed_before = await asyncio.to_thread(_check_link_existed_before)
     except Exception:
         link_existed_before = False
 
