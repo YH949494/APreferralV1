@@ -219,7 +219,7 @@
               </div>
             </div>
 
-            <details class="panel-group">
+            <details class="panel-group" id="ce-advanced-targeting">
               <summary>Advanced Targeting <span class="field-hint" style="margin:0;">(optional — leave blank to skip)</span></summary>
               <div class="panel-group-body">
                 <div class="field-grid field-grid-2">
@@ -733,9 +733,9 @@
             </div>
             <div class="switch-row">
               <div class="switch-row-text">
-                <div class="switch-row-label">Membership verification enabled</div>
+                <div class="switch-row-label" id="rsc-creator-group-check-enabled-label">Membership verification enabled</div>
               </div>
-              <label class="switch"><input type="checkbox" id="rsc-creator-group-check-enabled" /><span class="slider"></span></label>
+              <label class="switch"><input type="checkbox" id="rsc-creator-group-check-enabled" aria-labelledby="rsc-creator-group-check-enabled-label" /><span class="slider"></span></label>
             </div>
             <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:12px 0 4px;">
               <button class="btn" id="rsc-creator-group-verify-btn">Verify Group</button>
@@ -854,8 +854,8 @@
               </select>
             </label>
             <div class="switch-row" id="cc-link-preview-wrap" style="border-bottom:none;">
-              <div class="switch-row-text"><div class="switch-row-label">Disable link preview</div></div>
-              <label class="switch"><input type="checkbox" id="cc-disable-preview" /><span class="slider"></span></label>
+              <div class="switch-row-text"><div class="switch-row-label" id="cc-disable-preview-label">Disable link preview</div></div>
+              <label class="switch"><input type="checkbox" id="cc-disable-preview" aria-labelledby="cc-disable-preview-label" /><span class="slider"></span></label>
             </div>
           </div>
           <div class="sub" id="cc-text-counter" style="margin-top:4px;"></div>
@@ -877,16 +877,16 @@
 
           <div style="margin-top:12px;">
             <div class="switch-row">
-              <div class="switch-row-text"><div class="switch-row-label">Anonymous voting</div></div>
-              <label class="switch"><input type="checkbox" id="cc-poll-anonymous" checked /><span class="slider"></span></label>
+              <div class="switch-row-text"><div class="switch-row-label" id="cc-poll-anonymous-label">Anonymous voting</div></div>
+              <label class="switch"><input type="checkbox" id="cc-poll-anonymous" checked aria-labelledby="cc-poll-anonymous-label" /><span class="slider"></span></label>
             </div>
             <div class="switch-row" id="cc-poll-multi-wrap">
-              <div class="switch-row-text"><div class="switch-row-label">Allow multiple answers</div></div>
-              <label class="switch"><input type="checkbox" id="cc-poll-multiple" /><span class="slider"></span></label>
+              <div class="switch-row-text"><div class="switch-row-label" id="cc-poll-multiple-label">Allow multiple answers</div></div>
+              <label class="switch"><input type="checkbox" id="cc-poll-multiple" aria-labelledby="cc-poll-multiple-label" /><span class="slider"></span></label>
             </div>
             <div class="switch-row">
-              <div class="switch-row-text"><div class="switch-row-label">Members-only (where supported)</div></div>
-              <label class="switch"><input type="checkbox" id="cc-poll-members-only" /><span class="slider"></span></label>
+              <div class="switch-row-text"><div class="switch-row-label" id="cc-poll-members-only-label">Members-only (where supported)</div></div>
+              <label class="switch"><input type="checkbox" id="cc-poll-members-only" aria-labelledby="cc-poll-members-only-label" /><span class="slider"></span></label>
             </div>
           </div>
 
@@ -921,16 +921,16 @@
         <div class="section" style="margin-bottom:16px;">
           <div class="section-title">Delivery Options</div>
           <div class="switch-row">
-            <div class="switch-row-text"><div class="switch-row-label">Silent notification</div></div>
-            <label class="switch"><input type="checkbox" id="cc-disable-notification" /><span class="slider"></span></label>
+            <div class="switch-row-text"><div class="switch-row-label" id="cc-disable-notification-label">Silent notification</div></div>
+            <label class="switch"><input type="checkbox" id="cc-disable-notification" aria-labelledby="cc-disable-notification-label" /><span class="slider"></span></label>
           </div>
           <div class="switch-row">
-            <div class="switch-row-text"><div class="switch-row-label">Protect content</div></div>
-            <label class="switch"><input type="checkbox" id="cc-protect-content" /><span class="slider"></span></label>
+            <div class="switch-row-text"><div class="switch-row-label" id="cc-protect-content-label">Protect content</div></div>
+            <label class="switch"><input type="checkbox" id="cc-protect-content" aria-labelledby="cc-protect-content-label" /><span class="slider"></span></label>
           </div>
           <div class="switch-row" style="border-bottom:none;">
-            <div class="switch-row-text"><div class="switch-row-label">Pin after publishing</div></div>
-            <label class="switch"><input type="checkbox" id="cc-pin-after-send" /><span class="slider"></span></label>
+            <div class="switch-row-text"><div class="switch-row-label" id="cc-pin-after-send-label">Pin after publishing</div></div>
+            <label class="switch"><input type="checkbox" id="cc-pin-after-send" aria-labelledby="cc-pin-after-send-label" /><span class="slider"></span></label>
           </div>
           <div id="cc-unpin-wrap" class="hidden field" style="margin-top:8px;">
             <label class="field-label" for="cc-unpin-at">Auto-unpin at (Kuala Lumpur time)</label>
