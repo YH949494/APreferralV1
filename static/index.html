@@ -1561,6 +1561,14 @@
          See campaign-registration-widget.js. -->
     <div id="campaign-registration-root"></div>
 
+    <!-- LIVE MISSIONS — ambient "what can I join right now" list, populated
+         from GET /api/mission-pool/active. Distinct from the single-mission
+         card below (deep-link only): this is what lets a user discover a
+         LIVE mission without a link. Stays empty/hidden until there is at
+         least one eligible mission or the request fails. See
+         mission-pool-widget.js. -->
+    <div id="mission-live-root" style="display:none;"></div>
+
     <!-- MISSION REWARD POOL (Phase 2) — stays empty and makes no network
          request unless this app open carries a Mission deep link AND the
          server confirms mechanic=mission_pool. See mission-pool-widget.js. -->

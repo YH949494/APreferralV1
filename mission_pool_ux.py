@@ -280,6 +280,83 @@ def mission_view(campaign_id: str):
     })
 
 
+@mission_pool_ux_bp.get("/api/mission-pool/active")
+def list_active_missions():
+    """Live Missions discovery — the Mini App's ambient "what can I join right
+    now" surface, as distinct from ``/view`` above (which only ever answers
+    for a campaign already named by a deep link).
+
+    Scoping mirrors ``campaign_centre.list_active_campaigns`` exactly, just
+    for the opposite mechanic: that endpoint explicitly excludes
+    ``mechanic == mission_pool`` so Mission campaigns need "their own
+    discovery endpoint" (its own docstring says so) — this is it. A mission
+    is listed only while ``mission_pool.submission_state`` says submissions
+    are open, which is the same status/schedule/cancelled check ``/submit``
+    itself enforces (§31) — draft, scheduled, paused, cancelled, closed,
+    ended and archived campaigns are never listed, so a finished mission is
+    removed here rather than left with a dead CTA. Naive and timezone-aware
+    ``schedule.starts_at``/``ends_at`` values are both handled correctly
+    because this reuses ``mission_pool._as_utc`` via ``submission_state``
+    instead of re-implementing the comparison.
+
+    Authenticated (unlike the standard-drop list) because every card also
+    carries the caller's OWN participation state, computed the same way
+    ``/view`` computes it. Only safe public fields are returned: no
+    ``correct_answer``, no ``pool_id``/eligibility policy, no admin notes,
+    no other user's submission.
+    """
+    if not mp.mission_pool_enabled():
+        return jsonify({"status": "ok", "missions": []})
+
+    from miniapp_identity import resolve_authenticated_telegram_user_id
+
+    uid, err = resolve_authenticated_telegram_user_id()
+    if err:
+        return err
+
+    now = datetime.now(timezone.utc)
+    docs = database.db["gc_campaigns"].find(
+        {
+            "$or": [{"mechanic": mp.MECHANIC_MISSION_POOL},
+                    {"type": mp.CAMPAIGN_TYPE_MISSION_POOL}],
+            "status": "live",
+        },
+        sort=[("schedule.starts_at", 1)],
+        limit=50,
+    )
+    live = [d for d in docs if mp.is_mission_pool(d) and mp.submission_state(d, now)[0]]
+
+    campaign_ids = [d.get("campaign_id") for d in live if d.get("campaign_id")]
+    entries: dict = {}
+    if campaign_ids:
+        for row in database.db[mp.ENTRIES_COLLECTION].find(
+            {"campaign_id": {"$in": campaign_ids}, "telegram_user_id": uid},
+            projection={"campaign_id": 1, "status": 1},
+        ):
+            entries[row.get("campaign_id")] = row
+
+    missions = []
+    for d in live:
+        campaign_id = d.get("campaign_id") or ""
+        entry = entries.get(campaign_id)
+        block = d.get("mission_pool") or {}
+        schedule = d.get("schedule") or {}
+        cfg = d.get("mission_config") or {}
+        missions.append({
+            "campaign_id": campaign_id,
+            "campaign_name": d.get("name", ""),
+            "mission_type": cfg.get("mission_type"),
+            "prompt": cfg.get("prompt", ""),
+            "starts_at": _iso(schedule.get("starts_at")),
+            "ends_at": _iso(schedule.get("ends_at")),
+            "winner_count": block.get("winner_count"),
+            "user_state": user_state(d, entry, now),
+            "already_submitted": entry is not None,
+        })
+
+    return jsonify({"status": "ok", "missions": missions})
+
+
 # ---------------------------------------------------------------------------
 # Admin edit state (§25, §26, §27, §29, §41)
 # ---------------------------------------------------------------------------
