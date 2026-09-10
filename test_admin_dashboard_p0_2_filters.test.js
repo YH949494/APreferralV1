@@ -229,6 +229,61 @@ test("cross-link to the former 'Running' tab (paused-campaign alert) still targe
   assert.equal(defaultBtnMatch[1], "active", "default filter should be Running (status=active)");
 });
 
+// Regression test for a real bug flagged in review: the #ac-status-filter
+// selection persists in the DOM across navigation (by design, so it survives
+// refreshes while the admin stays on the Campaigns tab). But that means if an
+// admin previously clicked Draft, left the tab, and then followed the
+// paused-campaign attention signal (which is always about a Running
+// campaign), goToViewAndClick("activeCampaigns", "") must not silently leave
+// the stale Draft filter selected — it should reset to Running first.
+const GO_TO_VIEW_AND_CLICK_SRC = slice(
+  JS,
+  "  window.goToViewAndClick = function (view, btnId) {",
+  "\n  // title/subtitle/CTA empty state"
+);
+
+test("goToViewAndClick resets the Campaigns status filter to Running when navigating in via cross-link", () => {
+  const buttons = [
+    { dataset: { status: "active" }, active: false },
+    { dataset: { status: "draft" }, active: true }, // admin had Draft selected before leaving the tab
+    { dataset: { status: "" }, active: false },
+  ];
+  const fakeButtons = buttons.map((b) => ({
+    dataset: b.dataset,
+    classList: { toggle: (cls, on) => { b.active = on; } },
+  }));
+
+  let switchedTo = null;
+  const sandbox = runInSandbox(GO_TO_VIEW_AND_CLICK_SRC + "\nthis.goToViewAndClick = window.goToViewAndClick;", {
+    window: {},
+    $all: (sel) => (sel === "#ac-status-filter button" ? fakeButtons : []),
+    switchView: (v) => { switchedTo = v; },
+    document: { getElementById: () => null },
+    setTimeout: (fn) => fn(),
+  });
+  sandbox.goToViewAndClick("activeCampaigns", "");
+
+  assert.equal(switchedTo, "activeCampaigns");
+  assert.deepEqual(
+    buttons.map((b) => b.active),
+    [true, false, false],
+    "Running must end up selected and Draft deselected after the cross-link navigation"
+  );
+});
+
+test("goToViewAndClick leaves other views' filter state alone (only activeCampaigns is special-cased)", () => {
+  let touchedFilter = false;
+  const sandbox = runInSandbox(GO_TO_VIEW_AND_CLICK_SRC + "\nthis.goToViewAndClick = window.goToViewAndClick;", {
+    window: {},
+    $all: (sel) => { if (sel === "#ac-status-filter button") touchedFilter = true; return []; },
+    switchView: () => {},
+    document: { getElementById: () => null },
+    setTimeout: (fn) => fn(),
+  });
+  sandbox.goToViewAndClick("affiliatePending", "");
+  assert.equal(touchedFilter, false);
+});
+
 test("Community Centre no longer has five separate status tabs, just one Posts tab", () => {
   const tabs = tabsFor(loadModules(), "community");
   const labels = tabs.map((t) => t.label);

@@ -547,6 +547,15 @@
   // shown (e.g. "No active campaigns" shown on Overview, but the create
   // wizard lives under Create Campaign) — navigate there first, then click.
   window.goToViewAndClick = function (view, btnId) {
+    // The Campaigns list's status filter persists in the DOM across
+    // navigation (by design, so it survives refreshes while the admin stays
+    // on the tab). But every current cross-link into this view — e.g. the
+    // "Campaign paused" attention signal — is about a Running campaign, so
+    // force the filter back to Running here rather than risk landing on
+    // whatever status the admin last happened to have selected.
+    if (view === "activeCampaigns") {
+      $all("#ac-status-filter button").forEach(function (b) { b.classList.toggle("active", b.dataset.status === "active"); });
+    }
     switchView(view);
     setTimeout(function () {
       var b = document.getElementById(btnId);
