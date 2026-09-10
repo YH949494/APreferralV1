@@ -863,19 +863,30 @@
   };
 
   function loadReactivationJourneyConfig() {
+    var host = $("#reactivation-journey-status");
+    if (!host) return;
+    host.innerHTML = '<div class="note">Loading journey status...</div>';
+    fetch("/api/admin/reactivation/journey/config", { credentials: "same-origin", headers: { Accept: "application/json" } })
+      .then(function (r) { return r.json().then(function (j) { if (!r.ok) throw new Error(j.message || "HTTP " + r.status); return j; }); })
+      .then(function (j) {
+        renderReactivationJourneyStatus(j.config || {});
+      })
+      .catch(function (e) {
+        host.innerHTML = '<div class="banner error">Failed to load journey status: ' + esc(e.message) + "</div>";
+      });
+  }
+
+  // Editable rollout-config form lives under Settings > Reactivation (the
+  // Reactivation Centre page above only shows the read-only status card).
+  function loadReactivationSettingsConfig() {
     var host = $("#reactivation-journey-config");
     if (!host) return;
     host.innerHTML = '<div class="note">Loading rollout config...</div>';
     fetch("/api/admin/reactivation/journey/config", { credentials: "same-origin", headers: { Accept: "application/json" } })
       .then(function (r) { return r.json().then(function (j) { if (!r.ok) throw new Error(j.message || "HTTP " + r.status); return j; }); })
-      .then(function (j) {
-        renderReactivationJourneyStatus(j.config || {});
-        renderReactivationJourneyConfig(j.config || {});
-      })
+      .then(function (j) { renderReactivationJourneyConfig(j.config || {}); })
       .catch(function (e) {
         host.innerHTML = '<div class="banner error">Failed to load config: ' + esc(e.message) + "</div>";
-        var statusHost = $("#reactivation-journey-status");
-        if (statusHost) statusHost.innerHTML = '<div class="banner error">Failed to load journey status: ' + esc(e.message) + "</div>";
       });
   }
 
@@ -3334,9 +3345,16 @@
     bot_settings: "Bot Settings", security: "Security"
   };
 
+  var REACTIVATION_JOURNEY_HTML =
+    '<div class="detail-block" style="margin-bottom:20px;">' +
+    '<h4 style="margin-top:0;">Comeback Journey Rollout Controls (3-tier reward rollout)</h4>' +
+    '<div id="reactivation-journey-config"></div>' +
+    '</div>';
+
   function renderSettingsShell(category) {
     var html = "";
     if (category === "voucher_rules") html += REJOIN_BUFFER_HTML;
+    if (category === "reactivation") html += REACTIVATION_JOURNEY_HTML;
     html += '<div class="section-title" style="margin-bottom:8px;">Managed Settings</div>' +
       '<div style="font-size:12px;color:var(--muted);margin-bottom:12px;">' +
       'Everything below is stored in MongoDB and editable without a redeploy. Untouched fields keep working exactly ' +
@@ -3353,6 +3371,7 @@
     renderSettingsShell(category);
     loadManagedSettings(category);
     if (category === "voucher_rules") loadRejoinBufferSettings();
+    if (category === "reactivation") loadReactivationSettingsConfig();
     api("/api/admin/dashboard/settings" + (refresh ? "?refresh=1" : ""))
       .then(function (d) {
         renderMeta(d, "all time");
@@ -7841,8 +7860,7 @@
       { label: "Overview", view: "moduleOverview", overviewKey: "voucher" },
       { label: "Active Drops", view: "drops", live: true },
       { label: "Voucher Pools", view: "compiledDrops" },
-      { label: "Voucher Codes", view: "vouchers" },
-      { label: "Settings", view: "settings", settingsCategory: "voucher_rules" }
+      { label: "Voucher Codes", view: "vouchers" }
     ]},
     { key: "community", icon: "👥", label: "Community Centre", tabs: [
       { label: "Composer", view: "ccComposer", live: true },
@@ -7895,6 +7913,7 @@
     { key: "segments", icon: "👤", label: "Segments", tabs: [
       { label: "Overview", view: "segments" },
       { label: "All Players", view: "users" },
+      { label: "Adjust XP", view: "xpAdjust", live: true },
       { label: "High Value", view: "placeholder", ph: { title: "High Value", desc: "Per-segment drilldown is not yet wired to an admin data source — see Overview for distribution." } },
       { label: "Low Value", view: "placeholder", ph: { title: "Low Value", desc: "Per-segment drilldown is not yet wired to an admin data source — see Overview for distribution." } },
       { label: "Active Community", view: "placeholder", ph: { title: "Active Community", desc: "Per-segment drilldown is not yet wired to an admin data source — see Overview for distribution." } },
@@ -7905,8 +7924,7 @@
       { label: "VH: Rule Quality", view: "voucherHunterQuality" },
       { label: "VH: False Positive", view: "voucherHunterFalsePositive" },
       { label: "VH: Rule Simulator", view: "voucherHunterRuleSimulator" },
-      { label: "VH: Priority Impact", view: "vhPriorityImpact" },
-      { label: "Probability Config", view: "segmentProbabilityConfig" }
+      { label: "VH: Priority Impact", view: "vhPriorityImpact" }
     ]},
     { key: "analytics", icon: "📊", label: "Analytics", tabs: [
       { label: "Executive", view: "summary" },
@@ -7932,8 +7950,6 @@
     { key: "settings", icon: "⚙", label: "Settings", tabs: [
       { label: "General", view: "settings", settingsCategory: "general" },
       { label: "Feature Flags", view: "settings", settingsCategory: "feature_flags" },
-      { label: "XP", view: "xpAdjust", live: true },
-      { label: "Rewards", view: "settings", settingsCategory: "rewards" },
       { label: "Voucher Rules", view: "settings", settingsCategory: "voucher_rules" },
       { label: "Referral", view: "settings", settingsCategory: "referral" },
       { label: "Affiliate", view: "settings", settingsCategory: "affiliate" },
