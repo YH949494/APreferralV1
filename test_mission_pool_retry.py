@@ -214,6 +214,56 @@ def test_attempts_exhausted_blocks_even_a_correct_answer(fake_db):
     assert fake_db[mp.ENTRIES_COLLECTION].count_documents({}) == 0
 
 
+def test_attempts_exhausted_blocks_a_correct_answer_too(fake_db):
+    """An exhausted user must not slip into the reward pool by sending the
+    CORRECT answer after hitting the limit -- exhaustion applies to every
+    further submission on the mission, not only further wrong guesses."""
+    _seed(fake_db, _keyword_config())
+    fake_db[mp.ATTEMPTS_COLLECTION].insert_one({
+        "campaign_id": CAMPAIGN_ID, "telegram_user_id": UID,
+        "incorrect_attempts": mp.MAX_INCORRECT_ATTEMPTS,
+        "last_attempt_at": datetime.now(timezone.utc) - timedelta(seconds=mp.RETRY_COOLDOWN_SECONDS + 5),
+        "created_at": datetime.now(timezone.utc), "updated_at": datetime.now(timezone.utc),
+    })
+    with _app().test_client() as client:
+        resp = _submit(client, answer="DRAGON")
+    assert resp.get_json() == {"status": "ok", "submitted": False, "state": "attempts_exhausted",
+                                "retry_allowed": False}
+    assert fake_db[mp.ENTRIES_COLLECTION].count_documents({}) == 0
+
+
+def test_concurrent_wrong_guesses_cannot_exceed_the_attempt_cap(fake_db, monkeypatch):
+    """A batch of wrong guesses arriving in parallel after the cooldown has
+    expired must not all read the same pre-increment count -- the attempt
+    counter itself needs to be race-safe, or a caller could send several
+    concurrent batches to exceed MAX_INCORRECT_ATTEMPTS."""
+    import threading
+
+    monkeypatch.setattr(mp, "RETRY_COOLDOWN_SECONDS", 0)
+    _seed(fake_db, _keyword_config())
+    app = _app()
+    results = []
+    lock = threading.Lock()
+
+    def worker():
+        with app.test_client() as client:
+            resp = _submit(client, answer="wrong")
+        with lock:
+            results.append(resp.get_json()["state"])
+
+    threads = [threading.Thread(target=worker) for _ in range(10)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert results.count("incorrect_retry") == mp.MAX_INCORRECT_ATTEMPTS
+    assert results.count("attempts_exhausted") == len(threads) - mp.MAX_INCORRECT_ATTEMPTS
+    stored = fake_db[mp.ATTEMPTS_COLLECTION].find({})
+    assert len(stored) == 1
+    assert stored[0]["incorrect_attempts"] == mp.MAX_INCORRECT_ATTEMPTS
+
+
 def test_cooldown_enforced_between_rapid_wrong_attempts(fake_db):
     _seed(fake_db, _keyword_config())
     with _app().test_client() as client:
