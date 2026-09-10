@@ -2437,9 +2437,11 @@ def ensure_indexes():
         )
         if dup_weeks:
             print(
-                f"⚠️ weekly_leaderboard_history has {len(dup_weeks)} duplicate week_start value(s): "
-                f"{[d['_id'] for d in dup_weeks]} — uniq_weekly_history_week_start index will not be created "
-                "until these are manually deduplicated."
+                f"⚠️ ACTION REQUIRED: weekly_leaderboard_history has {len(dup_weeks)} duplicate "
+                f"week_start value(s): {[d['_id'] for d in dup_weeks]} — "
+                "uniq_weekly_history_week_start will fail to create until these are cleaned up. "
+                "Run: MONGO_URL=... python scripts/dedupe_weekly_leaderboard_history.py --dry-run "
+                "then rerun with --apply --create-index. This is non-fatal; startup continues."
             )
     except Exception as e:
         print("⚠️ weekly_leaderboard_history duplicate check failed:", e)

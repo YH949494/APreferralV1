@@ -50,4 +50,35 @@ Do **not** blindly accept all Atlas index suggestions; only add indexes proven b
 - Created via `safe_create_index` (never raises), preceded by a duplicate-`week_start`
   diagnostic (`ensure_indexes()` in `main.py`) that only **logs** — it does not delete
   any existing duplicate records. If duplicates are ever reported, they must be reviewed
-  and merged manually before the index will actually take effect.
+  and merged before the index will actually take effect.
+
+### 2026-09 duplicate cleanup (root cause + resolution)
+- **Root cause:** the deprecated `database.save_weekly_snapshot()` writer (gated behind
+  `ENABLE_LEGACY_WEEKLY_SNAPSHOT`, dead by default but never removed) used a bare
+  `insert_one()` with no key check. When it or an earlier ancestor of `reset_weekly_xp`
+  ran more than once for the same week (misfire replay / boot catch-up / a second
+  worker instance before the scheduler lock + upsert fix landed), it created a second
+  `weekly_leaderboard_history` document for the same `week_start`, e.g.
+  `{ week_start: "2025-08-25" }`. That pre-existing duplicate is what makes
+  `uniq_weekly_history_week_start` fail with `E11000` on every boot — the diagnostic
+  step reports it but never deletes anything.
+- **Fix:**
+  - `database.save_weekly_snapshot()` now does the same atomic
+    `update_one(..., {"$setOnInsert": {...}}, upsert=True)` (with a `DuplicateKeyError`
+    catch for the losing side of a race) as `main._archive_week_upsert()`, so no writer
+    for this collection can ever `insert_one()` a second document for a `week_start`
+    again.
+  - `scripts/dedupe_weekly_leaderboard_history.py` is a repeatable, dry-run-by-default
+    migration: it finds every duplicated `week_start` (not just `2025-08-25`), inspects
+    the full documents, picks one canonical record deterministically (latest valid,
+    most complete snapshot; `_id` as a final tiebreak), copies every other document to
+    `weekly_leaderboard_history_dedupe_backup` (upsert keyed by the original `_id`, so a
+    rerun or a crash mid-run never loses or double-backs-up a record), and only then
+    deletes the non-canonical duplicates. Once a `week_start` has a single document the
+    script is a no-op on rerun.
+  - The startup diagnostic log now names the migration script and both flags needed to
+    run it, instead of just reporting the duplicate count.
+- **Regression coverage:** `test_weekly_leaderboard_history_dedupe.py` covers concurrent
+  writers, existing-duplicate cleanup, dry-run no-op, rerun no-op, deterministic
+  canonical selection, index creation succeeding after cleanup, and future duplicate
+  inserts being rejected once the index exists.
