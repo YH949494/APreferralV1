@@ -5,6 +5,7 @@
 
   var state = {
     view: "summary",
+    campaignId: null,
     summaryWindow: "7d",
     funnelWindow: "7d",
     abuseWindow: "7d",
@@ -5197,6 +5198,7 @@
   var gcOptionsCache = {
     providers: null, providersPromise: null,
     campaigns: null, campaignsPromise: null,
+    pools: null, poolsPromise: null,
   };
   var gcKnownCampaignIds = {};
 
@@ -5233,6 +5235,20 @@
       return items;
     }).catch(function (e) { gcOptionsCache.campaignsPromise = null; throw e; });
     return gcOptionsCache.campaignsPromise;
+  }
+
+  // GET /api/admin/reward-pools, cached the same way fetchGcProviders/
+  // fetchGcCampaignsList are (P0.3 pattern) — reused by Campaign Detail
+  // (P0.5a) to look up a Mission Pool campaign's linked pool + stock
+  // without a per-campaign endpoint.
+  function fetchGcRewardPools(force) {
+    if (force) { gcOptionsCache.pools = null; gcOptionsCache.poolsPromise = null; }
+    if (gcOptionsCache.poolsPromise) return gcOptionsCache.poolsPromise;
+    gcOptionsCache.poolsPromise = api("/api/admin/reward-pools").then(function (data) {
+      gcOptionsCache.pools = data.pools || [];
+      return gcOptionsCache.pools;
+    }).catch(function (e) { gcOptionsCache.poolsPromise = null; throw e; });
+    return gcOptionsCache.poolsPromise;
   }
 
   function gcProviderOptionLabel(p) {
@@ -5332,6 +5348,7 @@
           '<td>' + gcPill(c.status) + '</td>' +
           '<td>' + visBadge + reasons + '</td>' +
           '<td>' +
+          '<button class="btn" data-gc-action="detail" data-id="' + esc(c.campaign_id) + '">View Details</button> ' +
           '<button class="btn" data-gc-action="publish" data-id="' + esc(c.campaign_id) + '">Publish</button> ' +
           '<button class="btn" data-gc-action="pause" data-id="' + esc(c.campaign_id) + '">Pause</button>' +
           gcMissionActionsHtml(c) +
@@ -5348,6 +5365,433 @@
       }).join("");
       $("#gc-campaigns-body").innerHTML = '<table class="data-table"><thead><tr><th>Campaign</th><th>Type</th><th>Status</th><th>Visibility</th><th>Actions</th></tr></thead><tbody>' + rows + '</tbody></table>';
     }).catch(function (e) { statePanel("gc-campaigns-body", "error", "Failed to load campaigns: " + e.message); });
+  }
+
+  // ---------------------------------------------------------------------
+  // Campaign Detail (P0.5a) — a READ-ONLY guided-setup container for a
+  // single gc_campaigns document. No PUT/POST/DELETE is ever issued from
+  // this view: it only reads GET /api/admin/gc-campaigns/<id> plus the two
+  // already-cached lookups (fetchGcProviders / fetchGcRewardPools) and
+  // renders a checklist of what's left before the campaign can go live.
+  //
+  // computeSetupChecklist() is the single source of "what rows apply and
+  // are they complete" — it mirrors campaign_centre._transition()'s publish
+  // gate (tournament needs reward_config.rules, mission_pool needs
+  // mission_config + mission_pool.pool_id, a campaign with
+  // registration.enabled skips the destination/provider gate entirely)
+  // rather than inventing its own rules, so this page can never tell an
+  // admin "ready" when the backend would still reject a publish. Every
+  // other render function below is a pure string builder over that same
+  // row data — no business logic lives in the HTML-building code.
+  // ---------------------------------------------------------------------
+
+  var GC_TYPE_LABELS = {
+    tournament: "Tournament",
+    external_subscription_verification: "Subscription Verification",
+    external_website: "External Website",
+    mission_pool: "Mission",
+  };
+
+  function gcTypeLabel(type) { return GC_TYPE_LABELS[type] || type || "Unknown type"; }
+
+  var GC_MISSION_TYPE_LABELS = {
+    multiple_choice: "Multiple choice question",
+    single_choice: "Single choice question",
+    keyword: "Keyword answer",
+    feedback: "Open feedback",
+  };
+
+  function gcMissionTypeLabel(type) { return GC_MISSION_TYPE_LABELS[type] || type || "Not set"; }
+
+  function gcFindProvider(providers, providerId) {
+    if (!providerId) return null;
+    return (providers || []).filter(function (p) { return p.provider_id === providerId; })[0] || null;
+  }
+
+  function gcFindPool(pools, poolId) {
+    if (!poolId) return null;
+    return (pools || []).filter(function (p) { return p.pool_id === poolId; })[0] || null;
+  }
+
+  // Asia/Kuala_Lumpur display range for the "When" row — reuses the
+  // Composer's existing fixed-offset UTC->KL formatter (ccUtcToKlDisplay)
+  // rather than a second implementation.
+  function gcScheduleRangeSummary(schedule) {
+    schedule = schedule || {};
+    if (!schedule.starts_at) return "Start date not set";
+    return ccUtcToKlDisplay(schedule.starts_at) + "  →  " + (schedule.ends_at ? ccUtcToKlDisplay(schedule.ends_at) : "No end date");
+  }
+
+  // ---- Pure checklist derivation --------------------------------------
+  //
+  // Returns an ordered array of { key, label, applicable, required,
+  // complete, summary, actionTarget }. Only rows relevant to this
+  // campaign's type/config are marked applicable:true — callers filter on
+  // that instead of hiding rows in the render layer, so "which rows count"
+  // and "how many rows are shown" can never drift apart.
+  function computeSetupChecklist(campaign, providers, pools) {
+    campaign = campaign || {};
+    providers = providers || [];
+    pools = pools || [];
+    var type = campaign.type;
+    var isMissionPool = campaign.mechanic === "mission_pool" || type === "mission_pool";
+    var registrationEnabled = !!((campaign.registration || {}).enabled);
+    var rows = [];
+
+    rows.push({
+      key: "campaign",
+      label: "Campaign",
+      applicable: true,
+      required: true,
+      complete: !!(campaign.name && campaign.type),
+      summary: gcTypeLabel(type) + (campaign.description ? " — " + campaign.description : ""),
+      actionTarget: null,
+    });
+
+    var schedule = campaign.schedule || {};
+    rows.push({
+      key: "when",
+      label: "When",
+      applicable: true,
+      required: true,
+      complete: !!schedule.starts_at,
+      summary: gcScheduleRangeSummary(schedule),
+      actionTarget: "when",
+    });
+
+    // Only ever shown for a campaign that actually turned registration on —
+    // never a neutral "Off" row (registration is orthogonal to `type`, see
+    // campaign_registration.py).
+    if (registrationEnabled) {
+      var reg = campaign.registration || {};
+      var fieldLabels = { full_name: "name", contact_number: "contact number", country_region: "region", delivery_address: "delivery address" };
+      var fields = (reg.required_fields || []).map(function (f) { return fieldLabels[f] || f; }).join(", ");
+      rows.push({
+        key: "registration",
+        label: "Registration",
+        applicable: true,
+        required: true,
+        complete: true,
+        summary: "Enabled" + (fields ? " — collects " + fields : ""),
+        actionTarget: "registration",
+      });
+    }
+
+    // Mission config is read-only here — editing stays owned by the Mission
+    // admin screen (static/mission-admin.js).
+    if (isMissionPool) {
+      var mc = campaign.mission_config || {};
+      var missionComplete = !!mc.mission_type;
+      var prompt = (mc.prompt || "").slice(0, 80) + ((mc.prompt || "").length > 80 ? "…" : "");
+      rows.push({
+        key: "mission",
+        label: "Mission",
+        applicable: true,
+        required: true,
+        complete: missionComplete,
+        summary: missionComplete ? gcMissionTypeLabel(mc.mission_type) + (prompt ? ": “" + prompt + "”" : "") : "Mission not configured",
+        actionTarget: "mission",
+      });
+    }
+
+    // Rewards only applies to types that actually gate on it server-side —
+    // never invented for a type that doesn't use rewards (campaign_centre.
+    // _REWARD_DRIVEN_TYPES / _SELF_REWARDING_TYPES).
+    var rewardsApplicable = type === "tournament" || isMissionPool;
+    if (rewardsApplicable) {
+      if (isMissionPool) {
+        var mp = campaign.mission_pool || {};
+        var poolId = mp.pool_id || "";
+        var pool = gcFindPool(pools, poolId);
+        var summary;
+        if (!poolId) {
+          summary = "No reward pool linked";
+        } else if (pool) {
+          var stock = pool.stock || {};
+          summary = (pool.name || "Reward pool") +
+            (typeof stock.available === "number" ? " — " + stock.available + " code" + (stock.available === 1 ? "" : "s") + " available" : "");
+        } else {
+          summary = "Reward pool linked";
+        }
+        rows.push({
+          key: "rewards", label: "Rewards", applicable: true, required: true,
+          complete: !!poolId, summary: summary, actionTarget: "rewards_mission",
+        });
+      } else {
+        var rc = campaign.reward_config || {};
+        var rules = rc.rules || [];
+        rows.push({
+          key: "rewards", label: "Rewards", applicable: true, required: true,
+          complete: rules.length > 0,
+          summary: rules.length > 0 ? rules.length + " reward rule" + (rules.length === 1 ? "" : "s") + " configured" : "No rewards added",
+          actionTarget: "rewards_tournament",
+        });
+      }
+    }
+
+    // Never shown for mission_pool (no external destination in its publish
+    // gate) or a campaign with registration enabled (registration_only skips
+    // the destination/provider gate in campaign_centre._transition, whatever
+    // the campaign's `type` is).
+    var destinationApplicable = !isMissionPool && !registrationEnabled;
+    if (destinationApplicable) {
+      var dest = campaign.destination || {};
+      var provider = gcFindProvider(providers, dest.provider_id || "");
+      var summary2;
+      if (!dest.provider_id) summary2 = "No destination set";
+      else if (!provider) summary2 = "Linked provider not found";
+      else if (!provider.active) summary2 = provider.name + " (inactive)";
+      else if (!dest.ready) summary2 = provider.name + " — not marked ready";
+      else summary2 = provider.name;
+      rows.push({
+        key: "destination", label: "Where users go", applicable: true, required: true,
+        complete: !!(dest.ready && provider && provider.active), summary: summary2, actionTarget: "destination",
+      });
+    }
+
+    return rows;
+  }
+
+  function gcChecklistProgress(rows) {
+    var applicable = (rows || []).filter(function (r) { return r.applicable; });
+    return { completed: applicable.filter(function (r) { return r.complete; }).length, total: applicable.length };
+  }
+
+  function gcFirstIncompleteRequiredRow(rows) {
+    var applicable = (rows || []).filter(function (r) { return r.applicable; });
+    for (var i = 0; i < applicable.length; i++) {
+      if (applicable[i].required && !applicable[i].complete) return applicable[i];
+    }
+    return null;
+  }
+
+  // Whether campaign_centre._transition() would even accept a "live" target
+  // from this status — mirrors _VALID_STATUS_TRANSITIONS exactly ("live" is
+  // reachable from draft/scheduled/paused, and live->live is a no-op;
+  // never from ended/archived). Ready-to-Publish must be judged against
+  // this actual publish gate, not against effective_visibility.reasons:
+  // that field answers "is this live campaign publicly visible right now"
+  // (it includes schedule timing, e.g. "scheduled to start at <future
+  // date>"), a different question from "would clicking Publish succeed" —
+  // a campaign scheduled to start tomorrow is perfectly publishable today.
+  function gcCanTransitionToLive(status) {
+    return ["draft", "scheduled", "paused", "live"].indexOf(status) !== -1;
+  }
+
+  function gcIsReadyToPublish(rows, campaign) {
+    return !gcFirstIncompleteRequiredRow(rows) && gcCanTransitionToLive((campaign || {}).status);
+  }
+
+  // The deep link is only ever populated server-side for a registration-
+  // enabled campaign (campaign_centre.get_campaign_route / list_campaigns,
+  // via campaign_registration.campaign_deep_link) — never assembled here
+  // from a bot username or raw campaign_id.
+  function gcComputeShareState(campaign) {
+    campaign = campaign || {};
+    if (campaign.registration_deep_link) return { available: true, link: campaign.registration_deep_link };
+    var enabled = !!((campaign.registration || {}).enabled);
+    return {
+      available: false,
+      reason: enabled
+        ? "Share link is temporarily unavailable — the bot username isn't configured yet."
+        : "This campaign type doesn't have a shareable link.",
+    };
+  }
+
+  // ---- Pure HTML builders (beginner view — no backend ids) -------------
+
+  var GC_ROW_ACTION_LABELS = {
+    when: "Set schedule", registration: "Edit registration", mission: "Set up mission",
+    rewards_mission: "Link reward pool", rewards_tournament: "Set up rewards", destination: "Set up destination",
+  };
+
+  function gcChecklistActionLabel(row) {
+    return GC_ROW_ACTION_LABELS[row.actionTarget] || ("Set up " + row.label.toLowerCase());
+  }
+
+  function gcCampaignDetailChecklistHtml(rows) {
+    return (rows || []).map(function (row) {
+      var icon = row.complete ? '<span style="color:var(--ok);">✓</span>' : '<span style="color:var(--warn);">!</span>';
+      var actionBtn = (!row.complete && row.actionTarget)
+        ? '<div style="margin-left:20px;margin-top:6px;"><button class="btn" data-cd-goto="' + esc(row.actionTarget) + '">' + esc(gcChecklistActionLabel(row)) + '</button></div>'
+        : "";
+      return '<div class="section" style="margin-bottom:10px;padding:12px 14px;">' +
+        '<div style="display:flex;align-items:baseline;gap:8px;">' + icon + '<strong>' + esc(row.label) + '</strong></div>' +
+        '<div class="sub" style="margin-top:4px;margin-left:20px;">' + esc(row.summary || "") + '</div>' +
+        actionBtn +
+        '</div>';
+    }).join("");
+  }
+
+  function gcCampaignDetailContinueHtml(rows, campaign) {
+    var next = gcFirstIncompleteRequiredRow(rows);
+    if (next) {
+      return '<button class="btn primary" data-cd-goto="' + esc(next.actionTarget || "") + '">Continue Setup → ' + esc(next.label) + '</button>';
+    }
+    if (gcIsReadyToPublish(rows, campaign)) {
+      return '<button class="btn" data-cd-goto="publish-list">✓ Ready to Publish — go to Campaigns list</button>';
+    }
+    // Every applicable row is complete, but the campaign's current status
+    // (ended/archived) can never transition to "live" — never claim
+    // readiness for a campaign that can't actually be published.
+    return '<div class="sub">Setup is complete, but a ‘' + esc((campaign && campaign.status) || "") +
+      '’ campaign can’t be published — see Technical Details below.</div>';
+  }
+
+  function gcCampaignDetailShareHtml(shareState) {
+    if (shareState.available) {
+      return '<div class="section-title">Share Campaign</div>' +
+        '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px;">' +
+        '<code id="cd-share-link" style="flex:1;min-width:220px;word-break:break-all;">' + esc(shareState.link) + '</code>' +
+        '<button class="btn" data-cd-copy="1">Copy Campaign Link</button>' +
+        '<a class="btn" href="' + esc(shareState.link) + '" target="_blank" rel="noopener">Open</a>' +
+        '</div>';
+    }
+    return '<div class="section-title">Share Campaign</div><div class="sub" style="margin-top:8px;">' + esc(shareState.reason) + '</div>';
+  }
+
+  function gcCampaignDetailAdvancedHtml(campaign, providers) {
+    campaign = campaign || {};
+    var dest = campaign.destination || {};
+    var provider = gcFindProvider(providers, dest.provider_id || "");
+    var reg = campaign.registration || {};
+    var rc = campaign.reward_config || {};
+    var rowsData = [
+      ["Visibility", (campaign.effective_visibility && campaign.effective_visibility.publicly_visible) ? "Public" : "Admin-only"],
+      ["Destination ready", dest.provider_id ? (dest.ready ? "Yes" : "No") : "Not applicable for this campaign"],
+      ["Provider status", provider ? (provider.active ? "Active" : "Inactive") : "—"],
+      ["Registration", reg.enabled ? "Enabled (" + (reg.required_fields || []).length + " field(s) collected)" : "Disabled"],
+      ["Reward rules", (rc.rules || []).length + " configured"],
+      ["Priority", String(campaign.priority == null ? "—" : campaign.priority)],
+    ];
+    return rowsData.map(function (r) {
+      return '<div style="display:flex;justify-content:space-between;gap:12px;padding:4px 0;border-bottom:1px solid var(--border);">' +
+        '<span class="sub">' + esc(r[0]) + '</span><span>' + esc(String(r[1])) + '</span></div>';
+    }).join("");
+  }
+
+  // ---- Pure HTML builder (Technical Details — raw backend ids belong
+  // here, and only here; regression constraint #9) -----------------------
+  function gcCampaignDetailTechnicalHtml(campaign) {
+    campaign = campaign || {};
+    var dest = campaign.destination || {};
+    var mp = campaign.mission_pool || {};
+    var reasons = ((campaign.effective_visibility || {}).reasons || []);
+    var rowsData = [
+      ["Campaign ID", campaign.campaign_id || "—"],
+      ["Type", campaign.type || "—"],
+      ["Status", campaign.status || "—"],
+      ["Mechanic", campaign.mechanic || "—"],
+      ["Provider ID", dest.provider_id || "—"],
+      ["Pool ID", mp.pool_id || "—"],
+    ];
+    var rowsHtml = rowsData.map(function (r) {
+      return '<div style="display:flex;justify-content:space-between;gap:12px;padding:4px 0;border-bottom:1px solid var(--border);">' +
+        '<span class="sub">' + esc(r[0]) + '</span><code>' + esc(String(r[1])) + '</code></div>';
+    }).join("");
+    var reasonsHtml = reasons.length
+      ? '<div class="sub" style="margin-top:8px;">Server visibility reasons:</div><ul style="margin:4px 0 0 18px;padding:0;">' +
+        reasons.map(function (r) { return '<li class="sub">' + esc(r) + '</li>'; }).join("") + '</ul>'
+      : '<div class="sub" style="margin-top:8px;">Server reports no outstanding visibility reasons.</div>';
+    return rowsHtml + reasonsHtml;
+  }
+
+  // ---- Composer + orchestration (DOM-touching) --------------------------
+
+  function gcCampaignDetailHtml(campaign, providers, pools) {
+    var rows = computeSetupChecklist(campaign, providers, pools);
+    var progress = gcChecklistProgress(rows);
+    var shareState = gcComputeShareState(campaign);
+    var pct = progress.total ? Math.round((progress.completed / progress.total) * 100) : 0;
+
+    return (
+      '<button class="btn" data-cd-goto="back" style="margin-bottom:14px;background:transparent;border:1px solid var(--border);">← Back to Campaigns</button>' +
+      '<div class="progress-row" style="max-width:320px;margin-bottom:16px;">' +
+        '<div class="bar-wrap"><div class="bar" style="width:' + pct + '%;"></div></div>' +
+        '<div class="progress-label">Setup ' + progress.completed + ' / ' + progress.total + ' complete</div>' +
+      '</div>' +
+      '<div class="section-title" style="margin-bottom:8px;">Setup</div>' +
+      gcCampaignDetailChecklistHtml(rows) +
+      '<div style="margin:14px 0;display:flex;gap:8px;flex-wrap:wrap;">' +
+        gcCampaignDetailContinueHtml(rows, campaign) +
+        '<button class="btn" data-gc-action="preview" data-id="' + esc(campaign.campaign_id) + '">Preview Campaign</button>' +
+      '</div>' +
+      '<div class="section" style="margin-bottom:16px;">' + gcCampaignDetailShareHtml(shareState) + '</div>' +
+      '<details style="margin-bottom:10px;">' +
+        '<summary style="cursor:pointer;font-size:13px;font-weight:600;">Advanced Settings</summary>' +
+        '<div style="margin-top:8px;max-width:480px;">' + gcCampaignDetailAdvancedHtml(campaign, providers) + '</div>' +
+      '</details>' +
+      '<details>' +
+        '<summary style="cursor:pointer;font-size:13px;font-weight:600;">Technical Details</summary>' +
+        '<div style="margin-top:8px;max-width:480px;">' + gcCampaignDetailTechnicalHtml(campaign) + '</div>' +
+      '</details>'
+    );
+  }
+
+  // Entry point from the Campaigns list ("View Details"). No history/hash
+  // routing (P0 scope) — a refresh returns to the normal dashboard, which
+  // is an accepted limitation for this PR.
+  function renderCampaignDetail(campaignId) {
+    state.campaignId = campaignId;
+    switchView("campaignDetail");
+  }
+
+  // GET-only: the single campaign fetch plus the two already-cached
+  // lookups (P0.3's fetchGcProviders, and fetchGcRewardPools for mission_pool
+  // campaigns only). Never issues a POST/PUT/DELETE — this view cannot
+  // mutate a campaign (regression constraint #2).
+  function loadCampaignDetail(force) {
+    var id = state.campaignId;
+    if (!id) { statePanel("cd-body", "error", "No campaign selected."); return; }
+    statePanel("cd-body", "loading", "Loading campaign…");
+    api("/api/admin/gc-campaigns/" + encodeURIComponent(id)).then(function (resp) {
+      if (!resp || resp.status !== "ok" || !resp.campaign) {
+        statePanel("cd-body", "error", "Campaign not found.");
+        return null;
+      }
+      var campaign = resp.campaign;
+      var needsPools = campaign.mechanic === "mission_pool" || campaign.type === "mission_pool";
+      return Promise.all([
+        fetchGcProviders(force),
+        needsPools ? fetchGcRewardPools(force) : Promise.resolve([]),
+      ]).then(function (extra) {
+        var providers = extra[0] || [];
+        var pools = extra[1] || [];
+        var bc = $("#breadcrumb");
+        if (bc) bc.textContent = "🕹 Player Campaigns  /  Campaigns  /  " + (campaign.name || campaign.campaign_id);
+        var titleEl = $("#view-title");
+        if (titleEl) titleEl.innerHTML = esc(campaign.name || campaign.campaign_id) + " " + gcPill(campaign.status);
+        $("#cd-body").innerHTML = gcCampaignDetailHtml(campaign, providers, pools);
+      });
+    }).catch(function (e) {
+      statePanel("cd-body", "error", "Failed to load campaign: " + e.message);
+    });
+  }
+
+  function bindCampaignDetail() {
+    document.addEventListener("click", function (e) {
+      var copyBtn = e.target && e.target.closest && e.target.closest("[data-cd-copy]");
+      if (copyBtn) {
+        var link = ($("#cd-share-link") || {}).textContent || "";
+        if (!link) return;
+        try { navigator.clipboard.writeText(link); toast("✅ Copied", "success"); } catch (err) { toast("Copy failed", "error"); }
+        return;
+      }
+      var goBtn = e.target && e.target.closest && e.target.closest("[data-cd-goto]");
+      if (!goBtn) return;
+      var target = goBtn.dataset.cdGoto;
+      var id = state.campaignId;
+      if (target === "back") { activateTab("growth", 0); return; }
+      if (target === "publish-list") { activateTab("growth", 0); return; }
+      if (!id) return;
+      if (target === "mission" || target === "rewards_mission") { openMissionAdmin(id); return; }
+      if (target === "registration") { openCampaignRegistrationConfig(id); return; }
+      // "when" (schedule), "rewards_tournament" and "destination" have no
+      // dedicated edit screen yet — inline editing is explicitly out of
+      // scope for this PR (P0.5a is read-only). Say so instead of a dead
+      // link or a fake editor.
+      toast("Editing this from here isn't available yet — Campaign Detail is read-only for now.", "warn");
+    });
   }
 
   // ---------- Mission Reward Pool (Phase 2.1 — dedicated admin surface) ----------
@@ -5498,7 +5942,8 @@
       var btn = e.target && e.target.closest && e.target.closest("[data-gc-action]");
       if (!btn) return;
       var action = btn.dataset.gcAction, id = btn.dataset.id;
-      if (action === "publish") apiPost("/api/admin/gc-campaigns/" + id + "/publish").then(function (r) { if (r.status !== "ok") toast("❌ " + r.code, "error"); loadGcCampaigns(true); });
+      if (action === "detail") renderCampaignDetail(id);
+      else if (action === "publish") apiPost("/api/admin/gc-campaigns/" + id + "/publish").then(function (r) { if (r.status !== "ok") toast("❌ " + r.code, "error"); loadGcCampaigns(true); });
       else if (action === "pause") apiPost("/api/admin/gc-campaigns/" + id + "/pause").then(function () { loadGcCampaigns(true); });
       else if (action === "archive") apiPost("/api/admin/gc-campaigns/" + id + "/archive").then(function () { loadGcCampaigns(true); });
       else if (action === "mission") openMissionAdmin(id);
@@ -8246,7 +8691,7 @@
     });
   }
 
-  var VIEWS =["summary", "moduleOverview", "funnel", "abuse", "campaignBuilder", "campaignPerformance", "campaignIntelligence", "activeCampaigns", "compiledDrops", "campaigns", "gcCampaigns", "campaignRegistrations", "deepLinks", "missionPool", "gcProviders", "gcResults", "gcRewards", "gcVerification", "gcActivity", "campaignDisplay", "eventBanners", "luckyGames", "vouchers", "drops", "referrals", "affiliate", "affiliatePools", "affiliateBatches", "affiliatePending", "reactivation", "audit", "segmentProbabilityConfig", "segmentRoi", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "voucherHunterFalsePositive", "voucherHunterRuleSimulator", "vhPriorityImpact", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "joinRequests", "xpAdjust", "settings", "referralShareContent", "referralShareEngagement", "ccComposer", "ccCalendar", "ccBoard", "ccPollResults"];
+  var VIEWS =["summary", "moduleOverview", "funnel", "abuse", "campaignBuilder", "campaignPerformance", "campaignIntelligence", "activeCampaigns", "compiledDrops", "campaigns", "gcCampaigns", "campaignDetail", "campaignRegistrations", "deepLinks", "missionPool", "gcProviders", "gcResults", "gcRewards", "gcVerification", "gcActivity", "campaignDisplay", "eventBanners", "luckyGames", "vouchers", "drops", "referrals", "affiliate", "affiliatePools", "affiliateBatches", "affiliatePending", "reactivation", "audit", "segmentProbabilityConfig", "segmentRoi", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "voucherHunterFalsePositive", "voucherHunterRuleSimulator", "vhPriorityImpact", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "joinRequests", "xpAdjust", "settings", "referralShareContent", "referralShareEngagement", "ccComposer", "ccCalendar", "ccBoard", "ccPollResults"];
 
   // ---------------------------------------------------------------------
   // Information architecture: sidebar Business Modules, each with its own
@@ -8558,7 +9003,7 @@
       campaignIntelligence: "Campaign Intelligence (P5)", activeCampaigns: "Campaigns",
       compiledDrops: "Compiled Voucher Drops",
       campaigns: "Campaigns (Legacy Targeting)",
-      gcCampaigns: "Player Campaigns", campaignRegistrations: "Campaign Registrations", deepLinks: "Deep Links", missionPool: "Mission Reward Pool", gcProviders: "Providers", gcResults: "Tournament Results",
+      gcCampaigns: "Player Campaigns", campaignDetail: "Campaign Details", campaignRegistrations: "Campaign Registrations", deepLinks: "Deep Links", missionPool: "Mission Reward Pool", gcProviders: "Providers", gcResults: "Tournament Results",
       gcRewards: "Rewards", gcVerification: "Verification Integrations", gcActivity: "Activity Log",
       campaignDisplay: "Campaign Display Control",
       eventBanners: "Event Banner",
@@ -8600,6 +9045,7 @@
     else if (state.view === "compiledDrops") loadCompiledDrops(force);
     else if (state.view === "campaigns") loadCampaigns(force);
     else if (state.view === "gcCampaigns") loadGcCampaigns(force);
+    else if (state.view === "campaignDetail") loadCampaignDetail(force);
     else if (state.view === "campaignRegistrations") loadCampaignRegistrations(force);
     else if (state.view === "deepLinks") loadDeepLinks(force);
     else if (state.view === "missionPool") loadMissionPool();
@@ -8698,6 +9144,7 @@
     bindAffiliateBatches();
     bindAffiliatePending();
     bindGcCampaigns();
+    bindCampaignDetail();
     bindCampaignRegistrationConfig();
     bindCampaignRegistrations();
     bindDeepLinks();
