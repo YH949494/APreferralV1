@@ -191,7 +191,6 @@ test("Settings module tabs each declare exactly one settingsCategory (or none fo
 
   assert.equal(byLabel["General"].settingsCategory, "general");
   assert.equal(byLabel["Feature Flags"].settingsCategory, "feature_flags");
-  assert.equal(byLabel["Rewards"].settingsCategory, "rewards");
   assert.equal(byLabel["Voucher Rules"].settingsCategory, "voucher_rules");
   assert.equal(byLabel["Referral"].settingsCategory, "referral");
   assert.equal(byLabel["Affiliate"].settingsCategory, "affiliate");
@@ -200,6 +199,11 @@ test("Settings module tabs each declare exactly one settingsCategory (or none fo
   assert.equal(byLabel["Security"].settingsCategory, "security");
   assert.equal(byLabel["Integrations"].settingsCategory, "integrations");
   assert.equal(byLabel["Segment Probability"].settingsCategory, "segment_probability");
+});
+
+test("Rewards tab was removed from Settings (had no backing schema group)", () => {
+  const tabs = settingsTabs();
+  assert.ok(!tabs.some((t) => t.label === "Rewards"), "Rewards tab should no longer exist under Settings");
 });
 
 test("no two Settings-module tabs share the same settingsCategory", () => {
