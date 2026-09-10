@@ -4981,7 +4981,15 @@
       var id = btn.dataset.id;
       if (action === "open") { openMissionAdmin(id); return; }
       if (action === "edit") { openMissionEdit(id); return; }
-      if (action === "delete") { openGcDeleteModal(id, btn.dataset.name, function () { loadDrops(true); }); return; }
+      if (action === "delete") {
+        // The Player Campaigns table (loadGcCampaigns) may already have this
+        // campaign cached in gcOptionsCache — invalidate it too, or a delete
+        // triggered from here would leave the deleted campaign visible there
+        // (and in every campaign-picker select fed by fetchGcCampaignsList)
+        // until something else happens to force-refresh it.
+        openGcDeleteModal(id, btn.dataset.name, function () { gcInvalidateCampaignsCache(); loadDrops(true); });
+        return;
+      }
 
       var confirmMsg = mpConfirmCopy(action);
       if (confirmMsg && !confirm(confirmMsg)) return;
@@ -4991,12 +4999,46 @@
         : "/api/admin/mission-pool/" + encodeURIComponent(id) + "/" + action;
 
       btn.disabled = true;
-      apiPost(path).then(function (r) {
-        if (!r || r.status !== "ok") { toast("❌ " + ((r && r.code) || "action_failed"), "error"); return; }
-        toast("✅ Mission updated", "success");
+      // Publish (Start/Resume) mirrors mission-admin.js's own runAction():
+      // the gc-campaigns publish endpoint only checks that a mission config
+      // and a pool id exist, not that the pool can still cover the winner
+      // target, so the dedicated Mission page re-reads live inventory via
+      // edit-state and refuses to publish when it's insufficient. Skipping
+      // that check here would let an operator publish a mission whose
+      // shared pool has since been drained, leaving winners with no reward.
+      var preflight = action === "publish" ? mpInventoryPreflight(id) : Promise.resolve(true);
+      preflight.then(function (clear) {
+        if (!clear) return null;
+        return apiPost(path).then(function (r) {
+          if (!r || r.status !== "ok") { toast("❌ " + ((r && r.code) || "action_failed"), "error"); return; }
+          toast("✅ Mission updated", "success");
+        });
       }).catch(function (e) { toast("❌ " + e.message, "error"); })
         .finally(function () { btn.disabled = false; loadDrops(true); });
     });
+  }
+
+  // Same live-inventory check runAction() in static/mission-admin.js runs
+  // before "publish" — re-read here rather than trusted from the rendered
+  // row, since pool stock is shared and can move under an operator between
+  // page load and this click.
+  function mpInventoryPreflight(campaignId) {
+    return api("/api/admin/mission-pool/" + encodeURIComponent(campaignId) + "/edit-state")
+      .catch(function () { return null; })
+      .then(function (state) {
+        if (!state || state.status !== "ok") {
+          toast("❌ Could not confirm reward inventory before publishing (" + ((state && state.code) || "unknown") + ")", "error");
+          return false;
+        }
+        var reward = state.reward || {};
+        if (!reward.sufficient) {
+          toast("❌ Publishing blocked: winner target " + fmt(reward.winner_count) +
+            " exceeds the " + fmt(reward.available) + " available codes in " +
+            (reward.pool_id || "the configured pool") + ".", "error");
+          return false;
+        }
+        return true;
+      });
   }
 
   // ---------- Affiliate Voucher Pools (migrated from legacy MiniApp admin panel) ----------
@@ -5157,6 +5199,17 @@
     campaigns: null, campaignsPromise: null,
   };
   var gcKnownCampaignIds = {};
+
+  // Existing Drops (loadDrops) deletes a mission campaign through the same
+  // shared modal Player Campaigns uses, but refreshes loadDrops(true)
+  // afterward instead of loadGcCampaigns(true) — so this cache (and every
+  // campaign-picker select fed by fetchGcCampaignsList) needs its own
+  // explicit invalidation, or the deleted campaign stays visible there
+  // until something else happens to force a refresh.
+  function gcInvalidateCampaignsCache() {
+    gcOptionsCache.campaigns = null;
+    gcOptionsCache.campaignsPromise = null;
+  }
 
   function fetchGcProviders(force) {
     if (force) { gcOptionsCache.providers = null; gcOptionsCache.providersPromise = null; }

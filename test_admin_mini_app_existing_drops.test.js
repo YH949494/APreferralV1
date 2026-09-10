@@ -45,7 +45,12 @@ const ROW_AND_LOAD_SRC = slice(JS, "  function dropScheduleHtml(startsAt, endsAt
 const MISSION_CLICK_SRC = slice(
   JS,
   '    document.addEventListener("click", function (event) {\n      var btn = event.target && event.target.closest && event.target.closest("[data-mission-action]");',
-  "\n  }\n\n  // ---------- Affiliate Voucher Pools"
+  "\n  }\n\n  // Same live-inventory check runAction()"
+);
+const MP_INVENTORY_PREFLIGHT_SRC = slice(
+  JS,
+  "  function mpInventoryPreflight(campaignId) {",
+  "\n  // ---------- Affiliate Voucher Pools"
 );
 
 function featureSource() {
@@ -413,17 +418,19 @@ function makeClickContext() {
   const toasts = [];
   const fetchImpl = makeFetchQueue();
   const opened = { admin: [], edit: [], deleted: [] };
+  const invalidated = [];
   const sandbox = {
     console: { log() {}, warn() {}, error() {}, info() {} },
     fetch: fetchImpl,
+    window: { location: { href: "" } },
     encodeURIComponent,
     document: { addEventListener: (evt, fn) => listeners.push({ evt, fn }) },
     confirm: () => true,
   };
   const context = vm.createContext(sandbox);
   vm.runInContext(
-    slice(JS, "  function api(path) {", "\n  function apiPostJson(") +
-      "\n" + MISSION_CLICK_SRC,
+    slice(JS, "  function fmt(v) {", "\n  function apiPostJson(") +
+      "\n" + MISSION_CLICK_SRC + "\n" + MP_INVENTORY_PREFLIGHT_SRC,
     context,
     { filename: "admin-dashboard-mission-click.js" }
   );
@@ -432,13 +439,15 @@ function makeClickContext() {
       "this.openMissionAdmin = function (id) { __opened.admin.push(id); };" +
       "this.openMissionEdit = function (id) { __opened.edit.push(id); };" +
       "this.openGcDeleteModal = function (id, name, cb) { __opened.deleted.push(id); if (cb) cb(); };" +
+      "this.gcInvalidateCampaignsCache = function () { __invalidated.push(true); };" +
       "this.loadDrops = function () {};" +
       'this.mpConfirmCopy = function () { return ""; };',
     context
   );
   context.__toasts = toasts;
   context.__opened = opened;
-  return { context, fetchImpl, toasts, opened, listeners };
+  context.__invalidated = invalidated;
+  return { context, fetchImpl, toasts, opened, listeners, invalidated };
 }
 
 function triggerMissionClick(listeners, action, id, name) {
@@ -448,14 +457,37 @@ function triggerMissionClick(listeners, action, id, name) {
   return btn;
 }
 
-test("Start (upcoming) posts to gc-campaigns publish, not a drops endpoint", async () => {
-  const { fetchImpl, listeners } = makeClickContext();
+test("Start (upcoming) runs the inventory preflight, then posts to gc-campaigns publish", async () => {
+  const { fetchImpl, listeners, toasts } = makeClickContext();
+  fetchImpl.push(200, { status: "ok", reward: { sufficient: true, winner_count: 5, available: 20, pool_id: "p1" } });
   fetchImpl.push(200, { status: "ok" });
   triggerMissionClick(listeners, "publish", "mission-x");
   await flush();
-  assert.equal(fetchImpl.calls.length, 1);
-  assert.equal(fetchImpl.calls[0].path, "/api/admin/gc-campaigns/mission-x/publish");
-  assert.equal(fetchImpl.calls[0].opts.method, "POST");
+  assert.equal(fetchImpl.calls.length, 2);
+  assert.equal(fetchImpl.calls[0].path, "/api/admin/mission-pool/mission-x/edit-state");
+  assert.equal(fetchImpl.calls[1].path, "/api/admin/gc-campaigns/mission-x/publish");
+  assert.equal(fetchImpl.calls[1].opts.method, "POST");
+  assert.ok(toasts.some((t) => /success/.test(t.kind)));
+});
+
+test("Start is blocked (no publish call) when the inventory preflight reports an insufficient pool", async () => {
+  const { fetchImpl, listeners, toasts } = makeClickContext();
+  fetchImpl.push(200, { status: "ok", reward: { sufficient: false, winner_count: 30, available: 5, pool_id: "p1" } });
+  triggerMissionClick(listeners, "publish", "mission-x2");
+  await flush();
+  assert.equal(fetchImpl.calls.length, 1, "publish must never be posted when the pool can't cover the winner target");
+  assert.equal(fetchImpl.calls[0].path, "/api/admin/mission-pool/mission-x2/edit-state");
+  assert.ok(toasts.some((t) => t.kind === "error" && /Publishing blocked/.test(t.msg)));
+});
+
+test("Resume (paused -> publish) also runs the inventory preflight before posting", async () => {
+  const { fetchImpl, listeners } = makeClickContext();
+  fetchImpl.push(200, { status: "ok", reward: { sufficient: true, winner_count: 1, available: 1, pool_id: "p2" } });
+  fetchImpl.push(200, { status: "ok" });
+  triggerMissionClick(listeners, "publish", "mission-resume");
+  await flush();
+  assert.equal(fetchImpl.calls[0].path, "/api/admin/mission-pool/mission-resume/edit-state");
+  assert.equal(fetchImpl.calls[1].path, "/api/admin/gc-campaigns/mission-resume/publish");
 });
 
 test("Pause posts to gc-campaigns pause", async () => {
@@ -496,4 +528,11 @@ test("Delete routes through the shared campaign-deletion modal, not a direct API
   triggerMissionClick(listeners, "delete", "mission-t", "Mission T");
   assert.equal(fetchImpl.calls.length, 0, "the modal owns the actual DELETE call, not this handler");
   assert.deepEqual(opened.deleted, ["mission-t"]);
+});
+
+test("Delete also invalidates the shared Player Campaigns cache, so a deleted mission can't linger there", () => {
+  const { listeners, opened, invalidated } = makeClickContext();
+  triggerMissionClick(listeners, "delete", "mission-cache", "Mission Cache");
+  assert.deepEqual(opened.deleted, ["mission-cache"]);
+  assert.equal(invalidated.length, 1, "gcInvalidateCampaignsCache must run on successful delete");
 });
