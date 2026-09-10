@@ -290,7 +290,8 @@ html, body {
   .nav-modules { flex-direction: row; overflow-x: auto; }
   .nav-group { display: contents; }
   .nav-group-header { display: none; }
-  .nav-group-body { display: contents; }
+  .nav-group-body,
+  .nav-group.collapsed .nav-group-body { display: contents; }
   .sidebar-footer { display: none; }
   .module-btn.active { box-shadow: inset 0 -3px 0 var(--accent); }
   .topbar, .tab-bar { position: static; }
