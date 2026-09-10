@@ -5065,8 +5065,12 @@
 
   function loadGcProviderSelect(force) {
     var select = $("#gc-c-provider");
-    if (select && !force) select.innerHTML = '<option value="">Loading providers…</option>';
-    fetchGcProviders(force).then(renderGcProviderSelect).catch(function () {
+    // Only show the loading placeholder before the first load — once the
+    // cache is populated, re-entering this tab must not clobber whatever
+    // the admin already has selected while the (cached, near-instant)
+    // fetch resolves.
+    if (select && !gcOptionsCache.providers) select.innerHTML = '<option value="">Loading providers…</option>';
+    return fetchGcProviders(force).then(renderGcProviderSelect).catch(function () {
       if (select) select.innerHTML = '<option value="">Couldn\'t load providers. Try again.</option>';
     });
   }
@@ -6450,12 +6454,17 @@
     var createPoolBtn = $("#gc-create-pool-btn");
     if (createPoolBtn) {
       createPoolBtn.addEventListener("click", function () {
+        // The dropdown only lists the most recent campaigns (the admin
+        // list endpoint caps at 200) — a manually-typed id under Advanced
+        // always wins so an older/lower-priority campaign not shown there
+        // can still be linked.
+        var manualCampaignId = ($("#gc-pool-campaign-manual") ? $("#gc-pool-campaign-manual").value : "").trim();
         var body = {
           pool_id: ($("#gc-pool-id").value || "").trim(),
           name: ($("#gc-pool-name").value || "").trim(),
           pool_type: $("#gc-pool-type").value,
           allocation_scope: $("#gc-pool-scope") ? $("#gc-pool-scope").value : "campaign_rewards",
-          campaign_id: ($("#gc-pool-campaign").value || "").trim(),
+          campaign_id: manualCampaignId || ($("#gc-pool-campaign").value || "").trim(),
         };
         apiPostJson("/api/admin/reward-pools", body).then(function (res) {
           if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "create_failed"), "error"); return; }

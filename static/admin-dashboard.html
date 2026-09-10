@@ -2068,6 +2068,13 @@
               <option value="">No campaign link</option>
             </select>
           </div>
+          <details style="margin-top:10px;">
+            <summary style="cursor:pointer;font-size:12px;font-weight:600;">Advanced: enter campaign ID manually</summary>
+            <div style="margin-top:8px;max-width:320px;">
+              <input class="filter-input" id="gc-pool-campaign-manual" placeholder="campaign_id" style="margin:0;width:100%;box-sizing:border-box;" />
+              <div class="sub" style="margin-top:4px;">The dropdown above only lists the most recent campaigns. If you need to link an older campaign it doesn't show, type its campaign_id here — this overrides the dropdown.</div>
+            </div>
+          </details>
           <button class="btn primary" id="gc-create-pool-btn" style="margin-top:10px;">Register pool</button>
           <div class="sub" style="margin-top:4px;">Allocation scope controls which subsystem may allocate codes from this pool — it cannot be changed later once codes exist, except via an explicit migration operation.</div>
           <div id="gc-pools-body" style="margin-top:10px;"></div>

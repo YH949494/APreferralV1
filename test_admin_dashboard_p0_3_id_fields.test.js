@@ -296,6 +296,7 @@ test("gcCreateCampaignAttempt: non-collision failure surfaces its own code, not 
 function loadOptionsSandbox(apiImpl) {
   return runInSandbox(OPTIONS_SRC + "\nthis.fetchGcProviders = fetchGcProviders; this.fetchGcCampaignsList = fetchGcCampaignsList; " +
     "this.renderGcProviderSelect = renderGcProviderSelect; this.renderGcPoolCampaignSelect = renderGcPoolCampaignSelect; " +
+    "this.loadGcProviderSelect = loadGcProviderSelect; " +
     "this.gcOptionsCache = gcOptionsCache; this.gcKnownCampaignIds = gcKnownCampaignIds;", {
     $: makeDomStub({ "gc-c-provider": new FakeSelect(), "gc-pool-campaign": new FakeSelect() }),
     api: apiImpl,
@@ -353,6 +354,25 @@ test("provider select: submitted value is the exact provider_id (option value), 
     select.value = "prov_official_001";
     assert.equal(select.value, "prov_official_001");
   });
+});
+
+test("provider select: re-entering the tab after the cache is warm preserves the admin's selection", async () => {
+  const s = loadOptionsSandbox(() => Promise.resolve({
+    providers: [
+      { provider_id: "p_official", name: "Official Channel", type: "tournament", active: true },
+      { provider_id: "p_other", name: "External Game Provider A", type: "external_website", active: true },
+    ],
+  }));
+  // First entry: populates the cache and select.
+  await s.loadGcProviderSelect(false);
+  const select = s.$("#gc-c-provider");
+  select.value = "p_official";
+  assert.equal(select.value, "p_official");
+
+  // Simulate switchView -> refreshCurrent(false) firing loadGcProviderSelect
+  // again on tab re-entry, with the cache already warm this time.
+  await s.loadGcProviderSelect(false);
+  assert.equal(select.value, "p_official", "selection must survive re-entering the tab once the cache is warm");
 });
 
 test("provider select: network failure does not throw and leaves a retry-worthy state", async () => {
@@ -435,6 +455,61 @@ test("HTML: campaign reference field in Reward Pools is a <select>, not a free-t
   const rewardsSection = slice(HTML, '<section id="view-gcRewards"', "</section>");
   assert.match(rewardsSection, /<select[^>]*id="gc-pool-campaign"/);
   assert.doesNotMatch(rewardsSection, /<input[^>]*id="gc-pool-campaign"/);
+});
+
+// The /api/admin/gc-campaigns list is capped at 200 rows, so an older or
+// lower-priority campaign can silently be missing from the dropdown —
+// preserve the ability to link one anyway via a manual-entry fallback.
+test("HTML: Reward Pools keeps a manual campaign-id fallback for campaigns beyond the dropdown's cap", () => {
+  const rewardsSection = slice(HTML, '<section id="view-gcRewards"', "</section>");
+  assert.match(rewardsSection, /<input[^>]*id="gc-pool-campaign-manual"/);
+});
+
+test("pool create submit: a manually-entered campaign id overrides the dropdown selection", () => {
+  const SUBMIT_SRC = slice(JS, "  function bindGcRewards() {", "\n    var filterBtn = ") + "\n  }";
+  const elements = {
+    "gc-pool-id": { value: "gold" },
+    "gc-pool-name": { value: "Gold" },
+    "gc-pool-type": { value: "tournament_reward" },
+    "gc-pool-scope": { value: "campaign_rewards" },
+    "gc-pool-campaign": { value: "listed-campaign" },
+    "gc-pool-campaign-manual": { value: "older-campaign-not-in-dropdown" },
+  };
+  const btn = { _listeners: {}, addEventListener(evt, fn) { this._listeners[evt] = fn; } };
+  elements["gc-create-pool-btn"] = btn;
+  const calls = [];
+  const s = runInSandbox(SUBMIT_SRC + "\nthis.bindGcRewards = bindGcRewards;", {
+    $: makeDomStub(elements),
+    apiPostJson: (url, body) => { calls.push({ url, body }); return { then: () => {} }; },
+    document: { addEventListener: () => {} },
+  });
+  s.bindGcRewards();
+  btn._listeners.click();
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].body.campaign_id, "older-campaign-not-in-dropdown");
+});
+
+test("pool create submit: falls back to the dropdown value when no manual id is entered", () => {
+  const SUBMIT_SRC = slice(JS, "  function bindGcRewards() {", "\n    var filterBtn = ") + "\n  }";
+  const elements = {
+    "gc-pool-id": { value: "gold" },
+    "gc-pool-name": { value: "Gold" },
+    "gc-pool-type": { value: "tournament_reward" },
+    "gc-pool-scope": { value: "campaign_rewards" },
+    "gc-pool-campaign": { value: "listed-campaign" },
+    "gc-pool-campaign-manual": { value: "" },
+  };
+  const btn = { _listeners: {}, addEventListener(evt, fn) { this._listeners[evt] = fn; } };
+  elements["gc-create-pool-btn"] = btn;
+  const calls = [];
+  const s = runInSandbox(SUBMIT_SRC + "\nthis.bindGcRewards = bindGcRewards;", {
+    $: makeDomStub(elements),
+    apiPostJson: (url, body) => { calls.push({ url, body }); return { then: () => {} }; },
+    document: { addEventListener: () => {} },
+  });
+  s.bindGcRewards();
+  btn._listeners.click();
+  assert.equal(calls[0].body.campaign_id, "listed-campaign");
 });
 
 test("HTML: Campaign name field has no placeholder implying a raw identifier", () => {
