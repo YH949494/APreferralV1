@@ -4708,43 +4708,150 @@
     return parts[0] + " " + parts[1] + ":00";
   }
 
+  function dropScheduleHtml(startsAt, endsAt) {
+    if (!startsAt && !endsAt) return "—";
+    return ccUtcToKlDisplay(startsAt) + " → " + (endsAt ? ccUtcToKlDisplay(endsAt) : "open");
+  }
+
+  function dropRowHtml(d) {
+    var codesInfo = d.type === "personalised"
+      ? ("Assigned " + fmt(d.assigned) + " / Claimed " + fmt(d.claimed))
+      : ("Free " + fmt(d.codesFree) + " / Total " + fmt(d.codesTotal));
+    return "<tr>" +
+      "<td>" + esc(d.name) + '<div class="sub">Priority ' + fmt(d.priority) + "</div></td>" +
+      "<td>" + esc(d.type) + "</td>" +
+      '<td><span class="pill ' + esc(d.status) + '">' + esc(d.status) + "</span></td>" +
+      "<td>" + dropScheduleHtml(d.startsAt, d.endsAt) + "</td>" +
+      "<td>—</td>" +
+      "<td>—</td>" +
+      "<td>" + codesInfo + "</td>" +
+      "<td>" +
+      '<button class="btn" data-drop-op="start_now" data-drop-id="' + esc(d.dropId) + '">Start</button> ' +
+      '<button class="btn" data-drop-op="pause" data-drop-id="' + esc(d.dropId) + '">Pause</button> ' +
+      '<button class="btn danger" data-drop-op="end_now" data-drop-id="' + esc(d.dropId) + '">End</button>' +
+      "</td></tr>";
+  }
+
+  // Mission Pool campaigns don't live in db.drops — they're gc_campaigns
+  // documents with mechanic="mission_pool", surfaced by the same admin
+  // endpoint Campaign Centre's Mission Reward Pool list uses
+  // (GET /api/admin/mission-pool/campaigns). Existing Drops is an
+  // operational overview of everything the Mini App currently shows, so it
+  // merges that list in here on the frontend rather than teaching
+  // drops_v2 about a collection it was never meant to query — no second
+  // data source is created, and no new mutation endpoint is added below:
+  // every mission action posts to the exact same
+  // /api/admin/gc-campaigns/<id>/publish|pause and
+  // /api/admin/mission-pool/<id>/close|cancel routes the dedicated Mission
+  // admin page (static/mission-admin.js) and the Player Campaigns table
+  // already use.
+  var MP_DELETABLE_STATUSES = { draft: 1, archived: 1, ended: 1 };
+
+  function mpBucketStatus(state) {
+    if (state === "live") return "live";
+    if (state === "paused") return "paused";
+    if (state === "draft" || state === "scheduled") return "upcoming";
+    // cancelled / closed / processing / completed — all "no longer running,
+    // not able to be paused/resumed" from an Existing Drops overview's
+    // point of view. The exact sub-state (e.g. "still processing rewards")
+    // is a Campaign Centre concern, surfaced via the Open/View Results link.
+    return "ended";
+  }
+
+  function mpStatusPill(bucket) {
+    var pillStatus = { upcoming: "scheduled", live: "live", paused: "paused", ended: "ended" }[bucket];
+    return gcPill(pillStatus);
+  }
+
+  function mpActionsHtml(c) {
+    var bucket = mpBucketStatus(c.state);
+    var id = esc(c.campaign_id);
+    var deletable = !!MP_DELETABLE_STATUSES[c.campaign_status];
+    var html = "";
+    if (bucket === "upcoming") {
+      html += '<button class="btn" data-mission-action="publish" data-id="' + id + '">Start</button> ';
+      html += '<button class="btn" data-mission-action="edit" data-id="' + id + '">Edit</button> ';
+      html += '<button class="btn danger" data-mission-action="cancel" data-id="' + id + '">End</button>';
+      if (deletable) html += ' <button class="btn danger" data-mission-action="delete" data-id="' + id + '" data-name="' + esc(c.name || "") + '">Delete</button>';
+    } else if (bucket === "live") {
+      html += '<button class="btn" data-mission-action="pause" data-id="' + id + '">Pause</button> ';
+      html += '<button class="btn danger" data-mission-action="close" data-id="' + id + '">End</button> ';
+      html += '<button class="btn" data-mission-action="open" data-id="' + id + '">Open/View</button>';
+    } else if (bucket === "paused") {
+      html += '<button class="btn" data-mission-action="publish" data-id="' + id + '">Resume</button> ';
+      html += '<button class="btn danger" data-mission-action="cancel" data-id="' + id + '">End</button> ';
+      html += '<button class="btn" data-mission-action="open" data-id="' + id + '">Open/View</button>';
+    } else {
+      html += '<button class="btn" data-mission-action="open" data-id="' + id + '">View Results</button>';
+      if (deletable) html += ' <button class="btn danger" data-mission-action="delete" data-id="' + id + '" data-name="' + esc(c.name || "") + '">Delete</button>';
+    }
+    return html;
+  }
+
+  function mpRowHtml(c) {
+    var bucket = mpBucketStatus(c.state);
+    return "<tr>" +
+      "<td>" + esc(c.name || "") + "</td>" +
+      "<td>Mission</td>" +
+      "<td>" + mpStatusPill(bucket) + "</td>" +
+      "<td>" + dropScheduleHtml(c.starts_at, c.ends_at) + "</td>" +
+      "<td>" + fmt(c.submissions) + "</td>" +
+      "<td>" + fmt(c.winners) + "</td>" +
+      "<td>" + fmt(c.pool_available) + "</td>" +
+      "<td>" + mpActionsHtml(c) + "</td></tr>";
+  }
+
   function loadDrops(force) {
     statePanel("drops-list-body", "loading", "Loading drops…");
-    fetch("/v2/miniapp/admin/drops_v2", { credentials: "same-origin", headers: { "Accept": "application/json" } })
+
+    var dropsPromise = fetch("/v2/miniapp/admin/drops_v2", { credentials: "same-origin", headers: { "Accept": "application/json" } })
       .then(function (r) { return r.json(); })
-      .then(function (data) {
-        var items = data.items || [];
-        var dropSelect = $("#dra-drop-id");
-        if (dropSelect) {
-          var pooled = items.filter(function (d) { return d.type === "pooled"; });
-          dropSelect.innerHTML = '<option value="">— select a pooled drop —</option>' +
-            pooled.map(function (d) { return '<option value="' + esc(d.dropId) + '">' + esc(d.name) + " (" + esc(d.status) + ")</option>"; }).join("");
-        }
-        if (!items.length) {
-          statePanel("drops-list-body", "empty", "No drops found.");
-          return;
-        }
-        var rows = items.map(function (d) {
-          var codesInfo = d.type === "personalised"
-            ? ("Assigned " + fmt(d.assigned) + " / Claimed " + fmt(d.claimed))
-            : ("Free " + fmt(d.codesFree) + " / Total " + fmt(d.codesTotal));
-          return "<tr>" +
-            "<td>" + esc(d.name) + "</td>" +
-            "<td>" + esc(d.type) + "</td>" +
-            '<td><span class="pill ' + esc(d.status) + '">' + esc(d.status) + "</span></td>" +
-            "<td>" + fmt(d.priority) + "</td>" +
-            "<td>" + codesInfo + "</td>" +
-            "<td>" +
-            '<button class="btn" data-drop-op="start_now" data-drop-id="' + esc(d.dropId) + '">Start</button> ' +
-            '<button class="btn" data-drop-op="pause" data-drop-id="' + esc(d.dropId) + '">Pause</button> ' +
-            '<button class="btn danger" data-drop-op="end_now" data-drop-id="' + esc(d.dropId) + '">End</button>' +
-            "</td></tr>";
-        }).join("");
+      .then(function (data) { return { ok: true, items: data.items || [] }; })
+      .catch(function (e) { return { ok: false, error: e, items: [] }; });
+
+    var missionsPromise = api("/api/admin/mission-pool/campaigns")
+      .then(function (data) { return { ok: true, items: data.campaigns || [] }; })
+      .catch(function (e) { return { ok: false, error: e, items: [] }; });
+
+    Promise.all([dropsPromise, missionsPromise]).then(function (results) {
+      var dropsRes = results[0], missionsRes = results[1];
+
+      var dropSelect = $("#dra-drop-id");
+      if (dropSelect) {
+        var pooled = dropsRes.items.filter(function (d) { return d.type === "pooled"; });
+        dropSelect.innerHTML = '<option value="">— select a pooled drop —</option>' +
+          pooled.map(function (d) { return '<option value="' + esc(d.dropId) + '">' + esc(d.name) + " (" + esc(d.status) + ")</option>"; }).join("");
+      }
+
+      if (!dropsRes.ok && !missionsRes.ok) {
+        statePanel("drops-list-body", "error", "Failed to load drops: " + dropsRes.error.message);
+        return;
+      }
+
+      // Defensive de-dupe by campaign_id only — a drop's dropId and a
+      // mission's campaign_id are different id spaces (db.drops vs
+      // gc_campaigns), so the only realistic duplicate is the mission-pool
+      // endpoint itself returning the same campaign twice.
+      var seenMissionIds = {};
+      var missionItems = missionsRes.items.filter(function (c) {
+        if (!c.campaign_id || seenMissionIds[c.campaign_id]) return false;
+        seenMissionIds[c.campaign_id] = true;
+        return true;
+      });
+
+      var rows = dropsRes.items.map(dropRowHtml).concat(missionItems.map(mpRowHtml));
+
+      if (!rows.length) {
+        statePanel("drops-list-body", "empty", "No drops found.");
+      } else {
         $("#drops-list-body").innerHTML =
-          '<table class="data-table"><thead><tr><th>Name</th><th>Type</th><th>Status</th><th>Priority</th><th>Codes</th><th>Actions</th></tr></thead><tbody>' +
-          rows + "</tbody></table>";
-      })
-      .catch(function (e) { statePanel("drops-list-body", "error", "Failed to load drops: " + e.message); });
+          '<table class="data-table"><thead><tr><th>Name</th><th>Type</th><th>Status</th><th>Schedule (KL)</th><th>Submissions</th><th>Winners</th><th>Available</th><th>Actions</th></tr></thead><tbody>' +
+          rows.join("") + "</tbody></table>";
+      }
+
+      if (!dropsRes.ok) toast("⚠️ Failed to load voucher drops: " + dropsRes.error.message, "error");
+      if (!missionsRes.ok) toast("⚠️ Failed to load mission campaigns: " + missionsRes.error.message, "error");
+    });
   }
 
   function bindDrops() {
@@ -4861,6 +4968,77 @@
         .catch(function (e) { banner("❌ Drop action failed: " + e.message, "error"); })
         .finally(function () { btn.disabled = false; });
     });
+
+    // Mission Pool rows in this same table (see mpRowHtml/mpActionsHtml
+    // above) post to the shared Campaign Centre / Mission Pool endpoints —
+    // same URLs postAction() in static/mission-admin.js and the Player
+    // Campaigns table's data-gc-action handler already use — never a
+    // standard-drop endpoint, and never a second mutation path.
+    document.addEventListener("click", function (event) {
+      var btn = event.target && event.target.closest && event.target.closest("[data-mission-action]");
+      if (!btn) return;
+      var action = btn.dataset.missionAction;
+      var id = btn.dataset.id;
+      if (action === "open") { openMissionAdmin(id); return; }
+      if (action === "edit") { openMissionEdit(id); return; }
+      if (action === "delete") {
+        // The Player Campaigns table (loadGcCampaigns) may already have this
+        // campaign cached in gcOptionsCache — invalidate it too, or a delete
+        // triggered from here would leave the deleted campaign visible there
+        // (and in every campaign-picker select fed by fetchGcCampaignsList)
+        // until something else happens to force-refresh it.
+        openGcDeleteModal(id, btn.dataset.name, function () { gcInvalidateCampaignsCache(); loadDrops(true); });
+        return;
+      }
+
+      var confirmMsg = mpConfirmCopy(action);
+      if (confirmMsg && !confirm(confirmMsg)) return;
+
+      var path = (action === "publish" || action === "pause")
+        ? "/api/admin/gc-campaigns/" + encodeURIComponent(id) + "/" + action
+        : "/api/admin/mission-pool/" + encodeURIComponent(id) + "/" + action;
+
+      btn.disabled = true;
+      // Publish (Start/Resume) mirrors mission-admin.js's own runAction():
+      // the gc-campaigns publish endpoint only checks that a mission config
+      // and a pool id exist, not that the pool can still cover the winner
+      // target, so the dedicated Mission page re-reads live inventory via
+      // edit-state and refuses to publish when it's insufficient. Skipping
+      // that check here would let an operator publish a mission whose
+      // shared pool has since been drained, leaving winners with no reward.
+      var preflight = action === "publish" ? mpInventoryPreflight(id) : Promise.resolve(true);
+      preflight.then(function (clear) {
+        if (!clear) return null;
+        return apiPost(path).then(function (r) {
+          if (!r || r.status !== "ok") { toast("❌ " + ((r && r.code) || "action_failed"), "error"); return; }
+          toast("✅ Mission updated", "success");
+        });
+      }).catch(function (e) { toast("❌ " + e.message, "error"); })
+        .finally(function () { btn.disabled = false; loadDrops(true); });
+    });
+  }
+
+  // Same live-inventory check runAction() in static/mission-admin.js runs
+  // before "publish" — re-read here rather than trusted from the rendered
+  // row, since pool stock is shared and can move under an operator between
+  // page load and this click.
+  function mpInventoryPreflight(campaignId) {
+    return api("/api/admin/mission-pool/" + encodeURIComponent(campaignId) + "/edit-state")
+      .catch(function () { return null; })
+      .then(function (state) {
+        if (!state || state.status !== "ok") {
+          toast("❌ Could not confirm reward inventory before publishing (" + ((state && state.code) || "unknown") + ")", "error");
+          return false;
+        }
+        var reward = state.reward || {};
+        if (!reward.sufficient) {
+          toast("❌ Publishing blocked: winner target " + fmt(reward.winner_count) +
+            " exceeds the " + fmt(reward.available) + " available codes in " +
+            (reward.pool_id || "the configured pool") + ".", "error");
+          return false;
+        }
+        return true;
+      });
   }
 
   // ---------- Affiliate Voucher Pools (migrated from legacy MiniApp admin panel) ----------
@@ -4915,7 +5093,7 @@
   // (e.g. the campaign went live/paused in another tab a moment ago), and
   // the requirement is to keep the modal open with the backend error
   // visible rather than closing on submit like the generic confirm modals.
-  function openGcDeleteModal(campaignId, campaignName) {
+  function openGcDeleteModal(campaignId, campaignName, onDeleted) {
     // Built with createElement/appendChild (not the innerHTML+querySelector
     // pattern confirmTyped/confirmSimple use) so every interactive node is
     // reached by direct reference — no CSS-id lookups needed to wire it up.
@@ -5001,7 +5179,7 @@
         }
         close();
         toast("✅ Campaign deleted", "success");
-        loadGcCampaigns(true);
+        if (onDeleted) onDeleted(); else loadGcCampaigns(true);
       }).catch(function (e) {
         btnStop(confirmBtn);
         input.disabled = false;
@@ -5021,6 +5199,17 @@
     campaigns: null, campaignsPromise: null,
   };
   var gcKnownCampaignIds = {};
+
+  // Existing Drops (loadDrops) deletes a mission campaign through the same
+  // shared modal Player Campaigns uses, but refreshes loadDrops(true)
+  // afterward instead of loadGcCampaigns(true) — so this cache (and every
+  // campaign-picker select fed by fetchGcCampaignsList) needs its own
+  // explicit invalidation, or the deleted campaign stays visible there
+  // until something else happens to force a refresh.
+  function gcInvalidateCampaignsCache() {
+    gcOptionsCache.campaigns = null;
+    gcOptionsCache.campaignsPromise = null;
+  }
 
   function fetchGcProviders(force) {
     if (force) { gcOptionsCache.providers = null; gcOptionsCache.providersPromise = null; }
@@ -5193,6 +5382,26 @@
     switchView("missionPool");
     var mod = window.MissionAdmin;
     if (mod) mod.open(campaignId);
+  }
+
+  // Existing Drops "Edit" action for an upcoming Mission row: navigate to
+  // the dedicated Mission surface and drop straight into its Edit mode
+  // (mission-admin.js's own dispatch("edit", id)) rather than duplicating
+  // any of its form/validation logic here.
+  function openMissionEdit(campaignId) {
+    switchView("missionPool");
+    var mod = window.MissionAdmin;
+    if (mod) mod.dispatch("edit", campaignId);
+  }
+
+  // Reuses mission-admin.js's own confirm copy (CONFIRM_COPY, exported via
+  // mod.core) so the confirmation text an operator sees is identical
+  // whether they act from Existing Drops or from the dedicated Mission
+  // surface — one copy of the truth, not a second one drifting here.
+  function mpConfirmCopy(action) {
+    var mod = window.MissionAdmin;
+    var copy = mod && mod.core && mod.core.CONFIRM_COPY;
+    return (copy && copy[action]) || "";
   }
 
   // Attempts creation with an auto-generated slug, retrying with the next
