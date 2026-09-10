@@ -81,8 +81,14 @@ def pick_canonical(docs: list[dict]) -> dict:
 
 
 def find_duplicate_groups(history_collection) -> list[dict]:
+    """Group by the raw week_start value, including null/missing.
+
+    A single-field unique index treats a missing field the same as an
+    explicit null, so two documents that both lack week_start collide on
+    that index exactly like two documents sharing a string value — they
+    must be reported and deduped too, not silently skipped.
+    """
     pipeline = [
-        {"$match": {"week_start": {"$type": "string", "$ne": ""}}},
         {"$group": {"_id": "$week_start", "count": {"$sum": 1}, "ids": {"$push": "$_id"}}},
         {"$match": {"count": {"$gt": 1}}},
     ]

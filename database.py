@@ -514,8 +514,9 @@ def save_weekly_snapshot():
     # Atomic upsert keyed by week_start (not insert_one): a retry, a misfire
     # replay, or two racing processes must never create a second document for
     # the same week_start now that uniq_weekly_history_week_start is unique.
+    archive_created = False
     try:
-        db["weekly_leaderboard_history"].update_one(
+        result = db["weekly_leaderboard_history"].update_one(
             {"week_start": week_start},
             {
                 "$setOnInsert": {
@@ -534,9 +535,17 @@ def save_weekly_snapshot():
             },
             upsert=True,
         )
+        archive_created = getattr(result, "upserted_id", None) is not None
     except DuplicateKeyError:
         # Another instance won the race on the unique week_start index.
-        pass
+        archive_created = False
+
+    if not archive_created:
+        # A retry/replay that finds the week already archived must not reset
+        # counters a second time — that would erase XP/referrals earned
+        # since the first (successful) reset.
+        logger.info("[SNAPSHOT][DEPRECATED] week=%s already archived, skipping counter reset", week_start)
+        return
 
     # ✅ Reset weekly counters for the new week
     users_collection.update_many({}, {

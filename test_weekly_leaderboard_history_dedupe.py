@@ -41,6 +41,20 @@ else:  # pragma: no cover
     import main  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _ensure_db_initialized():
+    """Other test modules in the full suite (e.g. test_import_side_effects.py)
+    reset database._db to None in setUp and never restore it, which breaks
+    main.history_collection/database.db — both lazy proxies that re-resolve
+    get_db() on every access — for any test module collected afterward.
+    Reinitialize with a fresh mongomock backend before each test here so this
+    file's results don't depend on what ran before it."""
+    if database._db is None:
+        with mock.patch.object(database, "MongoClient", lambda url: mongomock.MongoClient()):
+            database.init_db(os.environ["MONGO_URL"])
+    yield
+
+
 def _client_and_collections():
     client = mongomock.MongoClient()
     db = client["referral_bot"]
@@ -186,6 +200,31 @@ def test_dedupe_handles_multiple_distinct_duplicate_weeks():
     assert {d["week_start"] for d in history.find({})} == {"2025-08-25", "2025-09-01", "2025-09-08"}
 
 
+def test_dedupe_also_covers_null_and_missing_week_start():
+    """A unique index treats a missing field as null, so two documents that
+    both lack week_start collide on it exactly like two matching strings —
+    they must be found and deduped too, not silently skipped by a
+    string-only filter."""
+    history, backup = _client_and_collections()
+    now = datetime.now(timezone.utc)
+    history.insert_many([
+        {"_id": "no-field-1", "week_end": "w", "checkin_leaderboard": [], "referral_leaderboard": [{"x": 1}], "archived_at": now - timedelta(days=1), "source": "legacy"},
+        {"_id": "explicit-null", "week_start": None, "week_end": "w", "checkin_leaderboard": [{"x": 1}, {"x": 2}], "referral_leaderboard": [], "archived_at": now, "source": "legacy"},
+        _doc("2025-08-25", source="live_counters", archived_at=now, _id="solo"),
+    ])
+
+    result = dedupe(history_collection=history, backup_collection=backup, dry_run=False)
+
+    assert result["duplicate_groups"] == 1
+    assert result["deleted"] == 1
+    # The most complete of the two null/missing week_start docs survives.
+    assert history.count_documents({"_id": "explicit-null"}) == 1
+    assert history.count_documents({"_id": "no-field-1"}) == 0
+    assert backup.count_documents({"_id": "no-field-1"}) == 1
+    # Unrelated real week_start untouched.
+    assert history.count_documents({"_id": "solo"}) == 1
+
+
 # ---------------------------------------------------------------------------
 # Unique index: succeeds after cleanup, rejects future duplicates
 # ---------------------------------------------------------------------------
@@ -268,3 +307,33 @@ def test_legacy_save_weekly_snapshot_upsert_never_duplicates_on_double_call():
     finally:
         database.db["weekly_leaderboard_history"].delete_many({"week_start": week_start})
         database.users_collection.delete_many({"user_id": 999001})
+
+
+def test_legacy_save_weekly_snapshot_does_not_reset_counters_on_retry():
+    """A retry that finds the week already archived (matched, not upserted)
+    must not reset weekly_xp/weekly_referrals a second time — that would
+    erase progress earned between the first successful run and the retry."""
+    now = datetime.now(timezone.utc)
+    week_start = (now - timedelta(days=7)).strftime("%Y-%m-%d")
+
+    database.db["weekly_leaderboard_history"].delete_many({"week_start": week_start})
+    database.users_collection.delete_many({"user_id": 999002})
+    database.users_collection.insert_one(
+        {"user_id": 999002, "username": "dedupe_test2", "weekly_xp": 10, "weekly_referrals": 2}
+    )
+    try:
+        with mock.patch.dict(os.environ, {"ENABLE_LEGACY_WEEKLY_SNAPSHOT": "1"}):
+            database.save_weekly_snapshot()
+
+            # New activity accrues after the archive was created...
+            database.users_collection.update_one(
+                {"user_id": 999002}, {"$set": {"weekly_xp": 99, "weekly_referrals": 7}}
+            )
+            database.save_weekly_snapshot()  # ...a retry must not zero it out again.
+
+        user = database.users_collection.find_one({"user_id": 999002})
+        assert user["weekly_xp"] == 99
+        assert user["weekly_referrals"] == 7
+    finally:
+        database.db["weekly_leaderboard_history"].delete_many({"week_start": week_start})
+        database.users_collection.delete_many({"user_id": 999002})
