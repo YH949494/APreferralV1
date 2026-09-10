@@ -55,9 +55,10 @@ import logging
 import os
 import re
 import unicodedata
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from flask import Blueprint, jsonify, request
+from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
 import database
@@ -509,6 +510,17 @@ def merge_mission_pool_config(existing: dict | None, validated: dict) -> dict:
 
 ENTRIES_COLLECTION = "mission_entries"
 IDENTITY_CLAIMS_COLLECTION = "mission_identity_claims"
+ATTEMPTS_COLLECTION = "mission_attempts"
+
+# Retry policy for correct-answer missions (keyword / single_choice /
+# multiple_choice with a configured `correct_answer`). A WRONG answer never
+# creates a `mission_entries` row — it only advances a small per-user counter
+# here — so the one-final-entry invariant on `mission_entries` is never at
+# risk from a retry. Neither bound is a security boundary (that is the
+# `ux_mission_entries_campaign_user` unique index); this is lightweight
+# anti-abuse throttling only.
+MAX_INCORRECT_ATTEMPTS = 3
+RETRY_COOLDOWN_SECONDS = 3
 
 ENTRY_STATUS_SUBMITTED = "submitted"
 ENTRY_STATUS_QUALIFIED = "qualified"
@@ -589,6 +601,12 @@ def ensure_mission_indexes() -> None:
         claims.create_index(
             [("campaign_id", 1), ("identity_key", 1)],
             name="ux_mission_identity_claims_campaign_key",
+            unique=True,
+        )
+        attempts = database.db[ATTEMPTS_COLLECTION]
+        attempts.create_index(
+            [("campaign_id", 1), ("telegram_user_id", 1)],
+            name="ux_mission_attempts_campaign_user",
             unique=True,
         )
     except Exception:
@@ -796,6 +814,103 @@ def get_mission_status(campaign_id: str):
     })
 
 
+def _requires_correct_answer(validated: dict) -> bool:
+    """True only when the mission has a configured ``correct_answer`` —
+    ``validate_submission`` returns ``is_correct=None`` for an opinion poll
+    (choice mission with no correct_answer configured) and for feedback,
+    which is exactly "correctness not applicable" (§13/§14)."""
+    return validated.get("is_correct") is not None
+
+
+def _peek_incorrect_attempts(campaign_id: str, uid: int) -> int:
+    """Read-only: how many incorrect attempts are already on record. Used to
+    block an exhausted user's *correct* answer too — exhaustion must apply to
+    every submission on the mission, not only to further wrong guesses."""
+    doc = database.db[ATTEMPTS_COLLECTION].find_one(
+        {"campaign_id": campaign_id, "telegram_user_id": uid},
+        projection={"incorrect_attempts": 1},
+    )
+    return int((doc or {}).get("incorrect_attempts") or 0)
+
+
+def _record_incorrect_attempt(campaign_id: str, uid: int, now: datetime) -> dict:
+    """Lightweight but race-safe throttling for wrong guesses (§5/§6). The
+    increment itself is atomic (a single conditional find_one_and_update that
+    only applies while still under the cap and past cooldown) so concurrent
+    wrong guesses cannot all read the same pre-increment count and each get
+    "allowed" past the configured limit. This is still not the uniqueness
+    authority — that remains ``ux_mission_entries_campaign_user`` on the final
+    entry — it only protects the attempt *count* itself from a race."""
+    attempts = database.db[ATTEMPTS_COLLECTION]
+    cutoff = now - timedelta(seconds=RETRY_COOLDOWN_SECONDS)
+
+    def _try_increment():
+        return attempts.find_one_and_update(
+            {
+                "campaign_id": campaign_id,
+                "telegram_user_id": uid,
+                "incorrect_attempts": {"$lt": MAX_INCORRECT_ATTEMPTS},
+                "$or": [{"last_attempt_at": None}, {"last_attempt_at": {"$lt": cutoff}}],
+            },
+            {"$inc": {"incorrect_attempts": 1}, "$set": {"last_attempt_at": now, "updated_at": now}},
+            return_document=ReturnDocument.AFTER,
+        )
+
+    updated = _try_increment()
+    if updated is None:
+        doc = attempts.find_one({"campaign_id": campaign_id, "telegram_user_id": uid})
+        if doc is None:
+            try:
+                attempts.insert_one({
+                    "campaign_id": campaign_id,
+                    "telegram_user_id": uid,
+                    "incorrect_attempts": 1,
+                    "last_attempt_at": now,
+                    "created_at": now,
+                    "updated_at": now,
+                })
+                return {
+                    "allowed": True, "cooldown": False, "exhausted": False,
+                    "attempts_used": 1,
+                    "attempts_remaining": max(0, MAX_INCORRECT_ATTEMPTS - 1),
+                }
+            except DuplicateKeyError:
+                # Lost the insert race -- someone else just created the row;
+                # fall through to the conditional-update retry below.
+                updated = _try_increment()
+
+        if updated is not None:
+            count = updated["incorrect_attempts"]
+            return {
+                "allowed": True, "cooldown": False, "exhausted": False,
+                "attempts_used": count,
+                "attempts_remaining": max(0, MAX_INCORRECT_ATTEMPTS - count),
+            }
+
+        doc = attempts.find_one({"campaign_id": campaign_id, "telegram_user_id": uid}) or {}
+        count = int(doc.get("incorrect_attempts") or 0)
+        if count >= MAX_INCORRECT_ATTEMPTS:
+            return {
+                "allowed": False, "cooldown": False, "exhausted": True,
+                "attempts_used": count, "attempts_remaining": 0,
+            }
+        last = _as_utc(doc.get("last_attempt_at"))
+        remaining = RETRY_COOLDOWN_SECONDS - (now - last).total_seconds() if last else RETRY_COOLDOWN_SECONDS
+        return {
+            "allowed": False, "cooldown": True, "exhausted": False,
+            "attempts_used": count,
+            "attempts_remaining": max(0, MAX_INCORRECT_ATTEMPTS - count),
+            "retry_after_seconds": max(1, round(remaining)),
+        }
+
+    count = updated["incorrect_attempts"]
+    return {
+        "allowed": True, "cooldown": False, "exhausted": False,
+        "attempts_used": count,
+        "attempts_remaining": max(0, MAX_INCORRECT_ATTEMPTS - count),
+    }
+
+
 @mission_pool_bp.post("/api/mission-pool/<campaign_id>/submit")
 def submit_mission(campaign_id: str):
     """THE HOT PATH (§9). Bounded work only:
@@ -875,6 +990,64 @@ def submit_mission(campaign_id: str):
         _emit("mission_submission_rejected", campaign_id=campaign_id, user_id=uid,
               status="fail", reason=reason, source="miniapp")
         return jsonify({"status": "error", "code": reason}), 409
+
+    # 9. Retry gate for correct-answer missions (keyword / single_choice /
+    # multiple_choice with a configured `correct_answer`). A wrong answer
+    # must NEVER create a `mission_entries` row -- it is not a final
+    # submission, just a graded attempt the user can try again. Opinion
+    # polls and feedback (is_correct is None) fall straight through to the
+    # existing insert below, unchanged.
+    if _requires_correct_answer(validated):
+        mission_type = (campaign.get("mission_config") or {}).get("mission_type")
+
+        # A user who already holds a final entry (from an earlier correct
+        # answer) is immutable: any further submit -- right or wrong -- is
+        # already_submitted, never a retry, and never touches the attempt
+        # counter (§10). The final-entry insert path below still has its own
+        # DuplicateKeyError handling for the correct-answer race; this check
+        # is what makes that true for a wrong answer too, which never
+        # reaches that insert.
+        existing = database.db[ENTRIES_COLLECTION].find_one(
+            {"campaign_id": campaign_id, "telegram_user_id": uid},
+            projection={"_id": 1},
+        )
+        if existing:
+            _emit("mission_submission_duplicate", campaign_id=campaign_id, user_id=uid, source="miniapp")
+            return jsonify({"status": "ok", "submitted": True, "state": "already_submitted"})
+
+        # Exhaustion blocks EVERY further submission on this mission, not
+        # only further wrong guesses -- an exhausted user who then sends the
+        # correct answer must still be refused a final entry, or the
+        # attempts_exhausted contract above would be meaningless.
+        if _peek_incorrect_attempts(campaign_id, uid) >= MAX_INCORRECT_ATTEMPTS:
+            _emit("mission_attempts_exhausted", campaign_id=campaign_id, user_id=uid,
+                  attempt_number=MAX_INCORRECT_ATTEMPTS, mission_type=mission_type, source="miniapp")
+            return jsonify({"status": "ok", "submitted": False, "state": "attempts_exhausted",
+                             "retry_allowed": False})
+
+        if validated["is_correct"] is False:
+            outcome = _record_incorrect_attempt(campaign_id, uid, now)
+
+            if not outcome["allowed"] and outcome["exhausted"]:
+                _emit("mission_attempts_exhausted", campaign_id=campaign_id, user_id=uid,
+                      attempt_number=outcome["attempts_used"], mission_type=mission_type, source="miniapp")
+                return jsonify({"status": "ok", "submitted": False, "state": "attempts_exhausted",
+                                 "retry_allowed": False})
+
+            if not outcome["allowed"] and outcome["cooldown"]:
+                return jsonify({"status": "ok", "submitted": False, "state": "retry_cooldown",
+                                 "retry_allowed": True, "retry_after_seconds": outcome["retry_after_seconds"]})
+
+            # Never returns the correct answer, a hint, or any comparison
+            # detail (§4) -- just the fact that this guess did not match.
+            _emit("mission_answer_incorrect", campaign_id=campaign_id, user_id=uid,
+                  attempt_number=outcome["attempts_used"], mission_type=mission_type, source="miniapp")
+            resp = {"status": "ok", "submitted": False, "state": "incorrect_retry", "retry_allowed": True}
+            if outcome.get("attempts_remaining") is not None:
+                resp["attempts_remaining"] = outcome["attempts_remaining"]
+            return jsonify(resp)
+
+        # is_correct is True here -- fall through to the final insert below.
 
     doc = {
         "campaign_id": campaign_id,
