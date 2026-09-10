@@ -252,6 +252,18 @@
       ".mp-state{font-size:14px;line-height:1.5;white-space:pre-line;}",
       ".mp-state-title{font-weight:700;font-size:16px;margin-bottom:6px;}",
       ".mp-link-btn{border:none;border-radius:10px;padding:10px 14px;font-size:13px;font-weight:700;cursor:pointer;margin-top:12px;background:rgba(255,255,255,.08);color:inherit;}",
+      "#mission-live-root{margin:0 0 16px;}",
+      ".mp-live-section-title{font-weight:700;font-size:14px;margin-bottom:8px;opacity:.85;}",
+      ".mp-live-card{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:12px;padding:12px 14px;margin-bottom:10px;}",
+      ".mp-live-top{display:flex;align-items:center;gap:8px;margin-bottom:6px;}",
+      ".mp-live-badge{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:700;letter-spacing:.04em;color:#ff8a3d;}",
+      ".mp-live-dot{width:6px;height:6px;border-radius:50%;background:#ff5252;box-shadow:0 0 0 2px rgba(255,82,82,.25);}",
+      ".mp-live-remaining{margin-left:auto;font-size:11px;opacity:.7;font-weight:600;}",
+      ".mp-live-title{font-weight:700;font-size:15px;margin-bottom:4px;}",
+      ".mp-live-desc{font-size:13px;opacity:.8;margin-bottom:8px;line-height:1.4;}",
+      ".mp-live-reward{font-size:12px;opacity:.75;margin-bottom:10px;}",
+      ".mp-live-btn{border:none;border-radius:8px;padding:9px 14px;font-size:13px;font-weight:700;cursor:pointer;width:100%;background:linear-gradient(90deg,#ff8a3d,#f5b63f);color:#1a1200;}",
+      ".mp-live-btn[disabled]{opacity:.55;cursor:default;background:rgba(255,255,255,.08);color:inherit;}",
     ].join("\n");
     document.head.appendChild(style);
   }
@@ -487,6 +499,155 @@
   }
 
   // ---------------------------------------------------------------------
+  // Live Missions — ambient discovery list (distinct from the deep-link-only
+  // single-mission card above). Renders into #mission-live-root from
+  // GET /api/mission-pool/active. Isolated by construction: apiGet() never
+  // throws (network failure resolves to {ok:false}), and every step below is
+  // wrapped so a Mission API failure can never break the rest of the Mini
+  // App (§ isolated loading/error/empty state).
+  // ---------------------------------------------------------------------
+
+  var LIVE_ROOT_ID = "mission-live-root";
+
+  function remainingText(iso) {
+    if (!iso) return "";
+    try {
+      var end = new Date(iso).getTime();
+      if (isNaN(end)) return "";
+      var diffMs = end - Date.now();
+      if (diffMs <= 0) return "";
+      var totalMinutes = Math.floor(diffMs / 60000);
+      var days = Math.floor(totalMinutes / 1440);
+      var hours = Math.floor((totalMinutes % 1440) / 60);
+      var minutes = totalMinutes % 60;
+      if (days > 0) return days + "d " + hours + "h left";
+      if (hours > 0) return hours + "h " + minutes + "m left";
+      return minutes + "m left";
+    } catch (e) { return ""; }
+  }
+
+  // CTA copy/enablement per user_state. "started but incomplete" has no
+  // distinct meaning for this mission model (a mission is one submission,
+  // not a multi-step flow), so "not started" and "already submitted" are
+  // the only two reachable states for a mission this endpoint lists at all
+  // — everything else (won/not_won/ended/cancelled) means the campaign is no
+  // longer `status=live` and therefore is not in this list in the first
+  // place (§ ended missions are removed, never a dead CTA).
+  function liveCtaFor(mission) {
+    if (mission.user_state === "submitted" || mission.already_submitted) {
+      return { text: "Submitted", disabled: true };
+    }
+    return { text: "Join Mission", disabled: false };
+  }
+
+  function renderLiveMissionCard(mission, listRoot) {
+    var card = el("div", { class: "mp-live-card" });
+    var top = el("div", { class: "mp-live-top" });
+    top.appendChild(el("span", { class: "mp-live-badge" }, [
+      el("span", { class: "mp-live-dot" }),
+      el("span", { text: "LIVE" }),
+    ]));
+    var remaining = remainingText(mission.ends_at);
+    if (remaining) top.appendChild(el("span", { class: "mp-live-remaining", text: "⏳ " + remaining }));
+    card.appendChild(top);
+
+    card.appendChild(el("div", { class: "mp-live-title", text: mission.campaign_name || "" }));
+    if (mission.prompt) card.appendChild(el("div", { class: "mp-live-desc", text: mission.prompt }));
+    if (mission.winner_count) {
+      card.appendChild(el("div", { class: "mp-live-reward", text: "🏆 " + mission.winner_count + " winners" }));
+    }
+
+    var cta = liveCtaFor(mission);
+    var btn = el("button", { class: "mp-live-btn", type: "button", text: cta.text });
+    if (cta.disabled) btn.setAttribute("disabled", "disabled");
+    btn.addEventListener("click", function () {
+      track("mission_live_card_cta_clicked", { campaign_id: mission.campaign_id, user_state: mission.user_state });
+      openMissionFromCard(mission.campaign_id);
+    });
+    card.appendChild(btn);
+
+    listRoot.appendChild(card);
+  }
+
+  /**
+   * "Join Mission"/"Continue" opens the SAME mission flow the deep link
+   * opens — one fetch of the authenticated /view (never a client-trusted
+   * status) rendered into the existing #mission-pool-root, reusing the
+   * exact submission code path above rather than a second one. This is also
+   * what safely handles a mission ending between the list load and the tap:
+   * /view recomputes state server-side, so an expired mission renders its
+   * normal "ended" state card instead of a dead form.
+   */
+  function openMissionFromCard(campaignId) {
+    var formRoot = document.getElementById(ROOT_ID);
+    if (!formRoot) return;
+    apiGet("/api/mission-pool/" + encodeURIComponent(campaignId) + "/view").then(function (res) {
+      var view = res.data || {};
+      if (!res.ok || view.status !== "ok" || view.mechanic !== "mission_pool") return;
+      render(formRoot, view);
+      try { formRoot.scrollIntoView({ behavior: "smooth", block: "start" }); } catch (e) {}
+    });
+  }
+
+  function renderLiveMissions(missions) {
+    var listRoot = document.getElementById(LIVE_ROOT_ID);
+    if (!listRoot) return;
+    listRoot.innerHTML = "";
+    if (!missions || !missions.length) {
+      // Empty state stays hidden — no large empty section (§ empty state).
+      listRoot.style.display = "none";
+      return;
+    }
+    injectStyles();
+    listRoot.appendChild(el("div", { class: "mp-live-section-title", text: "Live Missions" }));
+    missions.forEach(function (m) { renderLiveMissionCard(m, listRoot); });
+    listRoot.style.display = "block";
+  }
+
+  function refreshLiveMissions() {
+    var listRoot = document.getElementById(LIVE_ROOT_ID);
+    if (!listRoot) return;
+    apiGet("/api/mission-pool/active").then(function (res) {
+      // Any failure (network, timeout, non-2xx, malformed body) is an
+      // isolated no-op: the section simply stays hidden/unchanged rather
+      // than surfacing an error that could disrupt the rest of the Mini App.
+      if (!res || !res.ok) return;
+      var data = res.data || {};
+      if (data.status !== "ok" || !Array.isArray(data.missions)) return;
+      renderLiveMissions(data.missions);
+    }).catch(function () {});
+  }
+
+  function mountLiveMissions() {
+    // Same race as the deep-link flow above (see waitForInitData): on
+    // Telegram Web/Desktop the signed initData can arrive after
+    // DOMContentLoaded, so firing this authenticated request immediately
+    // can 401 before Telegram has delivered it, leaving Live Missions
+    // hidden for the whole session with no retry. Waiting briefly (and
+    // still firing the request either way once the budget is spent) mirrors
+    // exactly how the single-mission /view call is gated.
+    try {
+      waitForInitData(function () {
+        try { refreshLiveMissions(); } catch (e) {}
+      });
+    } catch (e) {}
+    // Refresh after any join/submission/completion/claim signal — both this
+    // widget's own events (mission_submit_success/duplicate) and the
+    // Campaign Rewards widget's (mission_reward_highlighted,
+    // mission_winner_popup_acknowledged) — so a mission that was just
+    // completed or claimed drops out of Live Missions without a full reload.
+    try {
+      document.addEventListener("mission-pool-event", function (ev) {
+        var name = ev && ev.detail && ev.detail.event;
+        if (name === "mission_submit_success" || name === "mission_submit_duplicate" ||
+            name === "mission_reward_highlighted" || name === "mission_winner_popup_acknowledged") {
+          refreshLiveMissions();
+        }
+      });
+    } catch (e) {}
+  }
+
+  // ---------------------------------------------------------------------
   // Mount
   // ---------------------------------------------------------------------
 
@@ -543,11 +704,24 @@
     userStateCopy: STATE_COPY,
     render: render,
     mount: mount,
+    renderLiveMissions: renderLiveMissions,
+    refreshLiveMissions: refreshLiveMissions,
+    mountLiveMissions: mountLiveMissions,
+    liveCtaFor: liveCtaFor,
+    remainingText: remainingText,
   };
 
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", mount);
-  } else {
+  function mountAll() {
+    // Live Missions is ambient — unlike mount() above it never waits on a
+    // deep link, so it runs on every Mini App open, in parallel with (not
+    // instead of) the deep-link-only single-mission card.
+    mountLiveMissions();
     mount();
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", mountAll);
+  } else {
+    mountAll();
   }
 }());

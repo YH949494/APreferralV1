@@ -10,6 +10,7 @@ import itertools
 import re
 import threading
 from copy import deepcopy
+from datetime import datetime, timezone
 
 from bson import ObjectId
 from pymongo.errors import DuplicateKeyError as _PymongoDuplicateKeyError
@@ -18,6 +19,21 @@ from pymongo.errors import DuplicateKeyError as _PymongoDuplicateKeyError
 class DuplicateKeyError(_PymongoDuplicateKeyError):
     """Subclasses pymongo's DuplicateKeyError so production code that catches
     pymongo.errors.DuplicateKeyError also catches this fake's version."""
+
+
+def _as_comparable(value):
+    """Real MongoDB stores dates as timezone-less BSON UTC millis, so a
+    query comparing a naive-but-UTC stored value against an aware query
+    bound (or vice versa) always compares correctly there — this is exactly
+    what every ``schedule.starts_at``/``ends_at`` query in this codebase
+    relies on (see mission_pool_processor.find_due_campaigns). Python's
+    raw ``<``/``<=`` operators raise on a naive/aware mismatch instead, so
+    datetimes are normalized to aware UTC here before comparing, matching
+    real MongoDB's semantics rather than crashing a query real Mongo would
+    answer correctly."""
+    if isinstance(value, datetime) and value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
 
 
 def _get_dotted(doc: dict, dotted_key: str):
@@ -48,13 +64,13 @@ def _matches(doc: dict, query: dict) -> bool:
                     return False
                 if op == "$ne" and val == target:
                     return False
-                if op == "$gt" and not (val is not None and val > target):
+                if op == "$gt" and not (val is not None and _as_comparable(val) > _as_comparable(target)):
                     return False
-                if op == "$gte" and not (val is not None and val >= target):
+                if op == "$gte" and not (val is not None and _as_comparable(val) >= _as_comparable(target)):
                     return False
-                if op == "$lt" and not (val is not None and val < target):
+                if op == "$lt" and not (val is not None and _as_comparable(val) < _as_comparable(target)):
                     return False
-                if op == "$lte" and not (val is not None and val <= target):
+                if op == "$lte" and not (val is not None and _as_comparable(val) <= _as_comparable(target)):
                     return False
                 if op == "$exists" and (val is not None) != bool(target):
                     return False

@@ -206,7 +206,17 @@ def user_state(campaign: dict | None, entry: dict | None,
 
 
 def _iso(value) -> str | None:
-    return value.isoformat() if isinstance(value, datetime) else None
+    """Datetime -> ISO string, always carrying an explicit UTC offset.
+
+    PyMongo returns naive datetimes on read even for values written as
+    UTC-aware (mission_pool._as_utc's own docstring). Serializing a naive
+    value's ``.isoformat()`` directly omits the offset, which every JS
+    ``Date`` constructor then parses as *local* time — shifting any
+    remaining-time countdown built from it by the viewer's UTC offset. Every
+    caller here reuses ``mission_pool._as_utc`` rather than re-deriving the
+    normalisation."""
+    dt = mp._as_utc(value) if isinstance(value, datetime) else None
+    return dt.isoformat() if dt else None
 
 
 @mission_pool_ux_bp.get("/api/mission-pool/<campaign_id>/view")
@@ -278,6 +288,102 @@ def mission_view(campaign_id: str):
         },
         "winner_count": block.get("winner_count"),
     })
+
+
+@mission_pool_ux_bp.get("/api/mission-pool/active")
+def list_active_missions():
+    """Live Missions discovery — the Mini App's ambient "what can I join right
+    now" surface, as distinct from ``/view`` above (which only ever answers
+    for a campaign already named by a deep link).
+
+    Scoping mirrors ``campaign_centre.list_active_campaigns`` exactly, just
+    for the opposite mechanic: that endpoint explicitly excludes
+    ``mechanic == mission_pool`` so Mission campaigns need "their own
+    discovery endpoint" (its own docstring says so) — this is it. A mission
+    is listed only while ``mission_pool.submission_state`` says submissions
+    are open, which is the same status/schedule/cancelled check ``/submit``
+    itself enforces (§31) — draft, scheduled, paused, cancelled, closed,
+    ended and archived campaigns are never listed, so a finished mission is
+    removed here rather than left with a dead CTA. Naive and timezone-aware
+    ``schedule.starts_at``/``ends_at`` values are both handled correctly
+    because this reuses ``mission_pool._as_utc`` via ``submission_state``
+    instead of re-implementing the comparison.
+
+    The schedule/cancellation bounds are also pushed into the Mongo query
+    itself (mirroring ``mission_pool_processor.find_due_campaigns``), not
+    just applied after the fact in Python: a ``status="live"`` campaign
+    never automatically leaves that status once its schedule elapses (the
+    worker only changes ``processing_stage``), so without this an
+    ever-growing set of expired-but-still-``live`` campaigns could fill the
+    query's ``limit`` and crowd out genuinely open missions sorted after
+    them. The Python-side ``submission_state`` check stays as defense in
+    depth — it remains the single source of truth for the rule, and
+    re-checking it costs nothing.
+
+    Authenticated (unlike the standard-drop list) because every card also
+    carries the caller's OWN participation state, computed the same way
+    ``/view`` computes it. Only safe public fields are returned: no
+    ``correct_answer``, no ``pool_id``/eligibility policy, no admin notes,
+    no other user's submission.
+    """
+    if not mp.mission_pool_enabled():
+        return jsonify({"status": "ok", "missions": []})
+
+    from miniapp_identity import resolve_authenticated_telegram_user_id
+
+    uid, err = resolve_authenticated_telegram_user_id()
+    if err:
+        return err
+
+    now = datetime.now(timezone.utc)
+    docs = database.db["gc_campaigns"].find(
+        {
+            "status": "live",
+            "mission_pool.cancelled": {"$ne": True},
+            "schedule.starts_at": {"$lte": now},
+            "$and": [
+                {"$or": [{"mechanic": mp.MECHANIC_MISSION_POOL},
+                         {"type": mp.CAMPAIGN_TYPE_MISSION_POOL}]},
+                # A missing/null ends_at means "no scheduled end" (open
+                # indefinitely); $gt matches neither, so it is carried as an
+                # explicit alternative rather than silently excluded.
+                {"$or": [{"schedule.ends_at": None}, {"schedule.ends_at": {"$gt": now}}]},
+            ],
+        },
+        sort=[("schedule.starts_at", 1)],
+        limit=50,
+    )
+    live = [d for d in docs if mp.is_mission_pool(d) and mp.submission_state(d, now)[0]]
+
+    campaign_ids = [d.get("campaign_id") for d in live if d.get("campaign_id")]
+    entries: dict = {}
+    if campaign_ids:
+        for row in database.db[mp.ENTRIES_COLLECTION].find(
+            {"campaign_id": {"$in": campaign_ids}, "telegram_user_id": uid},
+            projection={"campaign_id": 1, "status": 1},
+        ):
+            entries[row.get("campaign_id")] = row
+
+    missions = []
+    for d in live:
+        campaign_id = d.get("campaign_id") or ""
+        entry = entries.get(campaign_id)
+        block = d.get("mission_pool") or {}
+        schedule = d.get("schedule") or {}
+        cfg = d.get("mission_config") or {}
+        missions.append({
+            "campaign_id": campaign_id,
+            "campaign_name": d.get("name", ""),
+            "mission_type": cfg.get("mission_type"),
+            "prompt": cfg.get("prompt", ""),
+            "starts_at": _iso(schedule.get("starts_at")),
+            "ends_at": _iso(schedule.get("ends_at")),
+            "winner_count": block.get("winner_count"),
+            "user_state": user_state(d, entry, now),
+            "already_submitted": entry is not None,
+        })
+
+    return jsonify({"status": "ok", "missions": missions})
 
 
 # ---------------------------------------------------------------------------
