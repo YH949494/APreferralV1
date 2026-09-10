@@ -654,7 +654,7 @@ class TestConcurrency:
             {"_id": t5["_id"]},
             {"$set": {"status": ar.SETTLING_STATUS, "voucher_code": None,
                       "updated_at": SEP,
-                      "allocation_lease_at": ar._lease_now() - timedelta(
+                      "allocation_lease_at": SEP - timedelta(
                           seconds=ar._ALLOCATION_LEASE_TTL_SECONDS + 60)},
              "$unset": {"vouchers": "", "issued_code_count": "", "issued_value": ""}},
         )
@@ -1379,7 +1379,7 @@ class TestDurableSurplusSweep:
             {"$set": {"status": "issued", "issued_to_user_id": 76,
                       "ledger_id": t5["_id"], "issued_for_ledger_id": str(t5["_id"])}},
         )
-        stale = ar._lease_now() - timedelta(seconds=ar._ALLOCATION_LEASE_TTL_SECONDS + 60)
+        stale = SEP - timedelta(seconds=ar._ALLOCATION_LEASE_TTL_SECONDS + 60)
         db.affiliate_ledger.update_one(
             {"_id": t5["_id"]},
             {"$set": {"status": ar.SETTLING_STATUS, "voucher_code": None,
