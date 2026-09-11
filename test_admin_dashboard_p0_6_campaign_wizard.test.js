@@ -127,6 +127,10 @@ const OPTIONS_SRC = slice(JS, "  var gcOptionsCache = {", "\n  function loadGcCa
 const ATTEMPT_SRC = slice(JS, "  function gcCreateCampaignAttempt(", "\n  function bindGcCampaigns() {");
 const KL_SRC = slice(JS, "  function ccPad2(n)", "\n  var CC_CONTENT_ICON");
 const WIZARD_SRC = slice(JS, "  var GCW_STEP_LABELS = [", "\n  // ---------- Registration Configuration");
+// P0.14: gcwSubmit's destination.open_mode now comes from
+// gcDefaultOpenModeForType (shared with the legacy create form — see
+// gcCreateCampaignAttempt's own baseBody) instead of a hardcoded literal.
+const OPEN_MODE_SRC = slice(JS, "  // ---- P0.14: open_mode", "\n  function gcFindPool(pools, poolId)");
 
 function loadWizard(extra) {
   const apiPostJsonCalls = [];
@@ -142,11 +146,12 @@ function loadWizard(extra) {
   const doc = makeDocumentStub();
 
   const sandbox = runInSandbox(
-    OPTIONS_SRC + "\n" + ATTEMPT_SRC + "\n" + KL_SRC + "\n" + WIZARD_SRC +
+    OPTIONS_SRC + "\n" + ATTEMPT_SRC + "\n" + KL_SRC + "\n" + OPEN_MODE_SRC + "\n" + WIZARD_SRC +
     "\nthis.__x = { gcw, GCW_TYPES, GCW_STEP_LABELS, GCW_REGISTRATION_FIELD_ORDER, GCW_REGISTRATION_FIELD_LABELS, " +
     "gcwDefaultDraft, gcwHasMeaningfulInput, gcwStep1Html, gcwStep2Html, gcwStep3Html, gcwStep4Html, gcwStep5Html, " +
     "gcwStepBodies, gcwRender, gcwCaptureStep, gcwValidateStep, gcwCancel, gcwSubmit, gcwEnterStep, " +
-    "bindGcCampaignWizard, gcOptionsCache, gcKnownCampaignIds, gcCreateCampaignAttempt, gcOpenCampaignWizard: window.gcOpenCampaignWizard };",
+    "bindGcCampaignWizard, gcOptionsCache, gcKnownCampaignIds, gcCreateCampaignAttempt, gcOpenCampaignWizard: window.gcOpenCampaignWizard, " +
+    "gcDefaultOpenModeForType, gcAllowedOpenModesForType };",
     {
       $: makeDomStub(elements),
       $all: makeDomAllStub(collections),

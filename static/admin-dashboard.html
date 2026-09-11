@@ -2049,6 +2049,11 @@
       </section>
 
       <section id="view-gcProviders" class="hidden">
+        <!-- P0.14: shown only when a campaign is the reason the admin came here
+             (state.campaignId retained from Campaign Detail's "Manage Providers"
+             CTA — see gcRenderProvidersBackLink) so activating/creating a
+             provider here has a way back to the campaign that needed it. -->
+        <div id="gc-providers-back-link" class="hidden" style="margin-bottom:12px;"></div>
         <div class="section" style="margin-bottom:16px;">
           <div class="section-title">Create Provider</div>
           <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px;">

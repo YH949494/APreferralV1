@@ -630,3 +630,217 @@ def test_serialize_never_mutates_the_original_document(fake_db):
 
     assert isinstance(stored["schedule"]["starts_at"], datetime)
     assert stored["schedule"]["starts_at"] == original_starts_at
+
+
+# ---------------------------------------------------------------------------
+# P0.14 — telegram.require_subscription default semantics
+#
+# Root cause: _validate_body used to hardcode
+# `bool(raw_tg.get("require_subscription", True))`, so a wizard-created
+# Tournament/External campaign (which sends `telegram: {}` — no channel, no
+# explicit flag) silently got require_subscription=True with no channel
+# configured. subscription_gate.verify_campaign_subscription then fails
+# closed with channel_not_configured for every player, forever
+# (test_missing_channel_config_fails_closed in test_subscription_gate.py).
+# The fix is presence-sensitive: an explicit boolean always wins; absent
+# that, default to whatever is actually enforceable (on iff a channel is
+# configured).
+# ---------------------------------------------------------------------------
+
+def _min_body(telegram: dict, **overrides):
+    body = {
+        "name": "Telegram Default Test",
+        "type": "tournament",
+        "schedule": {"starts_at": datetime.now(timezone.utc).isoformat(), "ends_at": None},
+        "telegram": telegram,
+        "destination": {"provider_id": "", "open_mode": "telegram_web_app", "path": "", "ready": False},
+    }
+    body.update(overrides)
+    return body
+
+
+def test_no_channel_flag_omitted_defaults_subscription_off():
+    updates, code = cc._validate_body(_min_body({}))
+    assert code is None
+    assert updates["telegram"]["require_subscription"] is False
+
+
+def test_channel_username_present_flag_omitted_defaults_subscription_on():
+    updates, code = cc._validate_body(_min_body({"channel_username": "advantplayofficial"}))
+    assert code is None
+    assert updates["telegram"]["require_subscription"] is True
+
+
+def test_channel_id_present_flag_omitted_defaults_subscription_on():
+    updates, code = cc._validate_body(_min_body({"channel_id": -100123456}))
+    assert code is None
+    assert updates["telegram"]["require_subscription"] is True
+
+
+def test_channel_present_explicit_false_is_respected():
+    """Explicit false must win even though a channel is configured — never
+    `bool(raw.get("require_subscription") or channel_username)`, which would
+    make an explicit false indistinguishable from "not sent"."""
+    updates, code = cc._validate_body(_min_body({
+        "channel_username": "advantplayofficial", "require_subscription": False,
+    }))
+    assert code is None
+    assert updates["telegram"]["require_subscription"] is False
+    assert updates["telegram"]["channel_username"] == "advantplayofficial"
+
+
+def test_no_channel_explicit_true_is_rejected_as_invalid_config():
+    """An admin must never be able to save require_subscription=True with no
+    channel configured — that config can never be satisfied by any player
+    (subscription_gate fails closed with channel_not_configured). Reject it
+    outright rather than silently saving a permanently-broken campaign."""
+    updates, code = cc._validate_body(_min_body({"require_subscription": True}))
+    assert updates is None
+    assert code == "subscription_channel_required"
+
+
+def test_update_route_full_telegram_block_preserves_untouched_siblings(fake_db):
+    """Models the frontend's read-merge-PUT contract: sending back the
+    complete existing block with only require_subscription flipped must
+    leave every sibling field (channel_id, channel_username,
+    require_identity) exactly as it was."""
+    from unittest.mock import patch
+
+    fake_db["gc_campaigns"].insert_one(_campaign(campaign_id="c-tg", telegram={
+        "require_identity": True, "require_subscription": True,
+        "channel_id": -100999, "channel_username": "existing_channel",
+    }))
+    admin_app = Flask(__name__)
+    admin_app.register_blueprint(cc.campaign_centre_bp)
+    client = admin_app.test_client()
+    with patch("vouchers.require_admin", return_value=({"id": 1}, None)):
+        resp = client.put("/api/admin/gc-campaigns/c-tg", json={"telegram": {
+            "require_identity": True, "require_subscription": False,
+            "channel_id": -100999, "channel_username": "existing_channel",
+        }})
+    assert resp.status_code == 200
+    doc = fake_db["gc_campaigns"].find_one({"campaign_id": "c-tg"})
+    assert doc["telegram"] == {
+        "require_identity": True, "require_subscription": False,
+        "channel_id": -100999, "channel_username": "existing_channel",
+    }
+
+
+def test_update_route_omitting_telegram_key_leaves_it_untouched(fake_db):
+    from unittest.mock import patch
+
+    original_tg = {
+        "require_identity": True, "require_subscription": True,
+        "channel_id": None, "channel_username": "existing_channel",
+    }
+    fake_db["gc_campaigns"].insert_one(_campaign(campaign_id="c-tg2", telegram=original_tg))
+    admin_app = Flask(__name__)
+    admin_app.register_blueprint(cc.campaign_centre_bp)
+    client = admin_app.test_client()
+    with patch("vouchers.require_admin", return_value=({"id": 1}, None)):
+        resp = client.put("/api/admin/gc-campaigns/c-tg2", json={"name": "Renamed"})
+    assert resp.status_code == 200
+    doc = fake_db["gc_campaigns"].find_one({"campaign_id": "c-tg2"})
+    assert doc["telegram"] == original_tg
+
+
+def test_update_route_rejects_invalid_subscription_config(fake_db):
+    from unittest.mock import patch
+
+    fake_db["gc_campaigns"].insert_one(_campaign(campaign_id="c-tg3", telegram={
+        "require_identity": True, "require_subscription": False, "channel_id": None, "channel_username": "",
+    }))
+    admin_app = Flask(__name__)
+    admin_app.register_blueprint(cc.campaign_centre_bp)
+    client = admin_app.test_client()
+    with patch("vouchers.require_admin", return_value=({"id": 1}, None)):
+        resp = client.put("/api/admin/gc-campaigns/c-tg3", json={"telegram": {"require_subscription": True}})
+    assert resp.status_code == 400
+    assert resp.get_json()["code"] == "subscription_channel_required"
+    doc = fake_db["gc_campaigns"].find_one({"campaign_id": "c-tg3"})
+    assert doc["telegram"]["require_subscription"] is False  # unchanged — rejected write never lands
+
+
+# ---------------------------------------------------------------------------
+# P0.14 — open_mode validity per type (P1-1 legacy-create root cause)
+# ---------------------------------------------------------------------------
+
+def test_external_subscription_verification_accepts_external_url():
+    updates, code = cc._validate_body(_min_body(
+        {}, type="external_subscription_verification",
+        destination={"provider_id": "", "open_mode": "external_url", "path": "", "ready": False},
+    ))
+    assert code is None
+    assert updates["destination"]["open_mode"] == "external_url"
+
+
+def test_external_subscription_verification_rejects_telegram_web_app():
+    """This is the exact P1-1 bug: the legacy create form hardcoded
+    open_mode="telegram_web_app" regardless of type, which this type has
+    never allowed (_ALLOWED_OPEN_MODES_BY_TYPE)."""
+    updates, code = cc._validate_body(_min_body(
+        {}, type="external_subscription_verification",
+        destination={"provider_id": "", "open_mode": "telegram_web_app", "path": "", "ready": False},
+    ))
+    assert updates is None
+    assert code == "open_mode_not_allowed_for_type"
+
+
+# ---------------------------------------------------------------------------
+# P0.14 — player-side /play behavior: subscription gate honors the fixed
+# default, and stays fully enforced when actually configured.
+# ---------------------------------------------------------------------------
+
+def _play_app():
+    app = Flask(__name__)
+    app.register_blueprint(cc.campaign_public_bp)
+    return app
+
+
+def test_play_not_blocked_when_subscription_not_required(fake_db):
+    from unittest.mock import patch
+
+    fake_db["gc_providers"].insert_one(_provider(base_url="https://tournament.example.com"))
+    fake_db["gc_campaigns"].insert_one(_campaign(telegram={
+        "require_identity": True, "require_subscription": False, "channel_username": "",
+    }))
+    client = _play_app().test_client()
+    with patch("miniapp_identity.resolve_authenticated_telegram_user_id", return_value=(111, None)), \
+         patch("subscription_gate.verify_campaign_subscription") as mock_gate:
+        resp = client.post(f"/api/campaigns/{_campaign()['campaign_id']}/play")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["status"] == "ok"
+    assert body["url"]
+    mock_gate.assert_not_called()
+
+
+def test_play_still_gated_when_subscription_required_and_configured(fake_db):
+    """Fixing the broken default must never weaken enforcement for a
+    correctly-configured campaign — require_subscription=True with a real
+    channel still blocks an unsubscribed player."""
+    from unittest.mock import patch
+
+    fake_db["gc_providers"].insert_one(_provider(base_url="https://tournament.example.com"))
+    fake_db["gc_campaigns"].insert_one(_campaign())  # default fixture: require_subscription True + channel set
+    client = _play_app().test_client()
+    with patch("miniapp_identity.resolve_authenticated_telegram_user_id", return_value=(111, None)), \
+         patch("subscription_gate.verify_campaign_subscription",
+               return_value={"subscribed": False, "reason": "left"}):
+        resp = client.post(f"/api/campaigns/{_campaign()['campaign_id']}/play")
+    assert resp.status_code == 403
+    assert resp.get_json()["code"] == "subscription_required"
+
+
+def test_play_passes_when_subscription_required_and_subscribed(fake_db):
+    from unittest.mock import patch
+
+    fake_db["gc_providers"].insert_one(_provider(base_url="https://tournament.example.com"))
+    fake_db["gc_campaigns"].insert_one(_campaign())
+    client = _play_app().test_client()
+    with patch("miniapp_identity.resolve_authenticated_telegram_user_id", return_value=(111, None)), \
+         patch("subscription_gate.verify_campaign_subscription",
+               return_value={"subscribed": True, "reason": "member"}):
+        resp = client.post(f"/api/campaigns/{_campaign()['campaign_id']}/play")
+    assert resp.status_code == 200
+    assert resp.get_json()["status"] == "ok"

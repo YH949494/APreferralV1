@@ -348,11 +348,29 @@ def _validate_body(body: dict, *, partial: bool = False) -> tuple[dict | None, s
 
     if not partial or "telegram" in body:
         raw_tg = body.get("telegram") or {}
+        channel_id = raw_tg.get("channel_id")
+        channel_username = (raw_tg.get("channel_username") or "").strip()
+        # A campaign with no channel configured can never satisfy the
+        # subscription gate (subscription_gate.verify_campaign_subscription
+        # fails closed with channel_not_configured when neither field is
+        # set) — every player would be blocked forever with no way to ever
+        # pass. So when the caller doesn't explicitly say what they want,
+        # default to whatever is actually enforceable: on if a channel is
+        # configured (preserves the historical default for a fully-
+        # configured campaign), off otherwise. An explicit boolean from the
+        # caller always wins, including an explicit `false` on a campaign
+        # that does have a channel configured.
+        if "require_subscription" in raw_tg:
+            require_subscription = bool(raw_tg["require_subscription"])
+        else:
+            require_subscription = bool(channel_id or channel_username)
+        if require_subscription and not (channel_id or channel_username):
+            return None, "subscription_channel_required"
         updates["telegram"] = {
             "require_identity": bool(raw_tg.get("require_identity", True)),
-            "require_subscription": bool(raw_tg.get("require_subscription", True)),
-            "channel_id": raw_tg.get("channel_id"),
-            "channel_username": (raw_tg.get("channel_username") or "").strip(),
+            "require_subscription": require_subscription,
+            "channel_id": channel_id,
+            "channel_username": channel_username,
         }
 
     if not partial or "destination" in body:

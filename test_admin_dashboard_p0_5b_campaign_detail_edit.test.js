@@ -354,18 +354,27 @@ test("A/H: editing destination.ready only preserves provider_id/path/open_mode, 
   dom.node("#cd-edit-dest-provider").value = "p1";
   dom.node("#cd-edit-dest-path").value = "/game";
   dom.node("#cd-edit-dest-ready").checked = true;
+  dom.node("#cd-edit-dest-openmode").value = "telegram_web_app"; // unchanged in the form
 
   sandbox.cdSaveSection("destination", { disabled: false, textContent: "" });
   await flush();
 
   assert.equal(calls.apiPutJson.length, 1);
   const body = plain(calls.apiPutJson[0].body);
-  assert.deepEqual(Object.keys(body).sort(), ["destination"]);
+  // P0.14: the same "Where users go" editor now also owns the telegram
+  // subscription switch, saved together in one PUT — never a second save
+  // path for it.
+  assert.deepEqual(Object.keys(body).sort(), ["destination", "telegram"]);
   assert.deepEqual(body.destination, { provider_id: "p1", open_mode: "telegram_web_app", path: "/game", ready: true });
   // Every key the backend's destination block recognizes is present — never
   // a partial fragment like {ready: true} alone (see campaign_centre.py's
   // full nested-block reconstruction).
   assert.deepEqual(Object.keys(body.destination).sort(), ["open_mode", "path", "provider_id", "ready"]);
+  // tournamentCampaign() carries no telegram block at all — cdSaveSection
+  // must still send a complete, backend-shaped one (defaulting
+  // require_identity true, everything else off/empty) rather than crash or
+  // omit the key.
+  assert.deepEqual(body.telegram, { require_identity: true, require_subscription: false, channel_id: null, channel_username: "" });
 });
 
 test("A/H: editing provider only preserves path/open_mode/ready", async () => {
@@ -378,6 +387,7 @@ test("A/H: editing provider only preserves path/open_mode/ready", async () => {
   dom.node("#cd-edit-dest-provider").value = "p2";
   dom.node("#cd-edit-dest-path").value = "/game"; // unchanged in the form
   dom.node("#cd-edit-dest-ready").checked = true; // unchanged in the form
+  dom.node("#cd-edit-dest-openmode").value = "telegram_web_app"; // unchanged in the form
 
   sandbox.cdSaveSection("destination", {});
   await flush();
