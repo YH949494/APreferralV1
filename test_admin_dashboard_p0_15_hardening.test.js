@@ -216,17 +216,22 @@ test("share link missing (registration enabled, bot username not configured): di
   });
   assert.equal(state.available, false);
   assert.match(state.reason, /bot username/);
-  assert.doesNotMatch(state.reason, /too long/);
+  assert.doesNotMatch(state.reason, /unsupported characters|length limit/);
 });
 
-test("share link missing (registration enabled, campaign_id not link-safe): distinct, non-repairable reason", () => {
+// P2 fix (Codex review): a link-unsafe campaign_id can fail for either of
+// two distinct root causes the backend doesn't separate (over 55 chars, OR
+// a legacy id containing a character outside [A-Za-z0-9_-]) — the message
+// must cover both, never claim "too long" for a short-but-invalid-charset id.
+test("share link missing (registration enabled, campaign_id not link-safe): distinct, non-repairable reason covering both length and charset", () => {
   const s = loadShareState();
   const state = s.gcComputeShareState({
     campaign_id: "x".repeat(60), registration: { enabled: true },
     registration_deep_link: null, registration_deep_link_unavailable_reason: "campaign_id_not_link_safe",
   });
   assert.equal(state.available, false);
-  assert.match(state.reason, /too long/);
+  assert.match(state.reason, /unsupported characters/);
+  assert.match(state.reason, /length limit/);
   assert.doesNotMatch(state.reason, /bot username/);
   // never framed as something the admin can just fix
   assert.doesNotMatch(state.reason, /temporarily/i);
@@ -239,10 +244,11 @@ test("share link missing (mission, campaign_id not link-safe): same reason disti
     mission_link: null, mission_link_unavailable_reason: "campaign_id_not_link_safe",
   });
   assert.equal(state.available, false);
-  assert.match(state.reason, /too long/);
+  assert.match(state.reason, /unsupported characters/);
+  assert.match(state.reason, /length limit/);
 });
 
-test("existing (legacy) campaign with an id over 55 chars gets the exact 'too long' explanation even without a server reason field", () => {
+test("existing (legacy) campaign with an id over 55 chars gets the accurate explanation even without a server reason field", () => {
   // Defensive client-side fallback for a stale cached campaign object that
   // predates the server sending registration_deep_link_unavailable_reason.
   const s = loadShareState();
@@ -250,7 +256,17 @@ test("existing (legacy) campaign with an id over 55 chars gets the exact 'too lo
     campaign_id: "z".repeat(60), registration: { enabled: true }, registration_deep_link: null,
   });
   assert.equal(state.available, false);
-  assert.match(state.reason, /too long/);
+  assert.match(state.reason, /length limit/);
+});
+
+test("existing (legacy) campaign with a short but invalid-charset id (e.g. contains a period) is never told it's 'too long'", () => {
+  const s = loadShareState();
+  const state = s.gcComputeShareState({
+    campaign_id: "summer.2025", registration: { enabled: true },
+    registration_deep_link: null, registration_deep_link_unavailable_reason: "campaign_id_not_link_safe",
+  });
+  assert.equal(state.available, false);
+  assert.match(state.reason, /unsupported characters/);
 });
 
 test("a non-registration, non-mission campaign type still gets the generic 'no shareable link' message, unaffected", () => {
@@ -355,6 +371,28 @@ test("retry is capped at GC_DUPLICATE_MAX_ATTEMPTS — never an unbounded loop",
   assert.equal(apiPostJson.calls.length, s.GC_DUPLICATE_MAX_ATTEMPTS, "must stop retrying at the cap");
   assert.equal(res.ok, false, "the final (still-failing) response is returned, not swallowed");
   assert.equal(res.d.code, "duplicate_campaign_id");
+});
+
+// P2 fix (Codex review): gcFirstAvailableDuplicateSuffix can hand back a
+// starting n well above 1 (e.g. 26, if -copy through -copy-25 are all
+// already known/active) — capping on the absolute suffix number (n <
+// maxAttempts) rather than a real attempt count would then stop after a
+// single try instead of allowing maxAttempts genuine attempts.
+test("retry count is tracked independently of a high starting suffix — a full maxAttempts tries are still made", async () => {
+  const apiPostJson = makeApiPostJsonQueue();
+  const s = loadDuplicate({ apiPostJson });
+  for (let i = 0; i < s.GC_DUPLICATE_MAX_ATTEMPTS; i++) {
+    apiPostJson.push({ ok: false, status: 409, d: { status: "error", code: "campaign_id_previously_deleted" } });
+  }
+  // Simulates 25 known active copies (-copy through -copy-25), so the
+  // first candidate this call proposes is already -copy-26.
+  const res = await s.gcDuplicateCampaignAttempt("src", 26, s.GC_DUPLICATE_MAX_ATTEMPTS);
+  assert.equal(apiPostJson.calls.length, s.GC_DUPLICATE_MAX_ATTEMPTS,
+    "must still make a full maxAttempts tries, not stop after one because n already exceeds maxAttempts");
+  assert.deepEqual(
+    apiPostJson.calls.map((c) => c.body.campaign_id),
+    Array.from({ length: s.GC_DUPLICATE_MAX_ATTEMPTS }, (_, i) => "src-copy-" + (26 + i))
+  );
 });
 
 test("an unrelated error (e.g. not_found) is never retried", async () => {

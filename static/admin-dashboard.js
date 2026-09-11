@@ -5978,9 +5978,16 @@
   // campaign_id_not_link_safe is never described as fixable — a campaign_id
   // is immutable once created, so this campaign's link is permanently
   // unavailable, not "temporarily".
+  // campaign_id_not_link_safe covers two distinct root causes the backend
+  // doesn't distinguish (campaign_registration.campaign_id_is_link_safe /
+  // mission_pool_ux.campaign_id_is_link_safe fail the same way for either):
+  // an id over the 55-char budget, OR a legacy id containing a character
+  // outside [A-Za-z0-9_-] (created before this rule existed). The copy
+  // below has to cover both, never claim "too long" for an id that's
+  // actually just short-but-invalid-charset.
   var GC_SHARE_UNAVAILABLE_REASON_TEXT = {
     bot_username_not_configured: "Share link is temporarily unavailable — the bot username isn't configured yet.",
-    campaign_id_not_link_safe: "This campaign's ID is too long to create a Telegram share link.",
+    campaign_id_not_link_safe: "This campaign's ID can't be used in a Telegram share link (unsupported characters, or over the length limit).",
   };
 
   function gcShareUnavailableReasonText(campaignId, reasonCode) {
@@ -7751,13 +7758,20 @@
   // still posted and can still be accepted or rejected on its own merits.
   var GC_DUPLICATE_MAX_ATTEMPTS = 25;
 
-  function gcDuplicateCampaignAttempt(sourceId, n, maxAttempts) {
+  // `attempt` counts requests made in THIS call chain, independent of `n`
+  // (the candidate suffix number) — gcFirstAvailableDuplicateSuffix can
+  // hand back a starting `n` already well above 1 (e.g. 26, if copies 1-25
+  // are all in active use), and capping on `n < maxAttempts` directly would
+  // then stop after a single try instead of allowing maxAttempts real
+  // attempts.
+  function gcDuplicateCampaignAttempt(sourceId, n, maxAttempts, attempt) {
+    attempt = attempt || 1;
     var candidateId = gcDuplicateIdCandidate(sourceId, n);
     return apiPostJson("/api/admin/gc-campaigns/" + sourceId + "/duplicate", { campaign_id: candidateId }).then(function (res) {
       var code = res.d && res.d.code;
       var collision = code === "duplicate_campaign_id" || code === "campaign_id_previously_deleted";
-      if (collision && n < maxAttempts) {
-        return gcDuplicateCampaignAttempt(sourceId, n + 1, maxAttempts);
+      if (collision && attempt < maxAttempts) {
+        return gcDuplicateCampaignAttempt(sourceId, n + 1, maxAttempts, attempt + 1);
       }
       return res;
     });
