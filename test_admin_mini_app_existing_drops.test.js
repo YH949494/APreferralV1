@@ -52,6 +52,15 @@ const MP_INVENTORY_PREFLIGHT_SRC = slice(
   "  function mpInventoryPreflight(campaignId) {",
   "\n  // ---------- Affiliate Voucher Pools"
 );
+// P0.15 — the click handler (inside MISSION_CLICK_SRC) now calls this for
+// its success toast copy. Defined before bindDrops() in the real file (so
+// it stays outside MISSION_CLICK_SRC's own start/end markers), hence its
+// own slice here.
+const MP_DROPS_SUCCESS_SRC = slice(
+  JS,
+  "  function mpDropsActionSuccessMessage(action, isResume) {",
+  "\n  function loadDrops(force) {"
+);
 
 function featureSource() {
   return HELPERS_SRC + "\n" + STATE_PANEL_SRC + "\n" + ROW_AND_LOAD_SRC;
@@ -429,8 +438,12 @@ function makeClickContext() {
   };
   const context = vm.createContext(sandbox);
   vm.runInContext(
-    slice(JS, "  function fmt(v) {", "\n  function apiPostJson(") +
-      "\n" + MISSION_CLICK_SRC + "\n" + MP_INVENTORY_PREFLIGHT_SRC,
+    // P0.15 — the click handler now posts through apiPostJson (not apiPost),
+    // via a gcRunAction stub (defined below) rather than the real gcRunAction
+    // — which would also need btnStart/btnStop's real DOM (classList/
+    // innerHTML) expectations the hand-rolled mock button here doesn't have.
+    slice(JS, "  function fmt(v) {", "\n  function apiPatchJson(") +
+      "\n" + MP_DROPS_SUCCESS_SRC + "\n" + MISSION_CLICK_SRC + "\n" + MP_INVENTORY_PREFLIGHT_SRC,
     context,
     { filename: "admin-dashboard-mission-click.js" }
   );
@@ -441,7 +454,26 @@ function makeClickContext() {
       "this.openGcDeleteModal = function (id, name, cb) { __opened.deleted.push(id); if (cb) cb(); };" +
       "this.gcInvalidateCampaignsCache = function () { __invalidated.push(true); };" +
       "this.loadDrops = function () {};" +
-      'this.mpConfirmCopy = function () { return ""; };',
+      'this.mpConfirmCopy = function () { return ""; };' +
+      // P0.15 — minimal stand-in for admin-dashboard.js's gcRunAction: the
+      // run()->{ok,status,d}->toast/invalidateCache/onSuccess contract the
+      // real one guarantees. Full confirm/in-flight/button-disable coverage
+      // against the real gcRunAction lives in
+      // test_admin_dashboard_p0_8_action_hardening.test.js.
+      "this.gcRunAction = function (opts) {" +
+      "  return Promise.resolve().then(opts.run).then(function (res) {" +
+      "    if (!res || !res.ok || !res.d || res.d.status !== \"ok\") {" +
+      "      toast(\"❌ \" + (opts.fallbackError || \"Couldn't complete this action. Try again.\"), \"error\");" +
+      "      return;" +
+      "    }" +
+      "    var msg = typeof opts.successMessage === \"function\" ? opts.successMessage(res.d) : opts.successMessage;" +
+      "    if (msg) toast(\"✅ \" + msg, \"success\");" +
+      "    if (opts.invalidateCache !== false) gcInvalidateCampaignsCache();" +
+      "    if (opts.onSuccess) opts.onSuccess(res.d);" +
+      "  }, function () {" +
+      "    toast(\"❌ \" + (opts.fallbackError || \"Couldn't complete this action. Try again.\"), \"error\");" +
+      "  });" +
+      "};",
     context
   );
   context.__toasts = toasts;

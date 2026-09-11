@@ -85,6 +85,10 @@ async function withRejectionGuard(fn) {
 // reused as-is — never reimplemented here).
 // ---------------------------------------------------------------------
 const INVALIDATE_SRC = slice(JS, "  function gcInvalidateCampaignsCache() {", "\n  function fetchGcProviders(force)");
+// P0.15 — GC_LINK_SAFE_CAMPAIGN_ID_MAX/gcFitCampaignIdSuffix, a real
+// dependency of gcDuplicateIdCandidate/gcNextDuplicateId below now that
+// duplicate id proposals are capped to the share-safe campaign_id budget.
+const SHARE_SAFE_ID_SRC = slice(JS, "  // ---------- Share-safe campaign_id budget (P0.15) ----------", "\n  // ---------- Campaign ID slug generation (P0.3)");
 const ACTION_SRC = slice(JS, "  var GC_ACTION_ERROR_MESSAGES = {", "\n  function bindGcCampaigns() {");
 
 function makeBtn(label) {
@@ -118,10 +122,13 @@ function loadAction(overrides) {
   };
   Object.assign(sandboxBase, overrides || {});
 
-  const fullSrc = INVALIDATE_SRC + "\n" + ACTION_SRC +
+  const fullSrc = INVALIDATE_SRC + "\n" + SHARE_SAFE_ID_SRC + "\n" + ACTION_SRC +
     "\nthis.gcRunAction = gcRunAction; this.gcActionErrorMessage = gcActionErrorMessage; " +
     "this.GC_ACTION_ERROR_MESSAGES = GC_ACTION_ERROR_MESSAGES; this.gcDefaultRefresh = gcDefaultRefresh; " +
-    "this.gcNextDuplicateId = gcNextDuplicateId; this.gcOptionsCache = gcOptionsCache;";
+    "this.gcNextDuplicateId = gcNextDuplicateId; this.gcOptionsCache = gcOptionsCache; " +
+    "this.gcDuplicateIdCandidate = gcDuplicateIdCandidate; this.gcFirstAvailableDuplicateSuffix = gcFirstAvailableDuplicateSuffix; " +
+    "this.gcDuplicateCampaignAttempt = gcDuplicateCampaignAttempt; this.GC_DUPLICATE_MAX_ATTEMPTS = GC_DUPLICATE_MAX_ATTEMPTS; " +
+    "this.gcCampaignIdIsLinkSafe = gcCampaignIdIsLinkSafe;";
 
   const sandbox = runInSandbox(fullSrc, sandboxBase);
   return { sandbox, calls };
@@ -508,13 +515,18 @@ test("I: Archive routes through gcRunAction, apiPostJson, and confirms with the 
   assert.doesNotMatch(chunk, /apiPost\(/);
 });
 
-test("I: Duplicate routes through gcRunAction, apiPostJson, and proposes a unique id via gcNextDuplicateId", () => {
+test("I: Duplicate routes through gcRunAction and the tombstone-retry helper (P0.15), never a single-shot gcNextDuplicateId guess", () => {
   const chunk = gcActionBranch("duplicate");
   assert.match(chunk, /gcRunAction\(/);
-  assert.match(chunk, /gcNextDuplicateId\(id\)/);
-  assert.match(chunk, /apiPostJson\("\/api\/admin\/gc-campaigns\/"\s*\+\s*id\s*\+\s*"\/duplicate",\s*\{\s*campaign_id:\s*proposedId\s*\}/);
+  assert.match(chunk, /gcDuplicateCampaignAttempt\(id,\s*gcFirstAvailableDuplicateSuffix\(id\),\s*GC_DUPLICATE_MAX_ATTEMPTS\)/);
   assert.match(chunk, /renderCampaignDetail\(d\.campaign_id\)/, "must open Campaign Detail for the backend-returned new copy, never a guessed id");
   assert.doesNotMatch(chunk, /apiPost\(/);
+});
+
+test("I: gcDuplicateCampaignAttempt itself posts through apiPostJson, never bare apiPost", () => {
+  const src = ACTION_SRC;
+  assert.match(src, /function gcDuplicateCampaignAttempt\(/);
+  assert.match(src, /apiPostJson\("\/api\/admin\/gc-campaigns\/"\s*\+\s*sourceId\s*\+\s*"\/duplicate",\s*\{\s*campaign_id:\s*candidateId\s*\}\)/);
 });
 
 test("I: Duplicate's success toast never includes the raw campaign_id template", () => {

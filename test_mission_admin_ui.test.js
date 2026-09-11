@@ -157,6 +157,22 @@ function makeHarness(routes) {
     toast: (msg, kind) => toasts.push({ msg, kind }),
     confirm: () => true,
     copy: (text) => copied.push(text),
+    // Minimal stand-in for admin-dashboard.js's gcRunAction (P0.15) — the
+    // run()->{ok,status,d}->toast/onSuccess contract mission-admin.js's own
+    // postAction now delegates to. Confirm/in-flight/button-disable and the
+    // full GC_ACTION_ERROR_MESSAGES mapping are covered against the real
+    // gcRunAction elsewhere (test_admin_dashboard_p0_8_action_hardening.test.js).
+    runAction: (opts) => Promise.resolve().then(opts.run).then(function (res) {
+      if (!res || !res.ok || !res.d || res.d.status !== "ok") {
+        host.toast("❌ " + (opts.fallbackError || "Couldn't complete this action. Try again."), "error");
+        return;
+      }
+      var msg = typeof opts.successMessage === "function" ? opts.successMessage(res.d) : opts.successMessage;
+      if (msg) host.toast("✅ " + msg, "success");
+      if (opts.onSuccess) opts.onSuccess(res.d);
+    }, function () {
+      host.toast("❌ " + (opts.fallbackError || "Couldn't complete this action. Try again."), "error");
+    }),
   };
 
   return {
@@ -738,7 +754,7 @@ test("lifecycle actions call the official endpoints and never write status", asy
   for (const action of ["close", "cancel", "resume", "process", "publish", "pause"]) {
     const mod = freshModule();
     const h = makeHarness({
-      "POST *": (p) => { seen.push(p); return { status: "ok" }; },
+      "POSTJ *": (p) => { seen.push(p); return { status: "ok" }; },
       "GET /api/admin/gc-campaigns/m1": { status: "ok", campaign: campaignDoc("m1") },
       "GET /api/admin/mission-pool/m1/edit-state": editState("m1"),
       "GET /api/admin/mission-pool/m1/summary": SUMMARY_OK,
@@ -781,7 +797,7 @@ test("publishing an existing mission is blocked when inventory cannot cover it",
   await mod.dispatch("publish", "draft-1");
   await h.flush(); await h.flush();
 
-  assert.equal(h.calls.some((c) => c.method === "POST"), false, "no publish request is issued");
+  assert.equal(h.calls.some((c) => c.method === "POSTJ"), false, "no publish request is issued");
   assert.ok(h.toasts.some((t) => /Publishing blocked/.test(t.msg) && /MISSION-5/.test(t.msg)));
 });
 
@@ -800,7 +816,7 @@ test("resuming a paused mission obeys the same inventory gate as publishing", as
   mod.init(h.host);
   await mod.dispatch("publish", "paused-1");
   await h.flush(); await h.flush();
-  assert.equal(h.calls.some((c) => c.method === "POST"), false);
+  assert.equal(h.calls.some((c) => c.method === "POSTJ"), false);
 });
 
 test("publishing proceeds once inventory covers the winner target", async () => {
@@ -809,14 +825,14 @@ test("publishing proceeds once inventory covers the winner target", async () => 
     "GET /api/admin/mission-pool/draft-1/edit-state": editState("draft-1", {
       state: "draft", campaign_status: "draft",
     }),
-    "POST /api/admin/gc-campaigns/draft-1/publish": { status: "ok", campaign_status: "live" },
+    "POSTJ /api/admin/gc-campaigns/draft-1/publish": { status: "ok", campaign_status: "live" },
     "GET /api/admin/gc-campaigns/draft-1": { status: "ok", campaign: campaignDoc("draft-1") },
     "GET /api/admin/mission-pool/draft-1/summary": SUMMARY_OK,
   });
   mod.init(h.host);
   await mod.dispatch("publish", "draft-1");
   await h.flush(); await h.flush(); await h.flush();
-  assert.ok(h.calls.some((c) => c.method === "POST" && c.path === "/api/admin/gc-campaigns/draft-1/publish"));
+  assert.ok(h.calls.some((c) => c.method === "POSTJ" && c.path === "/api/admin/gc-campaigns/draft-1/publish"));
 });
 
 test("the inventory verdict is re-read at publish time, never trusted from the page", async () => {
@@ -831,7 +847,7 @@ test("the inventory verdict is re-read at publish time, never trusted from the p
 test("only publish is gated — close, cancel, resume and process are not", async () => {
   const mod = freshModule();
   const h = makeHarness({
-    "POST *": { status: "ok" },
+    "POSTJ *": { status: "ok" },
     "GET /api/admin/gc-campaigns/m1": { status: "ok", campaign: campaignDoc("m1") },
     "GET /api/admin/mission-pool/m1/edit-state": editState("m1"),
     "GET /api/admin/mission-pool/m1/summary": SUMMARY_OK,
@@ -890,7 +906,7 @@ test("End Mission Rewards posts to the dedicated admin endpoint and reports the 
     "GET /api/admin/gc-campaigns/sep": { status: "ok", campaign: campaignDoc("sep") },
     "GET /api/admin/mission-pool/sep/edit-state": editState("sep"),
     "GET /api/admin/mission-pool/sep/summary": SUMMARY_OK,
-    "POST /api/admin/mission-pool/sep/end-rewards": { status: "ok", ended: true, count_affected: 2 },
+    "POSTJ /api/admin/mission-pool/sep/end-rewards": { status: "ok", ended: true, count_affected: 2 },
   });
   mod.init(h.host);
   mod.open("sep");
@@ -899,8 +915,10 @@ test("End Mission Rewards posts to the dedicated admin endpoint and reports the 
   await mod.dispatch("end_rewards", "sep");
   await h.flush(); await h.flush();
 
-  assert.ok(h.calls.some((c) => c.method === "POST" && c.path === "/api/admin/mission-pool/sep/end-rewards"));
-  assert.ok(h.toasts.some((t) => /Ended 2 active reward/.test(t.msg)));
+  assert.ok(h.calls.some((c) => c.method === "POSTJ" && c.path === "/api/admin/mission-pool/sep/end-rewards"));
+  // P0.15 — human success copy ("Rewards ended...") through gcRunAction's
+  // successMessage, replacing the old raw "✅ Ended N active reward(s)".
+  assert.ok(h.toasts.some((t) => /Rewards ended for 2 active Mission reward/.test(t.msg)));
 });
 
 test("End Mission Rewards is confirmed before it fires, like the other destructive actions", () => {
@@ -1507,7 +1525,10 @@ test("neither the protected-pool list nor the allowed scopes are hardcoded in th
 
 test("Duplicate still uses the existing Campaign Centre endpoint", () => {
   assert.ok(DASH_JS.includes('data-gc-action="duplicate"'));
-  assert.ok(DASH_JS.includes('"/api/admin/gc-campaigns/" + id + "/duplicate"'));
+  // P0.15 — the actual POST now lives inside gcDuplicateCampaignAttempt's
+  // tombstone-retry loop, keyed off sourceId rather than the click
+  // handler's own `id`, but it's still the same Campaign Centre endpoint.
+  assert.ok(DASH_JS.includes('"/api/admin/gc-campaigns/" + sourceId + "/duplicate"'));
 });
 
 // ---------------------------------------------------------------------------
@@ -1579,17 +1600,32 @@ test("Close Mission and End Rewards call the existing Mission admin endpoints, n
     "End Rewards must reuse the existing mission_pool end-rewards endpoint");
 });
 
-test("Close Mission and End Rewards are gated behind a confirm() before any request", () => {
+// P0.15 — Close Mission / End Rewards were switched from a bare
+// confirm()-then-apiPost() pattern to gcRunAction's own confirmTitle/
+// confirmMessage option, the same choke point Publish/Pause/Archive/
+// Duplicate already use (gcRunAction always confirms before opts.run()
+// fires — see test_admin_dashboard_p0_8_action_hardening.test.js section D
+// for that generic guarantee). This test now locks the structural wiring
+// instead of the old native-confirm() call.
+test("Close Mission and End Rewards are gated behind gcRunAction's confirmMessage before any request", () => {
   const closeBlock = DASH_JS.slice(
     DASH_JS.indexOf('action === "close-mission"'),
     DASH_JS.indexOf('action === "end-rewards"')
   );
-  assert.match(closeBlock, /if \(!confirm\(GC_CLOSE_MISSION_CONFIRM\)\) return;/);
-  assert.ok(closeBlock.indexOf("confirm(GC_CLOSE_MISSION_CONFIRM)") < closeBlock.indexOf("apiPost("),
-    "confirm must run before the request fires");
+  assert.match(closeBlock, /gcRunAction\(/);
+  assert.match(closeBlock, /confirmMessage:/);
+  assert.ok(closeBlock.indexOf("confirmMessage:") < closeBlock.indexOf("apiPostJson("),
+    "confirmMessage must be wired before the request fires (gcRunAction confirms first)");
+  assert.doesNotMatch(closeBlock, /run:\s*function\s*\(\)\s*\{\s*return apiPost\(/,
+    "must not use the throw-on-non-2xx helper as the actual request");
 
-  const endBlock = DASH_JS.slice(DASH_JS.indexOf('action === "end-rewards"'));
-  assert.match(endBlock, /if \(!confirm\(GC_END_REWARDS_CONFIRM\)\) return;/);
+  const endBlock = DASH_JS.slice(
+    DASH_JS.indexOf('action === "end-rewards"'),
+    DASH_JS.indexOf('action === "duplicate"')
+  );
+  assert.match(endBlock, /gcRunAction\(/);
+  assert.match(endBlock, /confirmMessage:/);
+  assert.doesNotMatch(endBlock, /run:\s*function\s*\(\)\s*\{\s*return apiPost\(/);
 });
 
 test("cancelling the confirm dialog performs no request", () => {
@@ -1600,15 +1636,28 @@ test("cancelling the confirm dialog performs no request", () => {
   assert.ok(DASH_JS.includes("Allocated vouchers will remain recorded and will not be returned to inventory."));
 });
 
-test("success refreshes the Campaign Centre table for both Mission row actions", () => {
+// P0.15 — the old unconditional loadGcCampaigns(true) (fired even when the
+// admin wasn't on the Campaigns list) was replaced by gcRunAction's own
+// default refresh (gcDefaultRefresh — see test_admin_dashboard_p0_8_
+// action_hardening.test.js section G), which every other gc_campaigns
+// action already relies on and which correctly refreshes Campaign Detail
+// instead when that's the current view. Neither branch opts out of it
+// (no `refresh: false`), so the canonical view is still refreshed on
+// success — just via the shared choke point instead of its own inline call.
+test("success refreshes the canonical view via gcRunAction's default refresh for both Mission row actions", () => {
   const closeBlock = DASH_JS.slice(
     DASH_JS.indexOf('action === "close-mission"'),
     DASH_JS.indexOf('action === "end-rewards"')
   );
-  assert.match(closeBlock, /loadGcCampaigns\(true\)/);
-  const endBlock = DASH_JS.slice(DASH_JS.indexOf('action === "end-rewards"'));
-  assert.match(endBlock.slice(0, endBlock.indexOf("action ===", 10) === -1 ? endBlock.length : endBlock.indexOf("action ===", 10)),
-    /loadGcCampaigns\(true\)/);
+  assert.match(closeBlock, /gcRunAction\(/);
+  assert.doesNotMatch(closeBlock, /refresh:\s*false/, "close-mission must not opt out of gcRunAction's default refresh");
+
+  const endBlock = DASH_JS.slice(
+    DASH_JS.indexOf('action === "end-rewards"'),
+    DASH_JS.indexOf('action === "duplicate"')
+  );
+  assert.match(endBlock, /gcRunAction\(/);
+  assert.doesNotMatch(endBlock, /refresh:\s*false/, "end-rewards must not opt out of gcRunAction's default refresh");
 });
 
 // P0.4 moved the row's "Open in Mission Reward Pool" / "Open" link (and

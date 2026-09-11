@@ -251,6 +251,42 @@ def test_duplicate_campaign_rejects_a_previously_deleted_target_id(fake_db, clie
     assert resp.get_json()["code"] == "campaign_id_previously_deleted"
 
 
+def test_duplicate_campaign_suffixes_the_copy_name_with_copy(fake_db, client):
+    """P0.15 — duplicate_campaign no longer clones the source name verbatim
+    (two visually identical cards in the list). Source name is untouched;
+    only the new copy gets the " (copy)" suffix, and campaign_id/other
+    fields still copy through unchanged."""
+    _seed_campaign(fake_db, campaign_id="source-campaign", name="October Lucky Draw",
+                    status="draft", priority=250)
+    with _mock_admin():
+        resp = client.post(
+            "/api/admin/gc-campaigns/source-campaign/duplicate",
+            json={"campaign_id": "october-lucky-draw-copy"},
+        )
+    assert resp.status_code == 201
+    assert resp.get_json()["campaign_id"] == "october-lucky-draw-copy"
+
+    copy = fake_db["gc_campaigns"].find_one({"campaign_id": "october-lucky-draw-copy"})
+    assert copy["name"] == "October Lucky Draw (copy)"
+    assert copy["priority"] == 250
+    assert copy["status"] == "draft"
+
+    source = fake_db["gc_campaigns"].find_one({"campaign_id": "source-campaign"})
+    assert source["name"] == "October Lucky Draw", "the source campaign's own name must be untouched"
+
+
+def test_duplicate_campaign_with_no_source_name_falls_back_to_the_new_campaign_id(fake_db, client):
+    _seed_campaign(fake_db, campaign_id="source-campaign", name="", status="draft")
+    with _mock_admin():
+        resp = client.post(
+            "/api/admin/gc-campaigns/source-campaign/duplicate",
+            json={"campaign_id": "nameless-copy"},
+        )
+    assert resp.status_code == 201
+    copy = fake_db["gc_campaigns"].find_one({"campaign_id": "nameless-copy"})
+    assert copy["name"] == "nameless-copy (copy)"
+
+
 def test_deleted_campaign_id_does_not_leak_into_a_fresh_campaign_with_the_same_id(fake_db, client):
     """Regression guard for the underlying risk the reuse-block exists for:
     even if the id were allowed to be reused, a stale registration row under

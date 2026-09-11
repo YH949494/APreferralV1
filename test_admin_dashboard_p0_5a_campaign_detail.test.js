@@ -76,9 +76,12 @@ const PURE_SRC = slice(
   "  var GC_TYPE_LABELS = {",
   "\n  // ---- Composer + orchestration (DOM-touching)"
 );
+// P0.15 — gcComputeShareState now calls gcCampaignIdIsLinkSafe, defined in
+// an earlier block than the GC_TYPE_LABELS marker PURE_SRC starts from.
+const SHARE_SAFE_ID_SRC = slice(JS, "  // ---------- Share-safe campaign_id budget (P0.15) ----------", "\n  // ---------- Campaign ID slug generation (P0.3)");
 
 function loadPure() {
-  return runInSandbox(PURE_SRC + "\nthis.__x = { computeSetupChecklist, gcChecklistProgress, " +
+  return runInSandbox(SHARE_SAFE_ID_SRC + "\n" + PURE_SRC + "\nthis.__x = { computeSetupChecklist, gcChecklistProgress, " +
     "gcFirstIncompleteRequiredRow, gcCanTransitionToLive, gcIsReadyToPublish, gcComputeShareState, " +
     "gcCampaignDetailChecklistHtml, gcCampaignDetailContinueHtml, gcCampaignDetailShareHtml, " +
     "gcCampaignDetailAdvancedHtml, gcCampaignDetailTechnicalHtml };", { esc, ccUtcToKlDisplay }).__x;

@@ -76,6 +76,10 @@ async function flush(n) {
 // already rely on (see those files' own comments for why each boundary is
 // where it is).
 // ---------------------------------------------------------------------
+// P0.15 — gcComputeShareState (inside PURE_SRC/DETAIL_SRC below) now calls
+// gcCampaignIdIsLinkSafe, which lives in an earlier block than the
+// GC_TYPE_LABELS marker every slice here starts from.
+const SHARE_SAFE_ID_SRC = slice(JS, "  // ---------- Share-safe campaign_id budget (P0.15) ----------", "\n  // ---------- Campaign ID slug generation (P0.3)");
 const PURE_SRC = slice(JS, "  var GC_TYPE_LABELS = {", "\n  // ---- Composer + orchestration (DOM-touching)");
 // PURE_SRC + the small gap that holds gcCampaignDetailHtml itself (never
 // re-implemented as a stub here — this suite wants the REAL composer, so the
@@ -106,7 +110,7 @@ function extractFunctionSource(source, name) {
 const MISSION_ACTIONS_SRC = extractFunctionSource(JS, "gcMissionActionsHtml");
 
 function loadPure() {
-  return runInSandbox(MISSION_ACTIONS_SRC + "\n" + PURE_SRC + "\nthis.__x = { " +
+  return runInSandbox(SHARE_SAFE_ID_SRC + "\n" + MISSION_ACTIONS_SRC + "\n" + PURE_SRC + "\nthis.__x = { " +
     "gcIsMissionCampaign, gcEffectiveDisplayState, gcDisplayPill, gcMissionListSummary, " +
     "gcMissionLifecycleBannerHtml, gcListActions, gcGroupCampaigns, gcCampaignRowHtml, " +
     "gcOverflowMenuHtml, computeSetupChecklist, gcCampaignDetailContinueHtml, " +
@@ -124,7 +128,7 @@ const M = loadPure();
 function plain(v) { return JSON.parse(JSON.stringify(v)); }
 
 function loadDetail() {
-  return runInSandbox(DETAIL_SRC + "\nthis.__x = { gcCampaignDetailHtml, computeSetupChecklist };",
+  return runInSandbox(SHARE_SAFE_ID_SRC + "\n" + DETAIL_SRC + "\nthis.__x = { gcCampaignDetailHtml, computeSetupChecklist };",
     { esc, ccUtcToKlDisplay, gcPill }).__x;
 }
 const D = loadDetail();
@@ -675,7 +679,7 @@ function makeMissionHost(routes, extra) {
     const handler = routes[method + " " + pathname];
     return handler ? Promise.resolve(handler) : Promise.reject(new Error("no route for " + method + " " + pathname));
   }
-  return Object.assign({
+  const host = Object.assign({
     $: () => undefined,
     esc: (v) => String(v == null ? "" : v),
     api: (p) => respond("GET", p),
@@ -685,7 +689,19 @@ function makeMissionHost(routes, extra) {
     toast: () => {},
     confirm: () => true,
     copy: () => {},
+    // Minimal stand-in for admin-dashboard.js's gcRunAction (P0.15) — just
+    // enough of its {ok,status,d} + invalidateCache-default-true + onSuccess
+    // contract for these tests to observe mission-admin.js's own wiring into
+    // host.runAction, not a re-implementation of gcRunAction's full behavior
+    // (confirm/in-flight/button-disable are covered against the real
+    // gcRunAction by test_admin_dashboard_p0_8_action_hardening.test.js).
+    runAction: (opts) => Promise.resolve().then(opts.run).then((res) => {
+      if (!res || !res.ok || !res.d || res.d.status !== "ok") return;
+      if (opts.invalidateCache !== false && host.invalidateCampaignsCache) host.invalidateCampaignsCache();
+      if (opts.onSuccess) opts.onSuccess(res.d);
+    }),
   }, extra || {}, { __calls: calls });
+  return host;
 }
 
 async function flushMission(n) {
@@ -699,7 +715,7 @@ async function flushMission(n) {
     const endpointAction = action === "end_rewards" ? "end-rewards" : action;
     const host = makeMissionHost(
       {
-        ["POST /api/admin/mission-pool/m1/" + endpointAction]: { status: "ok", count_affected: 1 },
+        ["POSTJ /api/admin/mission-pool/m1/" + endpointAction]: { ok: true, status: 200, d: { status: "ok", count_affected: 1 } },
         "GET /api/admin/gc-campaigns/m1": { status: "ok", campaign: { campaign_id: "m1", type: "mission_pool", status: "live" } },
         "GET /api/admin/mission-pool/m1/edit-state": { status: "ok", reward: { sufficient: true } },
         "GET /api/admin/mission-pool/m1/summary": { status: "ok", grains: {} },
@@ -718,7 +734,7 @@ test("mission-admin.js: a FAILED action never invalidates the cache", async () =
   let invalidated = 0;
   const host = makeMissionHost(
     {
-      "POST /api/admin/mission-pool/m1/close": { status: "error", code: "already_closed" },
+      "POSTJ /api/admin/mission-pool/m1/close": { ok: false, status: 409, d: { status: "error", code: "already_closed" } },
       "GET /api/admin/gc-campaigns/m1": { status: "ok", campaign: { campaign_id: "m1", type: "mission_pool", status: "live" } },
       "GET /api/admin/mission-pool/m1/edit-state": { status: "ok", reward: { sufficient: true } },
       "GET /api/admin/mission-pool/m1/summary": { status: "ok", grains: {} },
@@ -734,7 +750,7 @@ test("mission-admin.js: a FAILED action never invalidates the cache", async () =
 test("mission-admin.js: postAction never throws when host provides no invalidateCampaignsCache (back-compat for existing hosts/tests)", async () => {
   const mod = freshMissionModule();
   const host = makeMissionHost({
-    "POST /api/admin/mission-pool/m1/close": { status: "ok" },
+    "POSTJ /api/admin/mission-pool/m1/close": { ok: true, status: 200, d: { status: "ok" } },
     "GET /api/admin/gc-campaigns/m1": { status: "ok", campaign: { campaign_id: "m1", type: "mission_pool", status: "live" } },
     "GET /api/admin/mission-pool/m1/edit-state": { status: "ok", reward: { sufficient: true } },
     "GET /api/admin/mission-pool/m1/summary": { status: "ok", grains: {} },

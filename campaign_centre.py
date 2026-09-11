@@ -469,6 +469,47 @@ def _serialize(doc: dict) -> dict:
     return out
 
 
+# P0.15 — mirrors mission_pool_ux's mission_link_unavailable_reason pattern
+# so Campaign Detail can tell "bot username not configured" apart from
+# "campaign_id too long/unsafe for the 64-char Telegram start-param budget"
+# instead of always blaming the bot username for both. Reused by both
+# list_campaigns and get_campaign_route so a single-campaign fetch never
+# disagrees with the list about why a share link is unavailable.
+def _registration_share_fields(doc: dict) -> dict:
+    if not (doc.get("registration") or {}).get("enabled"):
+        return {}
+    import campaign_registration
+
+    link = campaign_registration.campaign_deep_link(doc.get("campaign_id", ""))
+    if link:
+        return {"registration_deep_link": link}
+    reason = ("bot_username_not_configured" if not campaign_registration.bot_username()
+              else "campaign_id_not_link_safe")
+    return {"registration_deep_link": None, "registration_deep_link_unavailable_reason": reason}
+
+
+# Surfaces the existing Mission deep link (mission_pool_ux.mission_deep_link,
+# already used by the dedicated Mission Admin surface) on the generic
+# Campaign Centre payload too, so Campaign Detail's Share block never has to
+# claim a Mission campaign "doesn't have a shareable link" when one already
+# exists — reuses the one place that link is built, never a second
+# implementation of the mission_<id> start-param rule.
+def _mission_share_fields(doc: dict) -> dict:
+    import mission_pool
+
+    if not mission_pool.is_mission_pool(doc):
+        return {}
+    import mission_pool_ux
+
+    campaign_id = doc.get("campaign_id", "")
+    link = mission_pool_ux.mission_deep_link(campaign_id)
+    if link:
+        return {"mission_link": link}
+    reason = ("bot_username_not_configured" if not mission_pool_ux.bot_username()
+              else "campaign_id_not_link_safe")
+    return {"mission_link": None, "mission_link_unavailable_reason": reason}
+
+
 # ---------------------------------------------------------------------------
 # Admin CRUD
 # ---------------------------------------------------------------------------
@@ -507,8 +548,6 @@ def list_campaigns():
     mission_ids = [d["campaign_id"] for d in docs if mission_pool.is_mission_pool(d)]
     active_reward_counts = mission_pool.active_reward_counts(mission_ids) if mission_ids else {}
 
-    import campaign_registration
-
     out = []
     for d in docs:
         item = _serialize(d)
@@ -516,8 +555,8 @@ def list_campaigns():
         item["effective_visibility"] = visibility_explanation(d, provider, now)
         if mission_pool.is_mission_pool(d):
             item["mission_active_rewards"] = active_reward_counts.get(d["campaign_id"], 0)
-        if (d.get("registration") or {}).get("enabled"):
-            item["registration_deep_link"] = campaign_registration.campaign_deep_link(d["campaign_id"])
+        item.update(_registration_share_fields(d))
+        item.update(_mission_share_fields(d))
         out.append(item)
     return jsonify({"status": "ok", "campaigns": out})
 
@@ -586,10 +625,8 @@ def get_campaign_route(campaign_id: str):
     # Mirrors list_campaigns' identical computation below — kept in sync so a
     # single-campaign fetch (e.g. the Campaign Detail admin page) never has to
     # fall back to the list endpoint just to learn a campaign's share link.
-    if (doc.get("registration") or {}).get("enabled"):
-        import campaign_registration
-
-        out["registration_deep_link"] = campaign_registration.campaign_deep_link(doc["campaign_id"])
+    out.update(_registration_share_fields(doc))
+    out.update(_mission_share_fields(doc))
     return jsonify({"status": "ok", "campaign": out})
 
 
@@ -762,8 +799,14 @@ def duplicate_campaign(campaign_id: str):
     new_doc = dict(doc)
     new_doc.pop("_id", None)
     now = datetime.now(timezone.utc)
+    # Duplicated campaigns never inherit the source's exact display name —
+    # two identically-named cards in the list is confusing, and the admin
+    # lands straight in Campaign Detail after duplicating and can rename it
+    # there. "(copy)" is sufficient; no id-derived "(copy 2)" numbering.
+    source_name = (doc.get("name") or "").strip() or new_campaign_id
     new_doc.update({
         "campaign_id": new_campaign_id,
+        "name": f"{source_name} (copy)",
         "status": "draft",
         "created_at": now,
         "updated_at": now,
