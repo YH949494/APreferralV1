@@ -383,7 +383,15 @@ test("the modal box carries role=dialog, aria-modal=true, and an aria-labelledby
   assert.equal(titleEl.textContent, "Delete campaign permanently?");
 });
 
-test("Escape (bound at document level) closes the modal even while the input/confirm button are disabled mid-request", async () => {
+// Codex review (P1): closing the modal via Escape does NOT cancel the
+// underlying DELETE request — an admin who hits Escape mid-request would
+// otherwise see it as "I backed out" while the campaign still gets deleted
+// (or a failure gets written into a modal that's no longer on screen). So
+// Escape must be a safe no-op while the request is in flight, bound at
+// document level only so it can reliably resume working the moment the
+// request settles (the input/button being disabled is exactly the in-flight
+// window, so an input-only listener can't do this at all).
+test("Escape is a no-op while the DELETE request is in flight (never silently 'cancels' an irreversible request)", async () => {
   const { context, document } = makeContext();
   // Never resolves within this test — simulates a still-in-flight DELETE.
   let resolveFetch;
@@ -404,9 +412,40 @@ test("Escape (bound at document level) closes the modal even while the input/con
   assert.equal(confirmBtn.disabled, true, "confirm button must be disabled while the request is in flight");
 
   document._trigger("keydown", { key: "Escape" });
-  assert.equal(overlay.isAttached(), false, "Escape must still close the modal while its own controls are disabled");
+  assert.equal(overlay.isAttached(), true, "Escape must not close the modal while its own request is still in flight");
 
   resolveFetch({ status: 200, ok: true, json: () => Promise.resolve({ status: "ok" }) });
+  await flush();
+  assert.equal(overlay.isAttached(), false, "the modal still closes on its own once the request actually succeeds");
+});
+
+test("Escape closes the modal normally before any request has started (idle state)", () => {
+  const { context, document } = makeContext();
+  context.openGcDeleteModal("summer-lucky-draw-2026", "Summer Lucky Draw");
+  const overlay = document.body.children[document.body.children.length - 1];
+  document._trigger("keydown", { key: "Escape" });
+  assert.equal(overlay.isAttached(), false, "Escape must still close an idle (not in-flight) modal");
+});
+
+test("Escape works again immediately after a failed request re-enables the modal's controls", async () => {
+  const { context, document, fetchImpl } = makeContext();
+  fetchImpl.push(500, { status: "error", code: "internal_error" });
+
+  context.openGcDeleteModal("summer-lucky-draw-2026", "Summer Lucky Draw");
+  const overlay = document.body.children[document.body.children.length - 1];
+  const input = findInput(overlay);
+  const confirmBtn = findByText(overlay, "Delete permanently");
+
+  input.value = "Summer Lucky Draw";
+  input._trigger("input");
+  confirmBtn._trigger("click");
+  await flush();
+
+  assert.equal(overlay.isAttached(), true, "still open after the failed request");
+  assert.equal(confirmBtn.disabled, false, "re-enabled after failure");
+
+  document._trigger("keydown", { key: "Escape" });
+  assert.equal(overlay.isAttached(), false, "Escape must work again once the request has settled");
 });
 
 test("closing the modal (Cancel) unregisters its document-level Escape listener — no leak across repeated opens", () => {

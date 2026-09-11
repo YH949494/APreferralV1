@@ -107,16 +107,38 @@ test("loadGcCampaigns: reads total/truncated off both the unfiltered-cache and t
 test("loadGcCampaigns: shows the notice only when truncated, and hides+clears it otherwise", () => {
   const src = extractFunctionSource(JS, "loadGcCampaigns");
   assert.match(src, /gcTruncationNoticeText\(ctx\.items\.length,\s*ctx\.total\)/);
-  assert.match(src, /noticeEl\.classList\.remove\("hidden"\)/);
-  assert.match(src, /noticeEl\.classList\.add\("hidden"\)/);
+  assert.match(src, /gcTruncationNoticeEl\.classList\.remove\("hidden"\)/);
 });
 
-test("loadGcCampaigns: the empty-state branch also hides the notice (never a stale truncation banner over an empty list)", () => {
+// Codex review (P2): a truncated notice left over from a prior load must
+// never sit above a *different* filter's results while the next load is
+// still in flight, or above an error message if that load then fails — so
+// the notice is hidden unconditionally at the very start of every
+// loadGcCampaigns call (before any async work), not only re-derived on a
+// successful response.
+test("loadGcCampaigns: hides the truncation notice unconditionally at the start of every load, before any async work", () => {
+  const src = extractFunctionSource(JS, "loadGcCampaigns");
+  const loadingIdx = src.indexOf('statePanel("gc-campaigns-body", "loading"');
+  const firstAsyncIdx = src.indexOf("loadGcProviderSelect(force)");
+  assert.ok(loadingIdx !== -1 && firstAsyncIdx !== -1 && loadingIdx < firstAsyncIdx);
+  const setup = src.slice(loadingIdx, firstAsyncIdx);
+  assert.match(setup, /gcTruncationNoticeEl\.classList\.add\("hidden"\)/);
+});
+
+test("loadGcCampaigns: also hides the notice in the failure (catch) path, never leaving a stale truncation count over an error message", () => {
+  const src = extractFunctionSource(JS, "loadGcCampaigns");
+  const catchStart = src.indexOf(".catch(function ()");
+  assert.notEqual(catchStart, -1, "catch branch not found");
+  const catchBranch = src.slice(catchStart);
+  assert.match(catchBranch, /gcTruncationNoticeEl\.classList\.add\("hidden"\)/);
+});
+
+test("loadGcCampaigns: the empty-state branch never re-shows the notice (relies on the top-of-load hide, never a stale truncation banner over an empty list)", () => {
   const src = extractFunctionSource(JS, "loadGcCampaigns");
   const emptyBranchStart = src.indexOf("if (!ctx.items.length)");
-  const emptyBranchEnd = src.indexOf("}", src.indexOf("emptyState(gcEmptyStateForFilter", emptyBranchStart));
+  const emptyBranchEnd = src.indexOf("return;", emptyBranchStart);
   const branch = src.slice(emptyBranchStart, emptyBranchEnd);
-  assert.match(branch, /noticeEl\.classList\.add\("hidden"\)/);
+  assert.doesNotMatch(branch, /classList\.remove\("hidden"\)/);
 });
 
 test("fetchGcCampaignsList stores total/truncated on gcOptionsCache from the server response, defaulting total to items.length when absent", () => {

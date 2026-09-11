@@ -5225,12 +5225,19 @@
       overlay.remove();
       document.removeEventListener("keydown", onKeydown);
     }
-    // Bound at document level, not the input: the input (and the Delete
-    // button) are disabled for the duration of the DELETE request, and a
-    // disabled form control can't hold focus or receive its own keydown
-    // events — an input-only Escape listener would silently stop working
-    // for exactly the window an admin is most likely to want to bail out.
-    function onKeydown(e) { if (e.key === "Escape") close(); }
+    // Bound at document level, not the input: a disabled form control can't
+    // hold focus or receive its own keydown events, so an input-only Escape
+    // listener would silently stop working the moment the request starts
+    // (input.disabled = true below). But Escape must never actually CLOSE
+    // the modal while that DELETE request is still in flight — the request
+    // itself isn't cancelled by closing, so an admin who hits Escape mid-
+    // request would see it as "I backed out" while the campaign still gets
+    // deleted (or a failure gets written into a modal nobody can see
+    // anymore). While in flight, Escape is a safe no-op; it starts working
+    // again the instant the request settles (success closes the modal on
+    // its own; failure re-enables the input/button below).
+    function requestInFlight() { return confirmBtn.dataset.loading === "1"; }
+    function onKeydown(e) { if (e.key === "Escape" && !requestInFlight()) close(); }
     document.addEventListener("keydown", onKeydown);
     cancelBtn.addEventListener("click", close);
     overlay.addEventListener("click", function (e) { if (e.target === overlay) close(); });
@@ -5453,6 +5460,12 @@
   var gcCampaignsLoadToken = 0;
   function loadGcCampaigns(force) {
     statePanel("gc-campaigns-body", "loading", "Loading campaigns…");
+    // Hidden for the duration of this load, not just re-derived on success:
+    // a truncated notice left over from a prior (e.g. unfiltered) load must
+    // never sit above a different filter's results while they're loading,
+    // or above an error message if this load fails below (Codex review).
+    var gcTruncationNoticeEl = $("#gc-truncation-notice");
+    if (gcTruncationNoticeEl) gcTruncationNoticeEl.classList.add("hidden");
     // loadGcProviderSelect(force) already busts+refetches the providers
     // cache when force is set; asking fetchGcProviders() to force it again
     // right below would discard that same in-flight request and fire a
@@ -5496,20 +5509,13 @@
       // this now-stale response overwrite it (Codex review: out-of-order
       // filter clicks on a slow connection).
       if (token !== gcCampaignsLoadToken) return;
-      var noticeEl = $("#gc-truncation-notice");
       if (!ctx.items.length) {
         $("#gc-campaigns-body").innerHTML = emptyState(gcEmptyStateForFilter(statusFilter));
-        if (noticeEl) noticeEl.classList.add("hidden");
-        return;
+        return; // notice stays hidden — already cleared at the top of this load
       }
-      if (noticeEl) {
-        if (ctx.truncated) {
-          noticeEl.textContent = gcTruncationNoticeText(ctx.items.length, ctx.total);
-          noticeEl.classList.remove("hidden");
-        } else {
-          noticeEl.classList.add("hidden");
-          noticeEl.textContent = "";
-        }
+      if (gcTruncationNoticeEl && ctx.truncated) {
+        gcTruncationNoticeEl.textContent = gcTruncationNoticeText(ctx.items.length, ctx.total);
+        gcTruncationNoticeEl.classList.remove("hidden");
       }
       var groups = gcGroupCampaigns(ctx.items, statusFilter);
       $("#gc-campaigns-body").innerHTML = groups.map(function (g) {
@@ -5523,6 +5529,7 @@
       }).join("");
     }).catch(function () {
       if (token !== gcCampaignsLoadToken) return;
+      if (gcTruncationNoticeEl) gcTruncationNoticeEl.classList.add("hidden");
       statePanel("gc-campaigns-body", "error", "Couldn't load campaigns. Try again.");
     });
   }
