@@ -3119,6 +3119,28 @@
       return data.campaigns || [];
     }
 
+    // Existing Drops is a current/actionable-campaigns view: finished
+    // Mission Pool campaigns stay fully intact in Campaign Centre, audit
+    // logs, and the admin API (adm_fetchMissionCampaigns still fetches and
+    // returns them) — they're only filtered out of *this table's render*.
+    // Backends have used inconsistent status vocabularies over time
+    // (state vs. campaign_status, "active" vs. "live", "closed" vs.
+    // "ended", etc.), so normalize before matching against the allow-list.
+    const ADM_MISSION_VISIBLE_STATUSES = new Set([
+      "upcoming", "scheduled",
+      "live", "active",
+      "paused",
+    ]);
+
+    function adm_normalizeMissionStatus(raw) {
+      return String(raw || "").trim().toLowerCase();
+    }
+
+    function adm_missionVisibleInExistingDrops(c) {
+      const status = adm_normalizeMissionStatus(c.state || c.campaign_status);
+      return ADM_MISSION_VISIBLE_STATUSES.has(status);
+    }
+
     function adm_missionRowHtml(c) {
       const id = c.campaign_id || "";
       const stats = `${c.submissions || 0} subs / ${c.winners || 0} win`;
@@ -3217,11 +3239,17 @@
       }
 
       if (missionsResult.status === "fulfilled") {
-        missionsResult.value.forEach((c) => {
-          const tr = document.createElement("tr");
-          tr.innerHTML = adm_missionRowHtml(c);
-          tbody.appendChild(tr);
-        });
+        // Display filtering only — completed/ended/closed/archived/
+        // cancelled/deleted missions are still fetched above (available to
+        // Campaign Centre, audit logs, and this endpoint's callers) but are
+        // hidden from this operational "current campaigns" table.
+        missionsResult.value
+          .filter(adm_missionVisibleInExistingDrops)
+          .forEach((c) => {
+            const tr = document.createElement("tr");
+            tr.innerHTML = adm_missionRowHtml(c);
+            tbody.appendChild(tr);
+          });
       } else {
         console.error("[adm_list] mission-pool/campaigns failed:", missionsResult.reason.message);
         const tr = document.createElement("tr");
