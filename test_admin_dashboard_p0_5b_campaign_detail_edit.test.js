@@ -212,6 +212,25 @@ test("cdDestinationProviderOptionsHtml shows an inactive provider's state in its
   assert.match(html, /Old Site — external_url \(inactive\)/);
 });
 
+// Codex review finding: /api/admin/providers caps at 200 rows, so a
+// campaign's linked provider can be older than the newest 200 and absent
+// from the fetched list. Without a fallback option the <select> silently
+// defaults to "No provider", and saving path/ready without touching the
+// dropdown would unlink a still-valid provider.
+test("cdDestinationProviderOptionsHtml keeps a linked-but-unlisted provider selected (never silently defaults to 'No provider')", () => {
+  const html = P.cdDestinationProviderOptionsHtml([{ provider_id: "some-other-provider", name: "Other", active: true }], "OLD-PROVIDER-NOT-IN-TOP-200");
+  assert.match(html, /<option value="OLD-PROVIDER-NOT-IN-TOP-200" selected>/);
+  // Never shown as visible label text — only as the option's value.
+  const visibleTextMatch = html.match(/<option[^>]*value="OLD-PROVIDER-NOT-IN-TOP-200"[^>]*>([^<]*)</);
+  assert.doesNotMatch(visibleTextMatch[1], /OLD-PROVIDER-NOT-IN-TOP-200/);
+});
+
+test("cdDestinationProviderOptionsHtml adds no fallback option when the linked provider IS in the list, or none is linked", () => {
+  const providers = [{ provider_id: "p1", name: "MyWin", active: true }];
+  assert.doesNotMatch(P.cdDestinationProviderOptionsHtml(providers, "p1"), /not in the loaded list/);
+  assert.doesNotMatch(P.cdDestinationProviderOptionsHtml(providers, ""), /not in the loaded list/);
+});
+
 test("cdRegistrationEditHtml only offers the four backend-recognized required_fields keys", () => {
   const html = P.cdRegistrationEditHtml(tournamentCampaign({ registration: fullRegistrationBlock() }));
   ["full_name", "contact_number", "country_region", "delivery_address"].forEach((key) => {
@@ -553,6 +572,97 @@ test("cdOpenEdit re-renders from the cached snapshot without any network call", 
   assert.equal(sandbox.cdViewState.editingSection, "when");
   assert.equal(calls.gcCampaignDetailHtml.length, 1);
   assert.equal(calls.gcCampaignDetailHtml[0].editingSection, "when");
+});
+
+// ---------------------------------------------------------------------
+// Codex review fix #1 (P1): a slow loadCampaignDetail() response for a
+// campaign the admin has since navigated away from must never overwrite
+// cdViewState/the DOM with the wrong campaign's data — a later Save reads
+// campaign_id from state.campaignId (correct), but would write whatever
+// stale campaign's data is sitting in cdViewState/the form into it.
+// ---------------------------------------------------------------------
+test("loadCampaignDetail discards a response that resolves after the admin navigated to a different campaign", async () => {
+  const { sandbox, dom, calls, apiQueue } = loadOrchestration();
+  const campaignA = tournamentCampaign({ campaign_id: "campaign-a", name: "Campaign A" });
+  const campaignB = tournamentCampaign({ campaign_id: "campaign-b", name: "Campaign B" });
+
+  sandbox.state.campaignId = "campaign-a";
+  apiQueue.push({ status: "ok", campaign: campaignA }); // A's GET — resolves late, after B is already selected
+  sandbox.loadCampaignDetail(false);
+
+  // Before A's response arrives, the admin navigates to campaign B.
+  sandbox.state.campaignId = "campaign-b";
+  apiQueue.push({ status: "ok", campaign: campaignB });
+  sandbox.loadCampaignDetail(false);
+
+  await flush(20);
+
+  // Only B's data ever lands in cdViewState — A's late response must be
+  // discarded, not applied on top of (or after) B's.
+  assert.equal(sandbox.cdViewState.campaign.campaign_id, "campaign-b");
+  assert.equal(dom.node("#cd-body").innerHTML, "rendered:campaign-b");
+});
+
+// ---------------------------------------------------------------------
+// Codex review fix #3 (P2): a field this form displays but the admin did
+// NOT change must take the freshest server value at save time, never the
+// value merely sitting in the DOM from when the form opened — otherwise
+// saving one field (e.g. "ready") silently reverts a concurrent edit to
+// another displayed field (e.g. "provider") made by someone else in the
+// meantime.
+// ---------------------------------------------------------------------
+test("destination save preserves a concurrent edit to the provider when only 'ready' was actually changed", async () => {
+  const { sandbox, dom, calls, apiQueue } = loadOrchestration();
+  const original = tournamentCampaign({ destination: { provider_id: "p1", path: "/game", open_mode: "telegram_web_app", ready: false } });
+  sandbox.cdViewState.campaign = original;
+  sandbox.cdOpenEdit("destination"); // captures the snapshot: provider p1, ready false
+
+  // Someone else changes the provider via a different screen while this
+  // form sits open.
+  const concurrentlyEdited = tournamentCampaign({ destination: { provider_id: "p2-changed-by-someone-else", path: "/game", open_mode: "telegram_web_app", ready: false } });
+  apiQueue.push({ status: "ok", campaign: concurrentlyEdited }); // pre-PUT canonical GET sees the concurrent change
+  apiQueue.push({ status: "ok", campaign: concurrentlyEdited });
+
+  // The admin never touched the provider dropdown — it still shows what
+  // cdOpenEdit rendered (p1) — but does flip "ready".
+  dom.node("#cd-edit-dest-provider").value = "p1";
+  dom.node("#cd-edit-dest-path").value = "/game";
+  dom.node("#cd-edit-dest-ready").checked = true;
+
+  sandbox.cdSaveSection("destination", {});
+  await flush();
+
+  const body = plain(calls.apiPutJson[0].body);
+  assert.equal(body.destination.provider_id, "p2-changed-by-someone-else", "the untouched provider field must keep the concurrent edit, not this form's stale DOM value");
+  assert.equal(body.destination.ready, true, "the field the admin actually changed must still be saved");
+});
+
+test("registration save preserves a concurrent edit to required_fields when only 'enabled' was actually changed", async () => {
+  const { sandbox, dom, calls, apiQueue } = loadOrchestration();
+  const original = tournamentCampaign({ registration: fullRegistrationBlock({ enabled: false, required_fields: ["full_name", "contact_number"] }) });
+  sandbox.cdViewState.campaign = original;
+  sandbox.cdOpenEdit("registration"); // snapshot: enabled=false, fields=[full_name, contact_number]
+
+  const concurrentlyEdited = tournamentCampaign({ registration: fullRegistrationBlock({ enabled: false, required_fields: ["delivery_address"] }) });
+  apiQueue.push({ status: "ok", campaign: concurrentlyEdited });
+  apiQueue.push({ status: "ok", campaign: concurrentlyEdited });
+
+  // Admin leaves the required-fields checkboxes exactly as rendered
+  // (full_name, contact_number) and only flips "enabled".
+  sandbox.__regFields = [
+    { value: "full_name", checked: true },
+    { value: "contact_number", checked: true },
+    { value: "country_region", checked: false },
+    { value: "delivery_address", checked: false },
+  ];
+  dom.node("#cd-edit-reg-enabled").checked = true;
+
+  sandbox.cdSaveSection("registration", {});
+  await flush();
+
+  const body = plain(calls.apiPutJson[0].body);
+  assert.deepEqual(body.registration.required_fields, ["delivery_address"], "the untouched required_fields must keep the concurrent edit, not this form's stale checkboxes");
+  assert.equal(body.registration.enabled, true, "the field the admin actually changed must still be saved");
 });
 
 // ---------------------------------------------------------------------

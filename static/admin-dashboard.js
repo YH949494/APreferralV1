@@ -5924,9 +5924,24 @@
       '</div>';
   }
 
+  // /api/admin/providers caps its response at 200 rows (campaign_providers.
+  // list_providers), so a campaign's currently-linked provider can be
+  // absent from `providers` (older than the newest 200). Without a fallback
+  // option, the <select> would default to the empty "No provider" option,
+  // and saving path/ready without touching this dropdown would silently
+  // unlink a still-valid provider (Codex review finding) — so a linked-but-
+  // unlisted provider always gets its own selected option, carrying the
+  // real provider_id as its value (never as visible text, mirroring the
+  // beginner surface's normal "no provider_id shown" rule) so leaving the
+  // dropdown alone preserves the link.
   function cdDestinationProviderOptionsHtml(providers, selectedId) {
     var items = providers || [];
+    var isListed = !selectedId || items.some(function (p) { return p.provider_id === selectedId; });
+    var fallback = (selectedId && !isListed)
+      ? '<option value="' + esc(selectedId) + '" selected>Current provider (not in the loaded list — leave selected to keep it)</option>'
+      : "";
     return '<option value="">No provider (configure later)</option>' +
+      fallback +
       items.map(function (p) {
         return '<option value="' + esc(p.provider_id) + '"' + (p.provider_id === selectedId ? " selected" : "") + '>' + esc(gcProviderOptionLabel(p)) + '</option>';
       }).join("");
@@ -6111,6 +6126,14 @@
     if (!id) { statePanel("cd-body", "error", "No campaign selected."); return; }
     statePanel("cd-body", "loading", "Loading campaign…");
     api("/api/admin/gc-campaigns/" + encodeURIComponent(id)).then(function (resp) {
+      // The admin may have navigated to a different campaign (or back to
+      // the list) while this request was in flight — applying a resolved-
+      // late response for a campaign that's no longer the one on screen
+      // would silently overwrite cdViewState/the DOM with the wrong
+      // campaign's data, and a later Save would then write those stale
+      // values into whatever campaign_id is now actually selected (Codex
+      // review finding). Discard this response instead.
+      if (state.campaignId !== id) return null;
       if (!resp || resp.status !== "ok" || !resp.campaign) {
         statePanel("cd-body", "error", "Campaign not found.");
         return null;
@@ -6121,12 +6144,14 @@
         fetchGcProviders(force),
         needsPools ? fetchGcRewardPools(force) : Promise.resolve([]),
       ]).then(function (extra) {
+        if (state.campaignId !== id) return; // superseded while providers/pools were loading
         var providers = extra[0] || [];
         var pools = extra[1] || [];
         cdViewState.campaign = campaign;
         cdViewState.providers = providers;
         cdViewState.pools = pools;
         cdViewState.editingSection = null;
+        cdViewState.editingSnapshot = null;
         var bc = $("#breadcrumb");
         if (bc) bc.textContent = "🕹 Player Campaigns  /  Campaigns  /  " + (campaign.name || campaign.campaign_id);
         var titleEl = $("#view-title");
@@ -6134,6 +6159,7 @@
         $("#cd-body").innerHTML = gcCampaignDetailHtml(campaign, providers, pools, null);
       });
     }).catch(function (e) {
+      if (state.campaignId !== id) return;
       statePanel("cd-body", "error", "Failed to load campaign: " + e.message);
     });
   }
@@ -6198,6 +6224,13 @@
   function cdOpenEdit(section) {
     if (!cdViewState.campaign) return;
     cdViewState.editingSection = section || null;
+    // The exact campaign object shown when this form opened — cdViewState.
+    // campaign is only ever replaced wholesale by a fresh GET (loadCampaignDetail/
+    // cdSaveSection), never mutated in place, so holding this reference is
+    // enough to later tell "the admin actually changed this field" apart
+    // from "this field just still shows what was here when the form opened"
+    // (see cdSaveSection's per-field diff against this snapshot).
+    cdViewState.editingSnapshot = section ? cdViewState.campaign : null;
     $("#cd-body").innerHTML = gcCampaignDetailHtml(cdViewState.campaign, cdViewState.providers, cdViewState.pools, cdViewState.editingSection);
   }
 
@@ -6264,19 +6297,49 @@
       var enabled = !!(($("#cd-edit-reg-enabled") || {}).checked);
       var fields = $all(".cd-edit-reg-field").filter(function (cb) { return cb.checked; }).map(function (cb) { return cb.value; });
       if (enabled && !fields.length) draftErr = "Select at least one required registration field.";
+      // Falls back to cdViewState.campaign (never an empty object) if this
+      // section was somehow saved without going through cdOpenEdit first —
+      // an empty fallback would make every field look "unchanged from
+      // nothing" and incorrectly skip overrides the admin actually made.
+      var initialReg = ((cdViewState.editingSnapshot || cdViewState.campaign || {}).registration) || {};
+      var initialFields = (initialReg.required_fields || CD_REGISTRATION_FIELD_ORDER).slice().sort();
+      var enabledChanged = enabled !== !!initialReg.enabled;
+      var fieldsChanged = fields.slice().sort().join("|") !== initialFields.join("|");
       buildBody = function (latest) {
         var base = Object.assign({}, cdDefaultRegistrationConfig(), latest.registration || {});
-        base.enabled = enabled;
-        base.required_fields = fields.length ? fields : CD_REGISTRATION_FIELD_ORDER.slice();
+        // Only override the field(s) this admin actually changed relative
+        // to what the form showed when opened — an untouched field always
+        // takes the freshest server value, so a concurrent edit to it
+        // (e.g. via the full registration settings screen) is never
+        // silently reverted just because this admin also touched the
+        // other one (Codex review finding).
+        if (enabledChanged) base.enabled = enabled;
+        if (fieldsChanged) base.required_fields = fields.length ? fields : CD_REGISTRATION_FIELD_ORDER.slice();
         return { registration: base };
       };
     } else if (section === "destination") {
       var providerId = (($("#cd-edit-dest-provider") || {}).value || "").trim();
       var path = (($("#cd-edit-dest-path") || {}).value || "").trim();
       var ready = !!(($("#cd-edit-dest-ready") || {}).checked);
+      // Same "never an empty fallback" reasoning as initialReg above.
+      var initialDest = ((cdViewState.editingSnapshot || cdViewState.campaign || {}).destination) || {};
+      var providerChanged = providerId !== (initialDest.provider_id || "");
+      var pathChanged = path !== (initialDest.path || "");
+      var readyChanged = ready !== !!initialDest.ready;
       buildBody = function (latest) {
         var latestDest = latest.destination || {};
-        return { destination: { provider_id: providerId, open_mode: latestDest.open_mode || "telegram_web_app", path: path, ready: ready } };
+        // Same per-field-changed rule as registration above: a field this
+        // form displays but the admin didn't actually touch takes the
+        // freshest server value, never the (possibly now-stale) value that
+        // was merely sitting in the DOM from when this form opened.
+        return {
+          destination: {
+            provider_id: providerChanged ? providerId : (latestDest.provider_id || ""),
+            open_mode: latestDest.open_mode || "telegram_web_app",
+            path: pathChanged ? path : (latestDest.path || ""),
+            ready: readyChanged ? ready : !!latestDest.ready,
+          },
+        };
       };
     } else {
       return;
