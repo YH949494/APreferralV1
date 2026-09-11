@@ -340,8 +340,17 @@ test("Mission Pool actions (Open Mission / Close Mission / End Rewards) are isol
 //    itself is untouched by P0.4 — see test_campaign_centre_delete_ui).
 // ---------------------------------------------------------------------
 test("Delete still routes through the typed-confirmation modal, not a plain confirm()", () => {
+  // P0.16 §B — the handler now branches on whether Delete was triggered
+  // from Campaign Detail's own overflow (to navigate away afterward
+  // instead of the default in-place list refresh), but it must still be
+  // openGcDeleteModal doing the confirming, never window.confirm/a bare
+  // apiDelete call.
   const bindSrc = extractFunctionSource(JS, "bindGcCampaigns");
-  assert.match(bindSrc, /action === "delete"\) openGcDeleteModal\(id, btn\.dataset\.name\)/);
+  const deleteStart = bindSrc.indexOf('action === "delete"');
+  assert.notEqual(deleteStart, -1, "delete branch not found");
+  const deleteBranch = bindSrc.slice(deleteStart, bindSrc.indexOf("\n    });", deleteStart));
+  assert.match(deleteBranch, /openGcDeleteModal\(id, btn\.dataset\.name/);
+  assert.doesNotMatch(deleteBranch, /window\.confirm|[^.]\bconfirm\(/);
 });
 
 // ---------------------------------------------------------------------

@@ -537,6 +537,7 @@ def list_campaigns():
     if provider_filter:
         query["destination.provider_id"] = provider_filter
 
+    total = database.db["gc_campaigns"].count_documents(query)
     docs = list(database.db["gc_campaigns"].find(query, sort=[("priority", -1), ("created_at", -1)], limit=200))
     now = datetime.now(timezone.utc)
 
@@ -548,17 +549,34 @@ def list_campaigns():
     mission_ids = [d["campaign_id"] for d in docs if mission_pool.is_mission_pool(d)]
     active_reward_counts = mission_pool.active_reward_counts(mission_ids) if mission_ids else {}
 
+    # One bulk provider lookup for every row on the page, not one per row —
+    # same reasoning as the Mission Pool aggregate above.
+    provider_ids = {
+        (d.get("destination") or {}).get("provider_id")
+        for d in docs
+        if (d.get("destination") or {}).get("provider_id")
+    }
+    providers_by_id = {
+        p["provider_id"]: p
+        for p in database.db["gc_providers"].find({"provider_id": {"$in": list(provider_ids)}})
+    } if provider_ids else {}
+
     out = []
     for d in docs:
         item = _serialize(d)
-        provider = get_provider((d.get("destination") or {}).get("provider_id") or "")
+        provider = providers_by_id.get((d.get("destination") or {}).get("provider_id") or "")
         item["effective_visibility"] = visibility_explanation(d, provider, now)
         if mission_pool.is_mission_pool(d):
             item["mission_active_rewards"] = active_reward_counts.get(d["campaign_id"], 0)
         item.update(_registration_share_fields(d))
         item.update(_mission_share_fields(d))
         out.append(item)
-    return jsonify({"status": "ok", "campaigns": out})
+    return jsonify({
+        "status": "ok",
+        "campaigns": out,
+        "total": total,
+        "truncated": total > len(docs),
+    })
 
 
 @campaign_centre_bp.post("/api/admin/gc-campaigns")
@@ -627,6 +645,16 @@ def get_campaign_route(campaign_id: str):
     # fall back to the list endpoint just to learn a campaign's share link.
     out.update(_registration_share_fields(doc))
     out.update(_mission_share_fields(doc))
+    # P0.16 — mirrors list_campaigns' mission_active_rewards computation
+    # (same mission_pool.active_reward_counts helper, just called for one
+    # campaign_id) so Campaign Detail's action menu can offer/withhold "End
+    # Rewards" using the exact same legality gcListActions/gcMissionActionsHtml
+    # already apply on the Campaigns list — never a looser detail-only rule.
+    import mission_pool
+
+    if mission_pool.is_mission_pool(doc):
+        counts = mission_pool.active_reward_counts([campaign_id])
+        out["mission_active_rewards"] = counts.get(campaign_id, 0)
     return jsonify({"status": "ok", "campaign": out})
 
 

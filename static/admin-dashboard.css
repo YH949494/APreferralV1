@@ -221,6 +221,12 @@ html, body {
    every other segmented control on the page keeps its current, unclipped-
    by-design behavior) and horizontal-scroll rather than wrap, to preserve
    the existing single-row segmented-pill look instead of a two-row block. */
+/* P0.16 §F — the mask-image fade on the trailing edge signals "more
+   filters this way" without changing the horizontal-scroll interaction
+   itself or adding visible arrow controls. mask-image only affects
+   rendering (never hit-testing), so it can't interfere with scrolling/
+   clicking the real buttons underneath; -webkit- prefix covers Safari,
+   which lacks unprefixed mask-image support. */
 #gc-status-filter {
   display: flex;
   flex-wrap: nowrap;
@@ -228,6 +234,8 @@ html, body {
   overflow-x: auto;
   overflow-y: hidden;
   -webkit-overflow-scrolling: touch;
+  -webkit-mask-image: linear-gradient(to right, black calc(100% - 28px), transparent 100%);
+  mask-image: linear-gradient(to right, black calc(100% - 28px), transparent 100%);
 }
 #gc-status-filter button { flex: 0 0 auto; }
 
@@ -463,10 +471,19 @@ pre.payload { background: var(--bg); border: 1px solid var(--border); border-rad
 .pill.draft { background: rgba(139,147,167,0.18); color: var(--muted); }
 .pill.archived { background: rgba(139,147,167,0.1); color: var(--muted); opacity:0.6; }
 .campaign-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; margin-bottom: 10px; }
-.campaign-card-header { display:flex;justify-content:space-between;align-items:center;margin-bottom:6px; }
-.campaign-card-title { font-size:14px;font-weight:600;color:var(--text); }
+/* P0.16 §F — gap (not just justify-content:space-between) keeps the pill off
+   the title text once the title wraps to two lines on a narrow card; the
+   title itself needs min-width:0 (a flex item's implicit min-width is its
+   unbroken content width otherwise, which defeats overflow-wrap) plus
+   overflow-wrap so a long campaign name wraps instead of pushing/clipping
+   the status pill off-card. */
+.campaign-card-header { display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;gap:8px; }
+.campaign-card-title { font-size:14px;font-weight:600;color:var(--text);min-width:0;overflow-wrap:anywhere; }
 .campaign-card-meta { font-size:11px;color:var(--muted);display:flex;gap:12px;flex-wrap:wrap;margin-top:4px; }
-.campaign-card-actions { display:flex;gap:8px;margin-top:10px;align-items:center; }
+/* flex-wrap so Manage + Process Mission + ••• don't get squeezed into an
+   unreadable single row on a narrow card — they wrap onto a second line
+   instead. */
+.campaign-card-actions { display:flex;gap:8px;margin-top:10px;align-items:center;flex-wrap:wrap; }
 .campaign-card[data-gc-row-id] { cursor:pointer; }
 .gc-row-menu-wrap { position:relative;margin-left:auto; }
 .gc-kebab-btn { background:transparent;border:1px solid var(--border);border-radius:6px;width:34px;height:34px;cursor:pointer;font-size:16px;line-height:1;color:var(--muted); }
@@ -476,6 +493,13 @@ pre.payload { background: var(--bg); border: 1px solid var(--border); border-rad
 .gc-row-menu button:hover { background:var(--panel-2); }
 .gc-row-menu button.danger { color:var(--bad); }
 .gc-row-menu .btn { min-height:auto;border:none;background:none;box-sizing:border-box; }
+
+/* P0.16 §F — Campaign Detail's Advanced Settings / Technical Details rows
+   (campaign_id, provider_id, URLs). min-width:0 is needed alongside
+   overflow-wrap because a flex item's default min-width is its unbroken
+   content width, which silently defeats overflow-wrap on its own. */
+.gc-kv-row { display:flex;justify-content:space-between;gap:12px;padding:4px 0;border-bottom:1px solid var(--border); }
+.gc-kv-value { min-width:0;overflow-wrap:anywhere;word-break:break-word;text-align:right; }
 
 /* ---- Dashboard V2: toast framework ---- */
 .toast-stack {
@@ -504,14 +528,28 @@ pre.payload { background: var(--bg); border: 1px solid var(--border); border-rad
 @keyframes toast-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes toast-out { from { opacity: 1; } to { opacity: 0; transform: translateY(-4px); } }
 
-/* ---- Dashboard V2: confirm modal (typed confirmation for destructive actions) ---- */
+/* ---- Dashboard V2: confirm modal (typed confirmation for destructive actions) ----
+   P0.16 §E — align-items:flex-start + margin:auto on .modal-box (rather than
+   align-items:center on the overlay) is the standard scrollable-centered-
+   modal pattern: it centers the box when it fits the viewport, but lets the
+   overlay scroll instead of clipping/trapping content once the box is
+   taller than the viewport (e.g. a long modal on a short mobile screen). */
 .modal-overlay {
   position: fixed; inset: 0; background: rgba(0,0,0,0.55);
-  display: flex; align-items: center; justify-content: center; z-index: 10000;
+  display: flex; align-items: flex-start; justify-content: center;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 24px 16px;
+  padding: max(24px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(24px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+  z-index: 10000;
 }
 .modal-box {
   background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
   padding: 20px; max-width: 420px; width: 90%; box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+  margin: auto 0;
+  max-height: calc(100vh - 48px);
+  max-height: calc(100dvh - 48px);
+  overflow-y: auto;
 }
 .modal-box h3 { margin: 0 0 10px; font-size: 15px; }
 .modal-box p { margin: 0 0 14px; color: var(--muted); font-size: 13px; }

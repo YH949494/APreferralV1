@@ -160,14 +160,23 @@
     if (btn.dataset.originalText !== undefined) btn.textContent = btn.dataset.originalText;
   }
 
+  // Unique id generator for aria-labelledby targets across the several
+  // hand-built modals below — each modal only ever has one live instance at
+  // a time, but a fresh id per open avoids any risk of colliding with a
+  // still-fading-out previous one.
+  var gcModalIdSeq = 0;
+  function gcNextModalId(prefix) { return prefix + "-" + (++gcModalIdSeq); }
+
   // ---------- Typed-confirmation modal for destructive actions ----------
   function confirmTyped(word, title, message) {
     return new Promise(function (resolve) {
+      var trigger = document.activeElement;
+      var titleId = gcNextModalId("confirm-typed-title");
       var overlay = document.createElement("div");
       overlay.className = "modal-overlay";
       overlay.innerHTML =
-        '<div class="modal-box">' +
-        '<h3>' + esc(title) + '</h3>' +
+        '<div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="' + titleId + '">' +
+        '<h3 id="' + titleId + '">' + esc(title) + '</h3>' +
         '<p>' + esc(message) + ' Type <strong>' + esc(word) + '</strong> to confirm.</p>' +
         '<input class="filter-input" id="confirm-typed-input" placeholder="Type ' + esc(word) + '" autocomplete="off" />' +
         '<div class="modal-actions">' +
@@ -177,7 +186,17 @@
       document.body.appendChild(overlay);
       var input = overlay.querySelector("#confirm-typed-input");
       input.focus();
-      function done(result) { overlay.remove(); resolve(result); }
+      function done(result) {
+        overlay.remove();
+        document.removeEventListener("keydown", onKeydown);
+        if (trigger && trigger.focus) { try { trigger.focus(); } catch (e) {} }
+        resolve(result);
+      }
+      // Bound at document level (not just the input) so Escape still works
+      // no matter which element inside the modal currently has focus —
+      // mirrors the Delete modal's own document-level Escape binding below.
+      function onKeydown(e) { if (e.key === "Escape") done(false); }
+      document.addEventListener("keydown", onKeydown);
       overlay.querySelector("#confirm-typed-cancel").addEventListener("click", function () { done(false); });
       overlay.querySelector("#confirm-typed-ok").addEventListener("click", function () {
         done((input.value || "").trim() === word);
@@ -185,7 +204,6 @@
       overlay.addEventListener("click", function (e) { if (e.target === overlay) done(false); });
       input.addEventListener("keydown", function (e) {
         if (e.key === "Enter") done((input.value || "").trim() === word);
-        if (e.key === "Escape") done(false);
       });
     });
   }
@@ -193,21 +211,36 @@
   // ---------- Plain Yes/No confirmation modal (non-typed) ----------
   function confirmSimple(title, message) {
     return new Promise(function (resolve) {
+      // P0.16 §G — restores focus to whatever triggered this modal (a menu
+      // item, a button) once it closes, so keyboard users don't lose their
+      // place; Cancel (never the destructive Confirm) gets initial focus so
+      // a reflex Enter/Space never accidentally confirms.
+      var trigger = document.activeElement;
+      var titleId = gcNextModalId("confirm-simple-title");
       var overlay = document.createElement("div");
       overlay.className = "modal-overlay";
       overlay.innerHTML =
-        '<div class="modal-box">' +
-        '<h3>' + esc(title) + '</h3>' +
+        '<div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="' + titleId + '">' +
+        '<h3 id="' + titleId + '">' + esc(title) + '</h3>' +
         '<p>' + esc(message) + '</p>' +
         '<div class="modal-actions">' +
         '<button class="btn" id="confirm-simple-cancel">Cancel</button>' +
         '<button class="btn primary" id="confirm-simple-ok">Confirm</button>' +
         '</div></div>';
       document.body.appendChild(overlay);
-      function done(result) { overlay.remove(); resolve(result); }
+      function done(result) {
+        overlay.remove();
+        document.removeEventListener("keydown", onKeydown);
+        if (trigger && trigger.focus) { try { trigger.focus(); } catch (e) {} }
+        resolve(result);
+      }
+      function onKeydown(e) { if (e.key === "Escape") done(false); }
+      document.addEventListener("keydown", onKeydown);
+      var cancelBtn = overlay.querySelector("#confirm-simple-cancel");
       overlay.querySelector("#confirm-simple-cancel").addEventListener("click", function () { done(false); });
       overlay.querySelector("#confirm-simple-ok").addEventListener("click", function () { done(true); });
       overlay.addEventListener("click", function (e) { if (e.target === overlay) done(false); });
+      if (cancelBtn && cancelBtn.focus) cancelBtn.focus();
     });
   }
 
@@ -5122,9 +5155,14 @@
 
     var box = document.createElement("div");
     box.className = "modal-box";
+    box.setAttribute("role", "dialog");
+    box.setAttribute("aria-modal", "true");
+    var titleId = gcNextModalId("gc-delete-title");
+    box.setAttribute("aria-labelledby", titleId);
     overlay.appendChild(box);
 
     var h3 = document.createElement("h3");
+    h3.id = titleId;
     h3.textContent = "Delete campaign permanently?";
     box.appendChild(h3);
 
@@ -5183,10 +5221,19 @@
     function syncEnabled() { confirmBtn.disabled = !matches(); }
     input.addEventListener("input", syncEnabled);
 
-    function close() { overlay.remove(); }
+    function close() {
+      overlay.remove();
+      document.removeEventListener("keydown", onKeydown);
+    }
+    // Bound at document level, not the input: the input (and the Delete
+    // button) are disabled for the duration of the DELETE request, and a
+    // disabled form control can't hold focus or receive its own keydown
+    // events — an input-only Escape listener would silently stop working
+    // for exactly the window an admin is most likely to want to bail out.
+    function onKeydown(e) { if (e.key === "Escape") close(); }
+    document.addEventListener("keydown", onKeydown);
     cancelBtn.addEventListener("click", close);
     overlay.addEventListener("click", function (e) { if (e.target === overlay) close(); });
-    input.addEventListener("keydown", function (e) { if (e.key === "Escape") close(); });
 
     confirmBtn.addEventListener("click", function () {
       if (confirmBtn.disabled || !matches() || confirmBtn.dataset.loading === "1") return;
@@ -5224,6 +5271,7 @@
   var gcOptionsCache = {
     providers: null, providersPromise: null,
     campaigns: null, campaignsPromise: null,
+    campaignsTotal: null, campaignsTruncated: false,
     pools: null, poolsPromise: null,
   };
   var gcKnownCampaignIds = {};
@@ -5255,6 +5303,8 @@
     gcOptionsCache.campaignsPromise = api("/api/admin/gc-campaigns").then(function (data) {
       var items = data.campaigns || [];
       gcOptionsCache.campaigns = items;
+      gcOptionsCache.campaignsTotal = typeof data.total === "number" ? data.total : items.length;
+      gcOptionsCache.campaignsTruncated = !!data.truncated;
       gcKnownCampaignIds = {};
       items.forEach(function (c) { gcKnownCampaignIds[c.campaign_id] = true; });
       renderGcPoolCampaignSelect();
@@ -5422,14 +5472,23 @@
     // therefore queries the backend's own ?status= directly instead of
     // reusing the unfiltered cache (Codex review); "All" keeps using the
     // shared cache other pickers on this page also read from.
+    // list_campaigns() reports total/truncated alongside the (still
+    // 200-row-capped) campaigns array (P0.16 §A) — carried through both
+    // branches below so the notice renders the same way whether the
+    // unfiltered cache or a direct filtered fetch supplied the page.
     var campaignsPromise = statusFilter
-      ? api("/api/admin/gc-campaigns?status=" + encodeURIComponent(statusFilter)).then(function (d) { return d.campaigns || []; })
-      : fetchGcCampaignsList(force);
+      ? api("/api/admin/gc-campaigns?status=" + encodeURIComponent(statusFilter)).then(function (d) {
+          var items = d.campaigns || [];
+          return { items: items, total: typeof d.total === "number" ? d.total : items.length, truncated: !!d.truncated };
+        })
+      : fetchGcCampaignsList(force).then(function (items) {
+          return { items: items, total: gcOptionsCache.campaignsTotal, truncated: gcOptionsCache.campaignsTruncated };
+        });
     Promise.all([campaignsPromise, fetchGcProviders()]).then(function (deps) {
-      var items = deps[0] || [], providers = deps[1] || [];
+      var items = deps[0].items || [], providers = deps[1] || [];
       var needsPools = items.some(function (c) { return c.mechanic === "mission_pool" || c.type === "mission_pool"; });
       return (needsPools ? fetchGcRewardPools(force) : Promise.resolve([])).then(function (pools) {
-        return { items: items, providers: providers, pools: pools || [] };
+        return { items: items, providers: providers, pools: pools || [], total: deps[0].total, truncated: deps[0].truncated };
       });
     }).then(function (ctx) {
       // A newer load (a later filter click, or a mutation's loadGcCampaigns(true))
@@ -5437,9 +5496,20 @@
       // this now-stale response overwrite it (Codex review: out-of-order
       // filter clicks on a slow connection).
       if (token !== gcCampaignsLoadToken) return;
+      var noticeEl = $("#gc-truncation-notice");
       if (!ctx.items.length) {
         $("#gc-campaigns-body").innerHTML = emptyState(gcEmptyStateForFilter(statusFilter));
+        if (noticeEl) noticeEl.classList.add("hidden");
         return;
+      }
+      if (noticeEl) {
+        if (ctx.truncated) {
+          noticeEl.textContent = gcTruncationNoticeText(ctx.items.length, ctx.total);
+          noticeEl.classList.remove("hidden");
+        } else {
+          noticeEl.classList.add("hidden");
+          noticeEl.textContent = "";
+        }
       }
       var groups = gcGroupCampaigns(ctx.items, statusFilter);
       $("#gc-campaigns-body").innerHTML = groups.map(function (g) {
@@ -5848,6 +5918,16 @@
     return gcCanTransitionTo(status, "live");
   }
 
+  // P0.16 §A — pure text builder for the 200-row truncation notice, kept
+  // separate from loadGcCampaigns' own DOM/network plumbing so it's
+  // independently testable. `shown` is the number of rows actually
+  // rendered (== list_campaigns()'s 200-row cap whenever truncation is
+  // reported at all); `total` is the server's count_documents() total
+  // against the exact same filter.
+  function gcTruncationNoticeText(shown, total) {
+    return "Showing the first " + shown + " of " + total + " campaigns. Use the status filters to narrow the list.";
+  }
+
   // ---- Campaign list (P0.4): legal overflow actions + setup summary -----
   //
   // Every status-gated action button below is derived from
@@ -6091,7 +6171,7 @@
         '<button class="btn primary" data-gc-action="detail" data-id="' + esc(campaign.campaign_id) + '">Manage</button>' +
         gcMissionListActionHtml(campaign) +
         '<div class="gc-row-menu-wrap">' +
-          '<button class="gc-kebab-btn" type="button" data-gc-kebab="1" aria-haspopup="true" aria-label="More actions">•••</button>' +
+          '<button class="gc-kebab-btn" type="button" data-gc-kebab="1" aria-haspopup="true" aria-expanded="false" aria-label="More actions">•••</button>' +
           gcOverflowMenuHtml(campaign, actions) +
         '</div>' +
       '</div>' +
@@ -6672,6 +6752,25 @@
       (isResume ? ' data-gc-resume="1"' : '') + '>' + esc(label) + '</button>';
   }
 
+  // P0.16 §B — Campaign Detail's own "•••" overflow, next to Preview
+  // Campaign. Reuses gcListActions/gcOverflowMenuHtml verbatim (never a
+  // second action system), so Detail can never offer an action the
+  // Campaigns list wouldn't, and the one delegated data-gc-kebab/
+  // data-gc-action/gcRunAction/gcDefaultRefresh wiring already bound for
+  // the list (bindGcCampaigns) covers every button this renders too — the
+  // markup is only ever inserted into #cd-body, never bound a second time.
+  // gcCampaignDetailContinueHtml above stays the one place Publish/Resume
+  // is communicated as the primary state CTA; this menu exists purely for
+  // the rarer operational actions (Pause/Archive/Duplicate/Delete/Mission
+  // lifecycle) that previously required leaving Campaign Detail entirely.
+  function gcCampaignDetailOverflowHtml(campaign) {
+    var actions = gcListActions(campaign);
+    return '<div class="gc-row-menu-wrap" style="margin-left:0;">' +
+      '<button class="gc-kebab-btn" type="button" data-gc-kebab="1" aria-haspopup="true" aria-expanded="false" aria-label="More actions">•••</button>' +
+      gcOverflowMenuHtml(campaign, actions) +
+    '</div>';
+  }
+
   function gcCampaignDetailShareHtml(shareState) {
     if (shareState.available) {
       return '<div class="section-title">Share Campaign</div>' +
@@ -6699,8 +6798,8 @@
       ["Priority", String(campaign.priority == null ? "—" : campaign.priority)],
     ];
     return rowsData.map(function (r) {
-      return '<div style="display:flex;justify-content:space-between;gap:12px;padding:4px 0;border-bottom:1px solid var(--border);">' +
-        '<span class="sub">' + esc(r[0]) + '</span><span>' + esc(String(r[1])) + '</span></div>';
+      return '<div class="gc-kv-row">' +
+        '<span class="sub">' + esc(r[0]) + '</span><span class="gc-kv-value">' + esc(String(r[1])) + '</span></div>';
     }).join("");
   }
 
@@ -6719,9 +6818,12 @@
       ["Provider ID", dest.provider_id || "—"],
       ["Pool ID", mp.pool_id || "—"],
     ];
+    // P0.16 §F — .gc-kv-row/.gc-kv-value (overflow-wrap:anywhere + min-
+    // width:0) so a long campaign_id/provider_id/URL wraps instead of
+    // clipping or forcing the page to scroll horizontally.
     var rowsHtml = rowsData.map(function (r) {
-      return '<div style="display:flex;justify-content:space-between;gap:12px;padding:4px 0;border-bottom:1px solid var(--border);">' +
-        '<span class="sub">' + esc(r[0]) + '</span><code>' + esc(String(r[1])) + '</code></div>';
+      return '<div class="gc-kv-row">' +
+        '<span class="sub">' + esc(r[0]) + '</span><code class="gc-kv-value">' + esc(String(r[1])) + '</code></div>';
     }).join("");
     var reasonsHtml = reasons.length
       ? '<div class="sub" style="margin-top:8px;">Server visibility reasons:</div><ul style="margin:4px 0 0 18px;padding:0;">' +
@@ -6747,9 +6849,10 @@
       '</div>' +
       '<div class="section-title" style="margin-bottom:8px;">Setup</div>' +
       gcCampaignDetailChecklistHtml(rows, { editingSection: editingSection || null, campaign: campaign, providers: providers, pools: pools, rewardsDraft: rewardsDraft }) +
-      '<div style="margin:14px 0;display:flex;gap:8px;flex-wrap:wrap;">' +
+      '<div style="margin:14px 0;display:flex;gap:8px;flex-wrap:wrap;align-items:center;">' +
         gcCampaignDetailContinueHtml(rows, campaign) +
         '<button class="btn" data-gc-action="preview" data-id="' + esc(campaign.campaign_id) + '">Preview Campaign</button>' +
+        gcCampaignDetailOverflowHtml(campaign) +
       '</div>' +
       '<div class="section" style="margin-bottom:16px;">' + gcCampaignDetailShareHtml(shareState) + '</div>' +
       '<details style="margin-bottom:10px;">' +
@@ -7905,6 +8008,9 @@
     var box = document.createElement("div");
     box.className = "modal-box";
     box.style.maxWidth = "480px";
+    box.setAttribute("role", "dialog");
+    box.setAttribute("aria-modal", "true");
+    box.setAttribute("aria-label", "Campaign Preview");
     // The read-only preview body is inert markup (no interactive elements),
     // so it's set once via innerHTML from the pure gcPreviewModalBodyHtml
     // builder. The Close button is built via createElement/appendChild
@@ -8093,7 +8199,18 @@
         // is the one preview UI entry point, never a second renderer.
         gcOpenPreview(id, btn);
       }
-      else if (action === "delete") openGcDeleteModal(id, btn.dataset.name);
+      else if (action === "delete") {
+        // Shared with the Campaigns list overflow (same data-gc-action=
+        // "delete", same delegated handler) — but a delete from Campaign
+        // Detail's own overflow (P0.16 §B) leaves the just-deleted campaign
+        // with nowhere canonical to refresh back to, so it must navigate
+        // away instead of the default loadGcCampaigns(true)-in-place refresh.
+        var wasDetail = state.view === "campaignDetail" && state.campaignId === id;
+        openGcDeleteModal(id, btn.dataset.name, wasDetail ? function () {
+          gcInvalidateCampaignsCache();
+          activateTab("growth", 0);
+        } : undefined);
+      }
     });
 
     $all("#gc-status-filter button").forEach(function (b) {
@@ -8109,20 +8226,28 @@
     // Row "•••" overflow menu: toggle on the kebab, close any other open
     // menu first (at most one open at a time), and close on outside click.
     // Delegated on document (not bound per-row) because #gc-campaigns-body
-    // is fully re-rendered on every load — a direct listener would be lost.
+    // (and, since P0.16, #cd-body's own copy in Campaign Detail) is fully
+    // re-rendered on every load — a direct listener would be lost.
+    function gcCloseAllRowMenus() {
+      $all(".gc-row-menu").forEach(function (m) { m.classList.add("hidden"); });
+      $all("[data-gc-kebab]").forEach(function (k) { k.setAttribute("aria-expanded", "false"); });
+    }
     document.addEventListener("click", function (e) {
       var kebab = e.target && e.target.closest && e.target.closest("[data-gc-kebab]");
       if (kebab) {
         e.stopPropagation();
         var menu = kebab.parentElement && kebab.parentElement.querySelector(".gc-row-menu");
         var opening = !!menu && menu.classList.contains("hidden");
-        $all(".gc-row-menu").forEach(function (m) { m.classList.add("hidden"); });
-        if (opening) menu.classList.remove("hidden");
+        gcCloseAllRowMenus();
+        if (opening) { menu.classList.remove("hidden"); kebab.setAttribute("aria-expanded", "true"); }
         return;
       }
       if (!(e.target && e.target.closest && e.target.closest(".gc-row-menu"))) {
-        $all(".gc-row-menu").forEach(function (m) { m.classList.add("hidden"); });
+        gcCloseAllRowMenus();
       }
+    });
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape") gcCloseAllRowMenus();
     });
 
     // The row itself opens Manage too (P0.4 §2), except when the click
@@ -8132,6 +8257,21 @@
       var card = e.target && e.target.closest && e.target.closest("[data-gc-row-id]");
       if (!card) return;
       if (e.target.closest("button") || e.target.closest(".gc-row-menu")) return;
+      renderCampaignDetail(card.dataset.gcRowId);
+    });
+
+    // P0.16 §G — the card carries role="button" tabindex="0" (it's
+    // intentionally clickable, same as its own Manage button), so it needs
+    // the same Enter/Space keyboard parity a native <button> gets for free.
+    // Space is prevented from also scrolling the page, matching native
+    // button behavior; a real control inside the card (Manage, kebab, menu
+    // item) keeps its own click/keydown handling untouched.
+    document.addEventListener("keydown", function (e) {
+      if (e.key !== "Enter" && e.key !== " " && e.key !== "Spacebar") return;
+      var card = e.target && e.target.closest && e.target.closest("[data-gc-row-id]");
+      if (!card) return;
+      if (e.target.closest("button") || e.target.closest(".gc-row-menu")) return;
+      if (e.key === " " || e.key === "Spacebar") e.preventDefault();
       renderCampaignDetail(card.dataset.gcRowId);
     });
   }
