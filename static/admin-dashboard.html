@@ -1694,42 +1694,49 @@
 
       <!-- SETTINGS VIEW -->
       <section id="view-gcCampaigns" class="hidden">
-        <div class="section" style="margin-bottom:16px;">
-          <div class="section-title">Create Campaign</div>
-          <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px;">
-            <input class="filter-input" id="gc-c-name" placeholder="Campaign name" style="margin:0;" />
-            <select class="filter-input" id="gc-c-type" style="margin:0;">
-              <option value="tournament">tournament</option>
-              <option value="external_subscription_verification">external_subscription_verification</option>
-              <option value="external_website">external_website</option>
-            </select>
-            <select class="filter-input" id="gc-c-provider" style="margin:0;">
-              <option value="">No provider (configure later)</option>
-            </select>
-            <input class="filter-input" id="gc-c-path" placeholder="destination path e.g. /july-tournament" style="margin:0;" />
-            <input class="filter-input" id="gc-c-channel" placeholder="channel_username" style="margin:0;" />
-            <input class="filter-input" id="gc-c-starts" type="datetime-local" step="1" style="margin:0;" />
-            <input class="filter-input" id="gc-c-ends" type="datetime-local" step="1" style="margin:0;" />
-          </div>
-          <div class="sub" style="margin-top:10px;">Registration configuration has moved to the <b>Registrations</b> tab — create the campaign here first, then configure registration there.</div>
-          <!-- Mission Reward Pool campaigns are NOT created here. They have their
-               own operator surface (Player Campaigns -> Mission Reward Pool,
-               static/mission-admin.js) with separate CREATE / VIEW / EDIT modes.
-               Sharing this form between creating a campaign and editing an
-               existing one is exactly what produced the wrong-campaign writes
-               this split removes. -->
-          <details style="margin-top:10px;">
-            <summary style="cursor:pointer;font-size:12px;font-weight:600;">Advanced / Technical Details</summary>
-            <div style="margin-top:8px;max-width:320px;">
-              <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Campaign ID</label>
-              <input class="filter-input" id="gc-c-id" placeholder="auto-generated from name" style="margin:0;width:100%;box-sizing:border-box;" />
-              <div class="sub" style="margin-top:4px;">Auto-generated from the campaign name above. Only override this if you need a specific technical identifier — it is immutable once created and, once deleted, cannot be reused.</div>
+        <!-- P0.6: the beginner entry point is now the guided wizard
+             (gcOpenCampaignWizard, #view-gcCampaignWizard) — this inline form
+             stays available, collapsed, for power users/tests that need direct
+             control over the raw fields the wizard deliberately hides. -->
+        <details id="gc-legacy-form-details" style="margin-bottom:16px;">
+          <summary style="cursor:pointer;font-weight:600;">Advanced / Legacy Create Form</summary>
+          <div class="section" style="margin-top:10px;">
+            <div class="section-title">Create Campaign</div>
+            <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px;">
+              <input class="filter-input" id="gc-c-name" placeholder="Campaign name" style="margin:0;" />
+              <select class="filter-input" id="gc-c-type" style="margin:0;">
+                <option value="tournament">tournament</option>
+                <option value="external_subscription_verification">external_subscription_verification</option>
+                <option value="external_website">external_website</option>
+              </select>
+              <select class="filter-input" id="gc-c-provider" style="margin:0;">
+                <option value="">No provider (configure later)</option>
+              </select>
+              <input class="filter-input" id="gc-c-path" placeholder="destination path e.g. /july-tournament" style="margin:0;" />
+              <input class="filter-input" id="gc-c-channel" placeholder="channel_username" style="margin:0;" />
+              <input class="filter-input" id="gc-c-starts" type="datetime-local" step="1" style="margin:0;" />
+              <input class="filter-input" id="gc-c-ends" type="datetime-local" step="1" style="margin:0;" />
             </div>
-          </details>
-          <button class="btn primary" id="gc-create-campaign-btn" style="margin-top:10px;">Create draft</button>
-          <button class="btn" id="gc-new-campaign-btn" style="margin-top:10px;">Clear form</button>
-          <div class="sub" style="margin-top:6px;">New campaigns always start as <b>draft</b> and stay admin-only until published — see Providers tab to mark a destination ready.</div>
-        </div>
+            <div class="sub" style="margin-top:10px;">Registration configuration has moved to the <b>Registrations</b> tab — create the campaign here first, then configure registration there.</div>
+            <!-- Mission Reward Pool campaigns are NOT created here. They have their
+                 own operator surface (Player Campaigns -> Mission Reward Pool,
+                 static/mission-admin.js) with separate CREATE / VIEW / EDIT modes.
+                 Sharing this form between creating a campaign and editing an
+                 existing one is exactly what produced the wrong-campaign writes
+                 this split removes. -->
+            <details style="margin-top:10px;">
+              <summary style="cursor:pointer;font-size:12px;font-weight:600;">Advanced / Technical Details</summary>
+              <div style="margin-top:8px;max-width:320px;">
+                <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Campaign ID</label>
+                <input class="filter-input" id="gc-c-id" placeholder="auto-generated from name" style="margin:0;width:100%;box-sizing:border-box;" />
+                <div class="sub" style="margin-top:4px;">Auto-generated from the campaign name above. Only override this if you need a specific technical identifier — it is immutable once created and, once deleted, cannot be reused.</div>
+              </div>
+            </details>
+            <button class="btn primary" id="gc-create-campaign-btn" style="margin-top:10px;">Create draft</button>
+            <button class="btn" id="gc-new-campaign-btn" style="margin-top:10px;">Clear form</button>
+            <div class="sub" style="margin-top:6px;">New campaigns always start as <b>draft</b> and stay admin-only until published — see Providers tab to mark a destination ready.</div>
+          </div>
+        </details>
 
         <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:10px;">
           <div class="section-title" style="margin:0;">Campaigns</div>
@@ -1745,6 +1752,15 @@
           <button data-status="archived">Archived</button>
         </div>
         <div id="gc-campaigns-body"></div>
+      </section>
+
+      <!-- CAMPAIGN CREATION WIZARD (P0.6) — beginner-friendly guided flow for
+           creating a gc_campaigns shell. Entered via "+ New Campaign"
+           (gcOpenCampaignWizard in admin-dashboard.js); its entire content is
+           rebuilt into #gcw-body by gcwRender() on every step change — no
+           other fixed ids are needed here. -->
+      <section id="view-gcCampaignWizard" class="hidden">
+        <div id="gcw-body"></div>
       </section>
 
       <!-- CAMPAIGN DETAIL VIEW (P0.5a) — READ-ONLY guided-setup container for
