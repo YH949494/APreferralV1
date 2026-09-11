@@ -5061,17 +5061,26 @@
   // Visibility is state-aware and P0-scoped to mission_pool rows only
   // (§9 of the follow-up spec — Standard Drop and every other campaign type
   // must never see these buttons):
-  //   Close Mission — only while the mission is "live" (matches the
-  //     dedicated Mission page's own actionsFor(), which never offers Close
-  //     from "paused", "ended" or "archived").
+  //   Close Mission — only while the mission is "live" AND not cancelled
+  //     (matches the dedicated Mission page's own actionsFor(), which never
+  //     offers Close from "paused", "ended", "archived" or "cancelled").
+  //     mission_pool.cancelled can be true while campaign.status is still
+  //     "live" — admin_cancel_mission never touches campaign.status (P0.10)
+  //     — so status==="live" alone is not enough to prove Close Mission is
+  //     still a truthful action; this stays self-contained (reads only the
+  //     `c` argument) rather than calling gcEffectiveDisplayState, since
+  //     test_mission_admin_ui.test.js extracts and runs this function in
+  //     isolation via `new Function`.
   //   End Rewards — only when this row's active reward count (computed
   //     server-side in one aggregate query per page load, not per row) is
   //     greater than zero, regardless of status — the backend intentionally
-  //     allows ending rewards on an ended/closed/archived campaign too.
+  //     allows ending rewards on an ended/closed/archived/cancelled campaign
+  //     too (already-allocated vouchers are never reclaimed by a cancel).
   function gcMissionActionsHtml(c) {
     if (c.mechanic !== "mission_pool") return "";
     var html = "";
-    if (c.status === "live") {
+    var cancelled = !!((c.mission_pool || {}).cancelled);
+    if (c.status === "live" && !cancelled) {
       html += ' <button class="btn" data-gc-action="close-mission" data-id="' + esc(c.campaign_id) + '">Close Mission</button>';
     }
     if ((c.mission_active_rewards || 0) > 0) {
@@ -5462,6 +5471,116 @@
     return ccUtcToKlDisplay(schedule.starts_at) + "  →  " + (schedule.ends_at ? ccUtcToKlDisplay(schedule.ends_at) : "No end date");
   }
 
+  // ---- Mission display-state truth (P0.10) ------------------------------
+  //
+  // gc_campaigns.status stays campaign_centre._transition()'s exact
+  // canonical enum — never read, written or reasoned about differently
+  // here. A Mission Pool campaign additionally carries its OWN lifecycle
+  // inside mission_pool (cancelled / processing_stage), owned entirely by
+  // mission_pool.py's admin_cancel_mission/admin_close_mission/the worker
+  // (mission_pool_processor). campaign_centre never touches those fields
+  // and mission_pool.py never touches campaign.status beyond the one
+  // "ended" it sets on Close — so a Mission can be CANCELLED while status
+  // still reads "live", or "ended" while processing hasn't even started.
+  // Showing status alone is a lie for a Mission; this derives the truthful
+  // presentation state instead.
+  //
+  // This mirrors mission_pool_ux.operational_state()'s exact precedence
+  // (server-side truth already used by the dedicated Mission surface's own
+  // list — see /api/admin/mission-pool/campaigns) so gc_campaigns can never
+  // disagree with Mission Admin about what state a campaign is in. Pure and
+  // presentation-only: it must NEVER be written back to campaign.status or
+  // mission_pool, and NEVER be fed into GC_VALID_STATUS_TRANSITIONS or any
+  // PUT/POST body — backend transition legality always uses the canonical
+  // campaign.status (see gcListActions below).
+  function gcIsMissionCampaign(campaign) {
+    campaign = campaign || {};
+    return campaign.mechanic === "mission_pool" || campaign.type === "mission_pool";
+  }
+
+  var GC_MISSION_DISPLAY_STATES = {
+    CANCELLED: "cancelled",
+    CLOSED_NEEDS_PROCESSING: "closed_needs_processing",
+    PROCESSING: "processing",
+    COMPLETED: "completed",
+  };
+
+  function gcEffectiveDisplayState(campaign) {
+    campaign = campaign || {};
+    if (!gcIsMissionCampaign(campaign)) return campaign.status;
+    var block = campaign.mission_pool || {};
+    var status = campaign.status || "draft";
+    // Missing/unknown mission lifecycle data (no mission_pool block at all)
+    // degrades to mission_pool.py's own defaults — STAGE_PENDING, not
+    // cancelled — so an incomplete document can never be shown as further
+    // along than it truthfully is.
+    var stage = block.processing_stage || "pending";
+    if (block.cancelled) return GC_MISSION_DISPLAY_STATES.CANCELLED;
+    if (status === "ended" || status === "archived") {
+      if (stage === "completed") return GC_MISSION_DISPLAY_STATES.COMPLETED;
+      if (stage === "pending") return GC_MISSION_DISPLAY_STATES.CLOSED_NEEDS_PROCESSING;
+      return GC_MISSION_DISPLAY_STATES.PROCESSING;
+    }
+    // live / paused / scheduled / draft — canonical status is already
+    // truthful for a Mission that hasn't been cancelled or closed.
+    return status;
+  }
+
+  var GC_MISSION_DISPLAY_PILL_INFO = {
+    cancelled: { kind: "rejected", label: "Cancelled" },
+    closed_needs_processing: { kind: "pending", label: "Needs processing" },
+    processing: { kind: "pending", label: "Processing" },
+    completed: { kind: "approved", label: "Completed" },
+  };
+
+  // Never call gcPill(c.status) blindly for a Mission campaign (P0.10 §7) —
+  // a cancelled Mission must never render "LIVE", and a closed-but-
+  // unprocessed one must never render "ENDED"/"Completed". Non-mission
+  // campaigns, and a Mission still in its ordinary draft/scheduled/live/
+  // paused lifecycle, render identically to gcPill(campaign.status) — only
+  // the four derived states above ever swap in different text/color.
+  function gcDisplayPill(campaign) {
+    var state = gcEffectiveDisplayState(campaign);
+    var info = GC_MISSION_DISPLAY_PILL_INFO[state];
+    if (!info) return gcPill(campaign ? campaign.status : state);
+    return '<span class="pill ' + info.kind + '">' + esc(info.label) + '</span>';
+  }
+
+  // Plain-English one-liners for the four derived states that would
+  // otherwise render a misleading "Setup complete" (P0.10 §12). An ordinary
+  // Mission still being configured (draft/scheduled/live/paused) keeps using
+  // gcSetupSummary's normal "N / total setup complete · X missing" copy.
+  var GC_MISSION_LIST_SUMMARY = {
+    cancelled: "Mission cancelled",
+    closed_needs_processing: "Processing required",
+    processing: "Processing in progress",
+    completed: "Mission completed",
+  };
+
+  function gcMissionListSummary(campaign) {
+    if (!gcIsMissionCampaign(campaign)) return null;
+    return GC_MISSION_LIST_SUMMARY[gcEffectiveDisplayState(campaign)] || null;
+  }
+
+  // Campaign Detail's top-level lifecycle line (P0.10 §9) — never the
+  // checklist's own "Setup complete" alone, which only ever answers "is
+  // configuration filled in", not "is this Mission actually live/done".
+  var GC_MISSION_LIFECYCLE_MESSAGES = {
+    cancelled: "Mission cancelled",
+    closed_needs_processing: "Mission closed — processing required",
+    processing: "Processing rewards/winners",
+    completed: "Mission completed",
+  };
+
+  function gcMissionLifecycleBannerHtml(campaign) {
+    if (!gcIsMissionCampaign(campaign)) return "";
+    var msg = GC_MISSION_LIFECYCLE_MESSAGES[gcEffectiveDisplayState(campaign)];
+    if (!msg) return "";
+    return '<div class="section" style="margin-bottom:14px;">' +
+      '<div style="font-weight:600;">' + esc(msg) + '</div>' +
+      '</div>';
+  }
+
   // ---- Pure checklist derivation --------------------------------------
   //
   // Returns an ordered array of { key, label, applicable, required,
@@ -5651,10 +5770,18 @@
   function gcListActions(campaign) {
     campaign = campaign || {};
     var status = campaign.status;
+    // A cancelled Mission must never offer Publish/Resume/Pause — canonical
+    // transition legality alone isn't enough here, because
+    // admin_cancel_mission never touches campaign.status (mission_pool.
+    // cancelled can be true while status is still "live"/"paused", see
+    // gcEffectiveDisplayState above). Archive/Delete stay governed purely by
+    // GC_VALID_STATUS_TRANSITIONS/GC_DELETABLE_STATUSES — cancelling a
+    // Mission doesn't change whether archiving/deleting it is sensible.
+    var missionCancelled = gcIsMissionCampaign(campaign) && gcEffectiveDisplayState(campaign) === "cancelled";
     return {
-      canPublish: gcCanTransitionTo(status, "live") && status !== "live",
+      canPublish: gcCanTransitionTo(status, "live") && status !== "live" && !missionCancelled,
       publishLabel: status === "paused" ? "Resume" : "Publish",
-      canPause: gcCanTransitionTo(status, "paused") && status !== "paused",
+      canPause: gcCanTransitionTo(status, "paused") && status !== "paused" && !missionCancelled,
       canArchive: gcCanTransitionTo(status, "archived") && status !== "archived",
       canDelete: GC_DELETABLE_STATUSES.indexOf(status) !== -1,
       isMission: campaign.mechanic === "mission_pool",
@@ -5806,15 +5933,34 @@
     return '<div class="gc-row-menu hidden">' + items.join("") + '</div>';
   }
 
+  // A closed-but-unprocessed or actively-processing Mission gets a visible
+  // secondary action right next to Manage (P0.10 §3/§4/§6) — not buried in
+  // the "•••" overflow — so the row itself never implies the mission is
+  // done. Reuses the existing "mission" action (openMissionAdmin), never a
+  // new API call or a faked "process" action: Mission Admin's own detail
+  // view already surfaces Process Campaign / Resume Processing for these
+  // exact states (see mission-admin.js's actionsFor()).
+  var GC_MISSION_LIST_ACTION_LABEL = {
+    closed_needs_processing: "Process Mission",
+    processing: "Open Mission",
+  };
+
+  function gcMissionListActionHtml(campaign) {
+    if (!gcIsMissionCampaign(campaign)) return "";
+    var label = GC_MISSION_LIST_ACTION_LABEL[gcEffectiveDisplayState(campaign)];
+    if (!label) return "";
+    return '<button class="btn" data-gc-action="mission" data-id="' + esc(campaign.campaign_id) + '">' + esc(label) + '</button>';
+  }
+
   function gcCampaignRowHtml(campaign, rows) {
     campaign = campaign || {};
     var actions = gcListActions(campaign);
-    var summary = gcSetupSummary(rows);
+    var summary = gcMissionListSummary(campaign) || gcSetupSummary(rows);
     var displayName = esc(campaign.name || campaign.campaign_id || "Untitled campaign");
     return '<div class="campaign-card" data-gc-row-id="' + esc(campaign.campaign_id) + '" tabindex="0" role="button" aria-label="Manage ' + displayName + '">' +
       '<div class="campaign-card-header">' +
         '<div class="campaign-card-title">' + displayName + '</div>' +
-        gcPill(campaign.status) +
+        gcDisplayPill(campaign) +
       '</div>' +
       '<div class="campaign-card-meta">' +
         '<span>' + esc(gcTypeLabel(campaign.type)) + '</span>' +
@@ -5823,6 +5969,7 @@
       '<div class="sub" style="margin-top:6px;">' + esc(summary) + '</div>' +
       '<div class="campaign-card-actions">' +
         '<button class="btn primary" data-gc-action="detail" data-id="' + esc(campaign.campaign_id) + '">Manage</button>' +
+        gcMissionListActionHtml(campaign) +
         '<div class="gc-row-menu-wrap">' +
           '<button class="gc-kebab-btn" type="button" data-gc-kebab="1" aria-haspopup="true" aria-label="More actions">•••</button>' +
           gcOverflowMenuHtml(campaign, actions) +
@@ -5831,25 +5978,44 @@
     '</div>';
   }
 
-  // Grouping (P0.4 §5) is only ever applied to the unfiltered "All" list —
-  // once a specific status filter is selected there is exactly one status
-  // on screen, so a group heading would be redundant noise. CAMPAIGN_STATUSES
-  // is a closed backend enum (draft/scheduled/live/paused/ended/archived,
-  // see campaign_centre.py) and every value maps into exactly one bucket
-  // below, so there is no "unmatched status" case to fall back on.
-  var GC_GROUP_ORDER = ["Active", "Upcoming", "Completed"];
-  var GC_GROUP_STATUSES = {
+  // Grouping (P0.4 §5, extended by P0.10 §6) is only ever applied to the
+  // unfiltered "All" list — once a specific status filter is selected there
+  // is exactly one status on screen, so a group heading would be redundant
+  // noise.
+  //
+  // Buckets on the DERIVED display state, not raw campaign.status (P0.10):
+  // for a non-mission campaign gcEffectiveDisplayState() always returns the
+  // canonical status unchanged, so this is a pure superset of the old
+  // status-keyed grouping and every existing bucket assignment stays
+  // identical. A Mission additionally resolves into "closed_needs_processing"/
+  // "processing"/"completed"/"cancelled" (never a raw "ended"/"archived"),
+  // which is what makes the two new rules below possible:
+  //   - a closed-but-unprocessed Mission (§3) must never sit in Completed
+  //     next to a truly finished one — it goes to "Needs Attention" instead,
+  //     alongside a Mission still actively processing (§4): neither is done,
+  //     both still need an operator's eyes, and adding a whole extra
+  //     top-level "Processing" section for one in-between state would be
+  //     more navigation than this P0 asks for.
+  //   - a cancelled Mission (§2) must never sit under Active — it goes to
+  //     Completed/Inactive, still visibly CANCELLED via gcDisplayPill/
+  //     gcMissionListSummary, never confused with a genuinely completed one.
+  // Every derived state maps into exactly one bucket below, so there is no
+  // "unmatched state" case to fall back on.
+  var GC_GROUP_ORDER = ["Active", "Needs Attention", "Upcoming", "Completed"];
+  var GC_GROUP_DISPLAY_STATES = {
     Active: ["live", "paused"],
+    "Needs Attention": ["closed_needs_processing", "processing"],
     Upcoming: ["draft", "scheduled"],
-    Completed: ["ended", "archived"],
+    Completed: ["ended", "archived", "completed", "cancelled"],
   };
 
   function gcGroupCampaigns(items, statusFilter) {
     if (statusFilter) return [{ heading: null, items: items }];
-    var buckets = { Active: [], Upcoming: [], Completed: [] };
+    var buckets = { "Active": [], "Needs Attention": [], "Upcoming": [], "Completed": [] };
     (items || []).forEach(function (c) {
+      var state = gcEffectiveDisplayState(c);
       GC_GROUP_ORDER.some(function (g) {
-        if (GC_GROUP_STATUSES[g].indexOf(c.status) === -1) return false;
+        if (GC_GROUP_DISPLAY_STATES[g].indexOf(state) === -1) return false;
         buckets[g].push(c);
         return true;
       });
@@ -6020,9 +6186,23 @@
     var editingSection = ctx.editingSection || null;
     var campaign = ctx.campaign || {};
     var providers = ctx.providers || [];
+    var isMission = gcIsMissionCampaign(campaign);
     return (rows || []).map(function (row) {
-      var editable = CD_EDITABLE_KEYS.indexOf(row.key) !== -1;
       var icon = row.complete ? '<span style="color:var(--ok);">✓</span>' : '<span style="color:var(--warn);">!</span>';
+      // A Mission's schedule.ends_at is a second-precision eligibility
+      // cutoff (mission_pool_processor's `_close_cutoff`); this page's
+      // generic When editor below is minute-precision and would silently
+      // truncate it on save (e.g. 23:59:59 -> 23:59:00, P0.10 §10). Never
+      // offer that inline editor for a Mission — route to Mission Admin's
+      // own Edit instead, which keeps full second precision.
+      if (row.key === "when" && isMission) {
+        return '<div class="section" style="margin-bottom:10px;padding:12px 14px;" data-cd-row="when">' +
+          '<div style="display:flex;align-items:baseline;gap:8px;">' + icon + '<strong>' + esc(row.label) + '</strong></div>' +
+          '<div class="sub" style="margin-top:4px;margin-left:20px;">' + esc(row.summary || "") + '</div>' +
+          '<div style="margin-left:20px;margin-top:6px;"><button class="btn" data-cd-when-mission-edit="1">Edit in Mission Admin</button></div>' +
+          '</div>';
+      }
+      var editable = CD_EDITABLE_KEYS.indexOf(row.key) !== -1;
       var body;
       if (editable && editingSection === row.key) {
         body = row.key === "campaign" ? cdCampaignEditHtml(campaign)
@@ -6052,8 +6232,37 @@
   // judged in the exact order campaign_centre._transition() itself would
   // reject a request, so this button can never render for a request the
   // backend is actually about to refuse.
+  // Mission lifecycle states this CTA renders instead of the normal
+  // Setup/Publish flow (P0.10 §3/§4/§5/§9) — checked before checklist
+  // completeness on purpose: a cancelled/closed/processing/completed
+  // Mission must never show "Continue Setup" or "Publish Campaign" just
+  // because its configuration rows happen to be filled in. data-cd-mission-
+  // process routes to the existing Mission Admin surface (openMissionAdmin)
+  // — never a faked "process" action — where Process Campaign/Resume
+  // Processing already live (see mission-admin.js's actionsFor()).
+  function gcMissionContinueHtml(campaign) {
+    var state = gcEffectiveDisplayState(campaign);
+    if (state === GC_MISSION_DISPLAY_STATES.CANCELLED) {
+      return '<div class="sub">Mission cancelled.</div>';
+    }
+    if (state === GC_MISSION_DISPLAY_STATES.CLOSED_NEEDS_PROCESSING) {
+      return '<button class="btn primary" data-cd-mission-process="1" data-id="' + esc(campaign.campaign_id) + '">Process Mission</button>';
+    }
+    if (state === GC_MISSION_DISPLAY_STATES.PROCESSING) {
+      return '<button class="btn primary" data-cd-mission-process="1" data-id="' + esc(campaign.campaign_id) + '">Open Mission</button>';
+    }
+    if (state === GC_MISSION_DISPLAY_STATES.COMPLETED) {
+      return '<div class="sub">✓ Mission completed.</div>';
+    }
+    return null;
+  }
+
   function gcCampaignDetailContinueHtml(rows, campaign) {
     campaign = campaign || {};
+    if (gcIsMissionCampaign(campaign)) {
+      var missionCta = gcMissionContinueHtml(campaign);
+      if (missionCta) return missionCta;
+    }
     var next = gcFirstIncompleteRequiredRow(rows);
     if (next) {
       return '<button class="btn primary" data-cd-goto="' + esc(next.actionTarget || "") + '">Continue Setup → ' + esc(next.label) + '</button>';
@@ -6156,6 +6365,7 @@
 
     return (
       '<button class="btn" data-cd-goto="back" style="margin-bottom:14px;background:transparent;border:1px solid var(--border);">← Back to Campaigns</button>' +
+      gcMissionLifecycleBannerHtml(campaign) +
       '<div class="progress-row" style="max-width:320px;margin-bottom:16px;">' +
         '<div class="bar-wrap"><div class="bar" style="width:' + pct + '%;"></div></div>' +
         '<div class="progress-label">Setup ' + progress.completed + ' / ' + progress.total + ' complete</div>' +
@@ -6237,7 +6447,7 @@
         var bc = $("#breadcrumb");
         if (bc) bc.textContent = "🕹 Player Campaigns  /  Campaigns  /  " + (campaign.name || campaign.campaign_id);
         var titleEl = $("#view-title");
-        if (titleEl) titleEl.innerHTML = esc(campaign.name || campaign.campaign_id) + " " + gcPill(campaign.status);
+        if (titleEl) titleEl.innerHTML = esc(campaign.name || campaign.campaign_id) + " " + gcDisplayPill(campaign);
         $("#cd-body").innerHTML = gcCampaignDetailHtml(campaign, providers, pools, null);
       });
     }).catch(function (e) {
@@ -6262,6 +6472,27 @@
         return;
       }
 
+      // P0.10 §10/§11: a Mission's schedule is a second-precision
+      // eligibility cutoff — never opened in this page's minute-precision
+      // inline editor. Routes to the existing Mission Admin Edit flow
+      // instead (mission-admin.js's own EDIT mode), which is where
+      // schedule.ends_at is actually edited with full precision.
+      var whenMissionBtn = e.target && e.target.closest && e.target.closest("[data-cd-when-mission-edit]");
+      if (whenMissionBtn) {
+        if (state.campaignId) openMissionEdit(state.campaignId);
+        return;
+      }
+
+      // P0.10 §3/§4/§11: closed-needs-processing/processing Mission CTA —
+      // one click into the existing Mission Admin surface, which already
+      // knows how to offer Process Campaign/Resume Processing for these
+      // exact states. Never a second processing implementation here.
+      var missionProcessBtn = e.target && e.target.closest && e.target.closest("[data-cd-mission-process]");
+      if (missionProcessBtn) {
+        openMissionAdmin(missionProcessBtn.dataset.id || state.campaignId);
+        return;
+      }
+
       var cancelBtn = e.target && e.target.closest && e.target.closest("[data-cd-cancel]");
       if (cancelBtn) { cdOpenEdit(null); return; }
 
@@ -6276,6 +6507,13 @@
       var target = goBtn.dataset.cdGoto;
       var id = state.campaignId;
       if (target === "back") { activateTab("growth", 0); return; }
+      // A Mission's "when" row never opens the generic inline editor (see
+      // gcCampaignDetailChecklistHtml/cdOpenEdit) — Continue Setup must
+      // route it the exact same place the row's own button does.
+      if (target === "when" && cdViewState.campaign && gcIsMissionCampaign(cdViewState.campaign)) {
+        if (id) openMissionEdit(id);
+        return;
+      }
       // Continue Setup's target can be one of the four inline-editable rows
       // (when/registration/destination — campaign is never incomplete) —
       // open the same inline editor the row's own [Edit] button does,
@@ -6304,6 +6542,11 @@
   // never itself mark anything "saved".
   function cdOpenEdit(section) {
     if (!cdViewState.campaign) return;
+    // Defense in depth alongside gcCampaignDetailChecklistHtml's own "when"
+    // branch (which never renders the [Edit] button a Mission would need to
+    // reach this in the first place) — a Mission's schedule must never open
+    // this minute-precision inline editor (P0.10 §10).
+    if (section === "when" && gcIsMissionCampaign(cdViewState.campaign)) return;
     cdViewState.editingSection = section || null;
     // The exact campaign object shown when this form opened — cdViewState.
     // campaign is only ever replaced wholesale by a fresh GET (loadCampaignDetail/
@@ -6349,6 +6592,14 @@
   function cdSaveSection(section, btnEl) {
     var id = state.campaignId;
     if (!id || !cdViewState.campaign) return;
+    // P0.10 §10 — the critical guard: a Mission's schedule.ends_at is a
+    // second-precision eligibility cutoff (see mission_pool_processor's
+    // close-cutoff handling); this page's "when" editor is minute-precision
+    // and saving it unchanged would silently truncate e.g. 23:59:59 to
+    // 23:59:00. Campaign Detail must never PUT a schedule for a Mission —
+    // this makes that true even if some future caller reaches cdSaveSection
+    // ("when") without going through cdOpenEdit/the checklist row first.
+    if (section === "when" && gcIsMissionCampaign(cdViewState.campaign)) return;
     cdShowSectionError(section, "");
 
     var draftErr = null;
@@ -6452,7 +6703,7 @@
         cdViewState.campaign = freshCampaign;
         cdViewState.editingSection = null;
         var titleEl = $("#view-title");
-        if (titleEl) titleEl.innerHTML = esc(freshCampaign.name || freshCampaign.campaign_id) + " " + gcPill(freshCampaign.status);
+        if (titleEl) titleEl.innerHTML = esc(freshCampaign.name || freshCampaign.campaign_id) + " " + gcDisplayPill(freshCampaign);
         $("#cd-body").innerHTML = gcCampaignDetailHtml(freshCampaign, cdViewState.providers, cdViewState.pools, null);
         toast("✅ Saved", "success");
       });
@@ -6761,7 +7012,11 @@
     var card = resp.card || {};
     var vis = resp.effective_visibility || {};
     var badges = resp.admin_badges || [];
-    var statusBadge = cachedCampaign ? gcPill(cachedCampaign.status) : (badges.indexOf("draft") !== -1 ? gcPill("draft") : "");
+    // P0.10 §13: a cancelled/closed-needs-processing Mission must never show
+    // a misleading LIVE/Completed badge in Preview just because that's what
+    // canonical status still says — gcDisplayPill falls back to
+    // gcPill(cachedCampaign.status) unchanged for every other campaign.
+    var statusBadge = cachedCampaign ? gcDisplayPill(cachedCampaign) : (badges.indexOf("draft") !== -1 ? gcPill("draft") : "");
     var destSummary = gcPreviewDestinationSummary(cachedCampaign);
     var reasons = vis.reasons || [];
 
