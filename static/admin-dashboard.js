@@ -6181,11 +6181,200 @@
       '</div>';
   }
 
+  // ---- P0.11: Tournament Rewards (reward_config.rules) — pure builders --
+  //
+  // Backend contract this editor mirrors exactly (reward_engine.py /
+  // campaign_centre.py / tournament_rewards.py — see the orchestration
+  // comment above cdSaveRewards for the full audit):
+  //   - reward_config.rules is a flat list of condition-based rules; this
+  //     editor only ever authors "rank" rules (Rank from/to -> min_rank/
+  //     max_rank), the one condition type a Tournament winner context
+  //     (`{rank, score}`) actually needs. Any other rule already stored on
+  //     the campaign (hand-authored score_threshold/participation/etc.) is
+  //     preserved untouched — this editor has no UI for it and must never
+  //     be lossy.
+  //   - validate_reward_rules enforces min_rank>=1, max_rank>=min_rank, no
+  //     overlapping rank ranges, and a non-empty pool_id — nothing else.
+  //     Gaps between tiers are legal, the same pool may be reused across
+  //     tiers, and there is no min/max tier count — none of those are
+  //     invented here.
+  //   - Every matching winner gets exactly ONE voucher (tournament_rewards.
+  //     _create_or_confirm_rewards / _atomic_allocate_voucher) — there is
+  //     no "quantity per winner" concept anywhere in the reward engine, so
+  //     the editor shows a fixed "Quantity per winner: 1" instead of an
+  //     input the backend could never honor.
+  var CD_REWARD_ALLOCATABLE_SCOPES = ["campaign_rewards", "shared"];
+
+  // Mirrors voucher_pool_service.CAMPAIGN_ALLOCATABLE_SCOPES exactly — a
+  // pool registered under any other allocation_scope (affiliate_rewards,
+  // welcome_rewards, voucher_drops, referral_rewards) can never actually be
+  // allocated to a Tournament winner (see allocate_voucher's query filter),
+  // so it is excluded from the picker outright rather than merely
+  // discouraged — a provable incompatibility, never a guess.
+  function cdRewardEligiblePools(pools) {
+    return (pools || []).filter(function (p) {
+      return CD_REWARD_ALLOCATABLE_SCOPES.indexOf(p.allocation_scope) !== -1;
+    });
+  }
+
+  // "0 available" is shown, never hidden or disabled — configuring a
+  // rule against a zero-stock pool is legal server-side (stock is only
+  // checked at result-approval time, never at rule-save time), so an admin
+  // planning to upload codes before results land must still be able to
+  // pick it.
+  function cdRewardPoolLabel(pool) {
+    var stock = pool.stock || {};
+    var available = typeof stock.available === "number" ? stock.available : 0;
+    var label = (pool.name || pool.pool_id || "") + " · " + available + " available";
+    if (pool.status !== "active") label += " (inactive)";
+    return label;
+  }
+
+  // Mirrors cdDestinationProviderOptionsHtml's exact fallback pattern: a
+  // pool this tier already references but that isn't in the loaded/eligible
+  // list (deleted, or scope changed elsewhere) keeps its own option instead
+  // of the dropdown silently defaulting to "Choose a reward pool…" and
+  // unlinking it on save.
+  function cdRewardPoolOptionsHtml(eligiblePools, selectedId) {
+    var items = eligiblePools || [];
+    var isListed = !selectedId || items.some(function (p) { return p.pool_id === selectedId; });
+    var fallback = (selectedId && !isListed)
+      ? '<option value="' + esc(selectedId) + '" selected>Current reward pool (not in the loaded list — leave selected to keep it)</option>'
+      : "";
+    return '<option value="">Choose a reward pool…</option>' +
+      fallback +
+      items.map(function (p) {
+        return '<option value="' + esc(p.pool_id) + '"' + (p.pool_id === selectedId ? " selected" : "") + '>' + esc(cdRewardPoolLabel(p)) + '</option>';
+      }).join("");
+  }
+
+  function cdOrdinal(n) {
+    n = Math.trunc(Number(n));
+    if (!isFinite(n)) return "";
+    var mod100 = n % 100;
+    if (mod100 >= 11 && mod100 <= 13) return n + "th";
+    var mod10 = n % 10;
+    if (mod10 === 1) return n + "st";
+    if (mod10 === 2) return n + "nd";
+    if (mod10 === 3) return n + "rd";
+    return n + "th";
+  }
+
+  function cdRankRangeLabel(minRank, maxRank) {
+    if (minRank === maxRank) return cdOrdinal(minRank) + " place";
+    return cdOrdinal(minRank) + "–" + cdOrdinal(maxRank);
+  }
+
+  // Beginner-facing tier breakdown for Campaign Detail's read view — never
+  // pool_id, never raw JSON. reward_label (admin-entered, or defaulted from
+  // the pool's own name at save time — see cdRewardTiersFromDraft) is the
+  // only backend-real description text available; falls back to the
+  // currently-linked pool's name, then a generic "Reward", so a rule saved
+  // before this editor existed never renders blank.
+  function cdRewardTierSummaryLines(rules, pools) {
+    var byId = {};
+    (pools || []).forEach(function (p) { byId[p.pool_id] = p; });
+    var rankRules = (rules || []).filter(function (r) { return r.condition_type === "rank"; }).slice();
+    rankRules.sort(function (a, b) {
+      return (((a.params || {}).min_rank) || 0) - (((b.params || {}).min_rank) || 0);
+    });
+    return rankRules.map(function (r) {
+      var params = r.params || {};
+      var pool = byId[r.pool_id];
+      var desc = r.reward_label || (pool && pool.name) || "Reward";
+      return {
+        rankLabel: cdRankRangeLabel(params.min_rank, params.max_rank),
+        rewardLine: desc + " × 1",
+      };
+    });
+  }
+
+  function cdRewardsReadHtml(row, campaign, pools) {
+    var rules = ((campaign || {}).reward_config || {}).rules || [];
+    var lines = cdRewardTierSummaryLines(rules, pools);
+    var body = '<div class="sub" style="margin-top:4px;margin-left:20px;">' + esc(row.summary || "") + '</div>';
+    if (lines.length) {
+      body += '<div style="margin-left:20px;margin-top:8px;display:grid;gap:8px;">' +
+        lines.map(function (l) {
+          return '<div style="font-size:13px;"><strong>' + esc(l.rankLabel) + '</strong><div class="sub">' + esc(l.rewardLine) + '</div></div>';
+        }).join("") + '</div>';
+    }
+    body += '<div style="margin-left:20px;margin-top:8px;"><button class="btn" data-cd-edit="rewards">' +
+      (row.complete ? "Edit rewards" : "Set up rewards") + '</button></div>';
+    return body;
+  }
+
+  function cdRewardTierRowHtml(tier, idx, eligiblePools) {
+    return '<div class="section" style="margin-bottom:10px;padding:12px 14px;" data-cd-reward-row="' + esc(tier.key) + '">' +
+      '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;">' +
+      '<strong>Reward tier ' + (idx + 1) + '</strong>' +
+      '<button class="btn" type="button" data-cd-reward-remove="' + esc(tier.key) + '">Remove tier</button>' +
+      '</div>' +
+      '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:8px;">' +
+      '<label style="font-size:12px;flex:1;min-width:110px;">Rank from<br/>' +
+      '<input class="filter-input" type="number" min="1" step="1" inputmode="numeric" style="width:100%;margin-top:4px;box-sizing:border-box;" ' +
+      'data-cd-reward-field="minRank" data-cd-reward-key="' + esc(tier.key) + '" value="' + esc(tier.minRank == null ? "" : tier.minRank) + '" /></label>' +
+      '<label style="font-size:12px;flex:1;min-width:110px;">Rank to<br/>' +
+      '<input class="filter-input" type="number" min="1" step="1" inputmode="numeric" style="width:100%;margin-top:4px;box-sizing:border-box;" ' +
+      'data-cd-reward-field="maxRank" data-cd-reward-key="' + esc(tier.key) + '" value="' + esc(tier.maxRank == null ? "" : tier.maxRank) + '" /></label>' +
+      '</div>' +
+      '<label style="font-size:12px;display:block;margin-bottom:8px;">Reward pool<br/>' +
+      '<select class="filter-input" style="width:100%;margin-top:4px;box-sizing:border-box;" ' +
+      'data-cd-reward-field="poolId" data-cd-reward-key="' + esc(tier.key) + '">' +
+      cdRewardPoolOptionsHtml(eligiblePools, tier.poolId) +
+      '</select></label>' +
+      '<div class="sub">Quantity per winner: 1</div>' +
+      '</div>';
+  }
+
+  // No reward pools registered at all vs. pools exist but none can be
+  // allocated to a Tournament (wrong allocation_scope) are deliberately
+  // different messages — the second is provably true from CD_REWARD_
+  // ALLOCATABLE_SCOPES, never a guess, and both route to the same Reward
+  // Pools admin surface (P0.11 §"Empty state") rather than trapping the
+  // admin with no way forward.
+  function cdRewardsEditHtml(campaign, pools, draft) {
+    var eligiblePools = cdRewardEligiblePools(pools);
+    if (!(pools || []).length) {
+      return '<div style="margin-top:8px;max-width:480px;">' +
+        '<div class="section-title">Tournament Rewards</div>' +
+        '<div class="sub" style="margin-top:8px;">No reward pools are available yet.</div>' +
+        '<div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">' +
+        '<button class="btn" data-cd-cancel="rewards" type="button">Cancel</button>' +
+        '<button class="btn primary" data-cd-goto-pools="1" type="button">Manage Reward Pools</button>' +
+        '</div></div>';
+    }
+    if (!eligiblePools.length) {
+      return '<div style="margin-top:8px;max-width:480px;">' +
+        '<div class="section-title">Tournament Rewards</div>' +
+        '<div class="sub" style="margin-top:8px;">None of the existing reward pools can be used for Tournament rewards — they\'re registered for a different subsystem. Create or convert a pool for Tournament rewards to continue.</div>' +
+        '<div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">' +
+        '<button class="btn" data-cd-cancel="rewards" type="button">Cancel</button>' +
+        '<button class="btn primary" data-cd-goto-pools="1" type="button">Manage Reward Pools</button>' +
+        '</div></div>';
+    }
+    var tiersHtml = (draft || []).map(function (t, i) { return cdRewardTierRowHtml(t, i, eligiblePools); }).join("");
+    return '<div style="margin-top:8px;max-width:480px;">' +
+      '<div class="section-title">Tournament Rewards</div>' +
+      tiersHtml +
+      '<div style="margin-bottom:10px;display:flex;gap:8px;flex-wrap:wrap;">' +
+      '<button class="btn" type="button" data-cd-reward-add="1">+ Add reward tier</button>' +
+      '<button class="btn" type="button" data-cd-reward-refresh-pools="1" style="background:transparent;border:1px solid var(--border);">Refresh pools</button>' +
+      '</div>' +
+      cdFieldError("rewards") +
+      '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">' +
+      '<button class="btn" data-cd-cancel="rewards" type="button">Cancel</button>' +
+      '<button class="btn primary" data-cd-save-rewards="1" type="button">Save Rewards</button>' +
+      '</div></div>';
+  }
+
   function gcCampaignDetailChecklistHtml(rows, ctx) {
     ctx = ctx || {};
     var editingSection = ctx.editingSection || null;
     var campaign = ctx.campaign || {};
     var providers = ctx.providers || [];
+    var pools = ctx.pools || [];
+    var rewardsDraft = ctx.rewardsDraft || [];
     var isMission = gcIsMissionCampaign(campaign);
     return (rows || []).map(function (row) {
       var icon = row.complete ? '<span style="color:var(--ok);">✓</span>' : '<span style="color:var(--warn);">!</span>';
@@ -6202,13 +6391,21 @@
           '<div style="margin-left:20px;margin-top:6px;"><button class="btn" data-cd-when-mission-edit="1">Edit in Mission Admin</button></div>' +
           '</div>';
       }
-      var editable = CD_EDITABLE_KEYS.indexOf(row.key) !== -1;
+      // Only a Tournament's "rewards" row gets the inline tier editor — a
+      // Mission Pool's own "rewards" row (same row key, different meaning:
+      // a single linked pool) keeps routing to Mission Admin unchanged via
+      // the actionTarget branch below (rewards_mission).
+      var isTournamentRewardsRow = row.key === "rewards" && !isMission;
+      var editable = CD_EDITABLE_KEYS.indexOf(row.key) !== -1 || isTournamentRewardsRow;
       var body;
       if (editable && editingSection === row.key) {
         body = row.key === "campaign" ? cdCampaignEditHtml(campaign)
           : row.key === "when" ? cdWhenEditHtml(campaign)
           : row.key === "registration" ? cdRegistrationEditHtml(campaign)
-          : cdDestinationEditHtml(campaign, providers);
+          : row.key === "destination" ? cdDestinationEditHtml(campaign, providers)
+          : cdRewardsEditHtml(campaign, pools, rewardsDraft);
+      } else if (isTournamentRewardsRow) {
+        body = cdRewardsReadHtml(row, campaign, pools);
       } else {
         var actionBtn;
         if (editable) {
@@ -6357,7 +6554,7 @@
 
   // ---- Composer + orchestration (DOM-touching) --------------------------
 
-  function gcCampaignDetailHtml(campaign, providers, pools, editingSection) {
+  function gcCampaignDetailHtml(campaign, providers, pools, editingSection, rewardsDraft) {
     var rows = computeSetupChecklist(campaign, providers, pools);
     var progress = gcChecklistProgress(rows);
     var shareState = gcComputeShareState(campaign);
@@ -6371,7 +6568,7 @@
         '<div class="progress-label">Setup ' + progress.completed + ' / ' + progress.total + ' complete</div>' +
       '</div>' +
       '<div class="section-title" style="margin-bottom:8px;">Setup</div>' +
-      gcCampaignDetailChecklistHtml(rows, { editingSection: editingSection || null, campaign: campaign, providers: providers }) +
+      gcCampaignDetailChecklistHtml(rows, { editingSection: editingSection || null, campaign: campaign, providers: providers, pools: pools, rewardsDraft: rewardsDraft }) +
       '<div style="margin:14px 0;display:flex;gap:8px;flex-wrap:wrap;">' +
         gcCampaignDetailContinueHtml(rows, campaign) +
         '<button class="btn" data-gc-action="preview" data-id="' + esc(campaign.campaign_id) + '">Preview Campaign</button>' +
@@ -6399,7 +6596,7 @@
   // immediately before building a PUT body (see the P0.5b nested-block
   // notes above CD_EDITABLE_KEYS), so a save can never merge onto a stale
   // in-memory copy even if this page has sat open for several minutes.
-  var cdViewState = { campaign: null, providers: [], pools: [], editingSection: null };
+  var cdViewState = { campaign: null, providers: [], pools: [], editingSection: null, rewardsDraft: [] };
 
   function renderCampaignDetail(campaignId) {
     state.campaignId = campaignId;
@@ -6431,7 +6628,11 @@
         return null;
       }
       var campaign = resp.campaign;
-      var needsPools = campaign.mechanic === "mission_pool" || campaign.type === "mission_pool";
+      // A Tournament also needs the reward-pools lookup now (P0.11) — its
+      // Rewards row/editor reads pool name+stock for the tier picker and
+      // the beginner-facing "1st place / $50 Voucher × 1" breakdown, the
+      // same cached endpoint Mission Pool already shares (P0.3).
+      var needsPools = campaign.mechanic === "mission_pool" || campaign.type === "mission_pool" || campaign.type === "tournament";
       return Promise.all([
         fetchGcProviders(force),
         needsPools ? fetchGcRewardPools(force) : Promise.resolve([]),
@@ -6444,6 +6645,7 @@
         cdViewState.pools = pools;
         cdViewState.editingSection = null;
         cdViewState.editingSnapshot = null;
+        cdViewState.rewardsDraft = [];
         var bc = $("#breadcrumb");
         if (bc) bc.textContent = "🕹 Player Campaigns  /  Campaigns  /  " + (campaign.name || campaign.campaign_id);
         var titleEl = $("#view-title");
@@ -6499,6 +6701,48 @@
       var saveBtn = e.target && e.target.closest && e.target.closest("[data-cd-save]");
       if (saveBtn) { cdSaveSection(saveBtn.dataset.cdSave, saveBtn); return; }
 
+      // P0.11: Tournament Rewards tier editor — Add/Remove tier both
+      // re-render from cdViewState.rewardsDraft (never the network), and
+      // both first sync whatever's currently typed in the OTHER tier rows
+      // back into that draft so adding/removing one tier never discards
+      // in-progress edits to the others.
+      var addTierBtn = e.target && e.target.closest && e.target.closest("[data-cd-reward-add]");
+      if (addTierBtn) {
+        cdRewardsSyncDraftFromForm();
+        cdViewState.rewardsDraft.push(cdBlankRewardTier());
+        $("#cd-body").innerHTML = gcCampaignDetailHtml(cdViewState.campaign, cdViewState.providers, cdViewState.pools, cdViewState.editingSection, cdViewState.rewardsDraft);
+        return;
+      }
+      var removeTierBtn = e.target && e.target.closest && e.target.closest("[data-cd-reward-remove]");
+      if (removeTierBtn) {
+        cdRewardsSyncDraftFromForm();
+        var removeKey = removeTierBtn.dataset.cdRewardRemove;
+        cdViewState.rewardsDraft = cdViewState.rewardsDraft.filter(function (t) { return t.key !== removeKey; });
+        $("#cd-body").innerHTML = gcCampaignDetailHtml(cdViewState.campaign, cdViewState.providers, cdViewState.pools, cdViewState.editingSection, cdViewState.rewardsDraft);
+        return;
+      }
+      var saveRewardsBtn = e.target && e.target.closest && e.target.closest("[data-cd-save-rewards]");
+      if (saveRewardsBtn) { cdSaveRewards(saveRewardsBtn); return; }
+      // Empty-state exit from the rewards editor when no (eligible) pool
+      // exists yet — never a dead end (P0.11 §"Empty state").
+      var gotoPoolsBtn = e.target && e.target.closest && e.target.closest("[data-cd-goto-pools]");
+      if (gotoPoolsBtn) { switchView("gcRewards"); return; }
+      // Explicit refresh only (never automatic on open, keeping cdOpenEdit's
+      // "no network call" contract intact) — an admin who creates/edits a
+      // pool on the Reward Pools screen and comes back here can force the
+      // shared fetchGcRewardPools cache (P0.3) to refetch without leaving
+      // and re-entering this editor.
+      var refreshPoolsBtn = e.target && e.target.closest && e.target.closest("[data-cd-reward-refresh-pools]");
+      if (refreshPoolsBtn) {
+        cdRewardsSyncDraftFromForm();
+        fetchGcRewardPools(true).then(function (pools) {
+          if (cdViewState.editingSection !== "rewards") return; // closed while loading
+          cdViewState.pools = pools || [];
+          $("#cd-body").innerHTML = gcCampaignDetailHtml(cdViewState.campaign, cdViewState.providers, cdViewState.pools, cdViewState.editingSection, cdViewState.rewardsDraft);
+        });
+        return;
+      }
+
       var editBtn = e.target && e.target.closest && e.target.closest("[data-cd-edit]");
       if (editBtn) { cdOpenEdit(editBtn.dataset.cdEdit); return; }
 
@@ -6521,12 +6765,15 @@
       if (CD_EDITABLE_KEYS.indexOf(target) !== -1) { cdOpenEdit(target); return; }
       if (!id) return;
       if (target === "mission" || target === "rewards_mission") { openMissionAdmin(id); return; }
-      // Tournament reward rules have no dedicated admin screen anywhere in
-      // this dashboard yet (reward_config.rules is a structured rule list —
-      // see reward_engine.py — with no existing CRUD UI to route to), and
-      // building one is explicitly out of scope for P0.5b. Say so instead
-      // of a dead link or a fake editor.
-      toast("Editing rewards from here isn't available yet — see Technical Details.", "warn");
+      // P0.11: Continue Setup → Rewards now opens the Tournament Rewards
+      // editor directly (same inline editor the row's own [Set up rewards]
+      // button opens) instead of the old dead-end toast.
+      if (target === "rewards_tournament") { cdOpenEdit("rewards"); return; }
+      // No other actionTarget exists today — every row above either edits
+      // inline or routes to its own admin surface. Kept as a safe fallback
+      // rather than a silent no-op if a future row type is ever added
+      // without wiring a target here first.
+      toast("This step isn't editable from here yet.", "warn");
     });
 
     document.addEventListener("change", function (e) {
@@ -6555,7 +6802,11 @@
     // from "this field just still shows what was here when the form opened"
     // (see cdSaveSection's per-field diff against this snapshot).
     cdViewState.editingSnapshot = section ? cdViewState.campaign : null;
-    $("#cd-body").innerHTML = gcCampaignDetailHtml(cdViewState.campaign, cdViewState.providers, cdViewState.pools, cdViewState.editingSection);
+    // P0.11: (re)build the tier draft from the campaign's current
+    // reward_config.rules every time the Rewards editor opens — never
+    // carried over stale from a previous open/close of this same section.
+    if (section === "rewards") cdViewState.rewardsDraft = cdRewardsInitDraft(cdViewState.campaign);
+    $("#cd-body").innerHTML = gcCampaignDetailHtml(cdViewState.campaign, cdViewState.providers, cdViewState.pools, cdViewState.editingSection, cdViewState.rewardsDraft);
   }
 
   // Friendly error surface for Campaign Detail's inline saves only (see the
@@ -6710,6 +6961,264 @@
     }).catch(function () {
       cdShowSectionError(section, "Couldn't save changes. Try again.");
       if (btnEl) { btnEl.disabled = false; btnEl.textContent = "Save"; }
+    });
+  }
+
+  // ---- P0.11: Tournament Rewards — save orchestration -------------------
+  //
+  // Same read-merge-PUT contract as cdSaveSection above, applied to the
+  // ONE nested block campaign_centre._validate_body reconstructs whole the
+  // instant "reward_config" is present in a PUT body: GET the canonical
+  // campaign immediately before building the request, copy its COMPLETE
+  // reward_config object (source/approval_required/auto_allocate/rules —
+  // and any future sibling field, via a shallow spread rather than
+  // enumerating known keys, so a field this screen has never heard of is
+  // never dropped), and override only `rules`. Concurrent-edit safety
+  // mirrors cdSaveSection's registration/destination handling: `rules`
+  // itself is this admin's own edit (last-write-wins, an accepted P0.5b
+  // cost already applied elsewhere), but every "rank" rule this editor
+  // doesn't show — and every other reward_config sibling — always comes
+  // from the freshest GET, never this page's possibly-stale snapshot, so a
+  // concurrent change to either survives.
+  var cdRewardTierKeySeq = 0;
+  function cdNextRewardTierKey() {
+    cdRewardTierKeySeq += 1;
+    return "t" + Date.now().toString(36) + cdRewardTierKeySeq;
+  }
+
+  function cdBlankRewardTier() {
+    return { key: cdNextRewardTierKey(), ruleId: null, minRank: "", maxRank: "", poolId: "", originalPoolId: null, originalRewardLabel: null, originalPoolType: null };
+  }
+
+  // Only "rank" rules are ever shown/edited — any other condition_type
+  // already on the campaign (hand-authored score_threshold/participation/
+  // etc.) is left for cdSaveRewards to carry through untouched from the
+  // freshest GET, never surfaced or reordered here.
+  function cdRewardsInitDraft(campaign) {
+    var rules = ((campaign || {}).reward_config || {}).rules || [];
+    var rankRules = rules.filter(function (r) { return r.condition_type === "rank"; }).slice();
+    rankRules.sort(function (a, b) {
+      return (((a.params || {}).min_rank) || 0) - (((b.params || {}).min_rank) || 0);
+    });
+    if (!rankRules.length) return [cdBlankRewardTier()];
+    return rankRules.map(function (r) {
+      var params = r.params || {};
+      return {
+        key: cdNextRewardTierKey(),
+        ruleId: r.rule_id || null,
+        minRank: params.min_rank != null ? params.min_rank : "",
+        maxRank: params.max_rank != null ? params.max_rank : "",
+        poolId: r.pool_id || "",
+        originalPoolId: r.pool_id || null,
+        originalRewardLabel: r.reward_label != null ? r.reward_label : null,
+        originalPoolType: r.pool_type != null ? r.pool_type : null,
+      };
+    });
+  }
+
+  // Reads every currently-rendered tier row's inputs back into
+  // cdViewState.rewardsDraft — called before Add/Remove tier (so a
+  // structural change to the list never discards what's typed in the OTHER
+  // rows) and before Save.
+  function cdRewardsSyncDraftFromForm() {
+    var draft = cdViewState.rewardsDraft || [];
+    var byKey = {};
+    draft.forEach(function (t) { byKey[t.key] = t; });
+    $all("[data-cd-reward-field]").forEach(function (input) {
+      var tier = byKey[input.dataset.cdRewardKey];
+      if (!tier) return;
+      var field = input.dataset.cdRewardField;
+      if (field === "minRank" || field === "maxRank") tier[field] = input.value;
+      else if (field === "poolId") tier.poolId = input.value || "";
+    });
+  }
+
+  // Builds the final rank-rule objects from the draft and validates them
+  // exactly the way reward_engine.validate_reward_rules does (min_rank>=1,
+  // max_rank>=min_rank, non-overlapping ranges once sorted, a non-empty
+  // pool_id) — client-side so an admin never round-trips to the server for
+  // a mistake this page can already see, while the server call in
+  // cdSaveRewards below remains the actual source of truth. Returns
+  // {rules: [...]} or {error: <code>}.
+  //
+  // Every rule stamps pool_type from the SELECTED pool's own registered
+  // pool_type (falling back to the rule's previous pool_type only when the
+  // pool_id itself didn't change and the pool isn't in the loaded list).
+  // Without this, a rule with no pool_type defaults to "tournament_reward"
+  // server-side at allocation time (tournament_rewards.py) — silently
+  // un-allocatable for any pool actually registered under a different
+  // pool_type, even though save-time validation would never catch it. This
+  // editor never lets that landmine ship.
+  //
+  // reward_label is likewise only overwritten when the tier's pool_id
+  // actually changed (or it's a brand-new tier) — an untouched tier keeps
+  // whatever label it already had, so re-saving unchanged tiers never
+  // rewrites text an admin may have customized by hand outside this editor.
+  function cdRewardTiersFromDraft(draft, poolsById) {
+    var built = [];
+    for (var i = 0; i < (draft || []).length; i++) {
+      var t = draft[i];
+      var minRaw = String(t.minRank == null ? "" : t.minRank).trim();
+      var maxRaw = String(t.maxRank == null ? "" : t.maxRank).trim();
+      if (!minRaw || !maxRaw || !/^-?\d+$/.test(minRaw) || !/^-?\d+$/.test(maxRaw)) {
+        return { error: "invalid_rank_range" };
+      }
+      var minRank = parseInt(minRaw, 10);
+      var maxRank = parseInt(maxRaw, 10);
+      if (minRank < 1 || maxRank < minRank) {
+        return { error: "invalid_rank_range" };
+      }
+      if (!t.poolId) {
+        return { error: "missing_pool_id" };
+      }
+      var pool = poolsById[t.poolId];
+      var poolType = pool ? pool.pool_type : ((t.poolId === t.originalPoolId) ? t.originalPoolType : null);
+      var rewardLabel = (t.poolId === t.originalPoolId && t.originalRewardLabel)
+        ? t.originalRewardLabel
+        : ((pool && pool.name) || t.originalRewardLabel || "");
+      var rule = {
+        rule_id: t.ruleId || cdNextRewardTierKey(),
+        condition_type: "rank",
+        params: { min_rank: minRank, max_rank: maxRank },
+        pool_id: t.poolId,
+        reward_label: rewardLabel,
+      };
+      if (poolType) rule.pool_type = poolType;
+      built.push(rule);
+    }
+    // Mirrors reward_engine._rank_ranges_overlap exactly: sort by
+    // min_rank, then reject if any range starts at/before the previous
+    // range's end. Gaps between tiers are explicitly legal and untouched.
+    built.sort(function (a, b) { return a.params.min_rank - b.params.min_rank; });
+    for (var j = 1; j < built.length; j++) {
+      if (built[j].params.min_rank <= built[j - 1].params.max_rank) {
+        return { error: "overlapping_rank_ranges" };
+      }
+    }
+    // At least one rank tier is required (Codex review finding). Without
+    // one, tournament_integration._validate_payload()'s allowed_ranks —
+    // built purely from rank-type rules via reward_engine.rank_ranges —
+    // is empty, so EVERY submitted winner is rejected with
+    // winner_rank_outside_reward_rules even though a preserved non-rank
+    // rule could otherwise leave reward_config.rules non-empty and the
+    // checklist/publish gate reading "configured". Removing every tier
+    // must be blocked here, not silently accepted as a valid save.
+    if (!built.length) {
+      return { error: "at_least_one_tier_required" };
+    }
+    return { rules: built };
+  }
+
+  // Plain-English mapping for every code reward_engine.validate_reward_rules
+  // / campaign_centre._validate_body can actually return for a reward_config
+  // update, plus the two update_campaign/publish codes an admin could still
+  // hit here (pool_not_found/reward_rules_required don't exist as
+  // validate_reward_rules codes today but are mapped defensively rather
+  // than ever surfacing a raw code) — never raw JSON, never a bare code, in
+  // the beginner-facing error box.
+  var CD_REWARDS_ERROR_MESSAGES = {
+    invalid_rank_range: "Check the reward tiers — rank must start at 1 and the end rank can't be before the start rank.",
+    overlapping_rank_ranges: "Reward rank ranges can't overlap.",
+    missing_pool_id: "Choose a reward pool for every tier.",
+    at_least_one_tier_required: "Add at least one reward tier before saving.",
+    invalid_pool: "Choose a valid reward pool.",
+    pool_not_found: "One of the selected reward pools no longer exists.",
+    invalid_rules: "Couldn't save rewards. Try again.",
+    invalid_rule: "Couldn't save rewards. Try again.",
+    duplicate_or_missing_rule_id: "Couldn't save rewards. Try again.",
+    invalid_condition_type: "Couldn't save rewards. Try again.",
+  };
+
+  function cdRewardsFriendlyError(code) {
+    return CD_REWARDS_ERROR_MESSAGES[code] || "Couldn't save rewards. Try again.";
+  }
+
+  // Codex review finding: reinserts the edited rank-rule block at the
+  // position the FIRST original rank rule occupied in the freshest GET (or
+  // the very front if none existed yet) instead of always moving every
+  // rank rule ahead of every preserved rule. reward_engine.match_rule()
+  // returns the first matching rule in list order, and a tournament
+  // winner's context carries both `rank` and `score`
+  // (tournament_rewards._create_or_confirm_rewards) — so a preserved rule
+  // matching on something else (score_threshold, participation, ...) can
+  // match the very same context a rank rule would. Concatenating every
+  // rank rule before every preserved rule would silently change which rule
+  // wins for such a winner, or let a catch-all "participation" rule
+  // (always matches) start shadowing every rank rule if it wasn't already
+  // ordered before them. Every OTHER preserved rule keeps its exact
+  // relative order among the other preserved rules.
+  function cdMergeRewardRules(latestRules, editedRankRules) {
+    latestRules = latestRules || [];
+    var anchorIdx = -1;
+    for (var i = 0; i < latestRules.length; i++) {
+      if (latestRules[i].condition_type === "rank") { anchorIdx = i; break; }
+    }
+    var withoutRank = latestRules.filter(function (r) { return r.condition_type !== "rank"; });
+    var insertAt = anchorIdx === -1 ? 0 :
+      latestRules.slice(0, anchorIdx).filter(function (r) { return r.condition_type !== "rank"; }).length;
+    return withoutRank.slice(0, insertAt).concat(editedRankRules, withoutRank.slice(insertAt));
+  }
+
+  function cdSaveRewards(btnEl) {
+    var id = state.campaignId;
+    if (!id || !cdViewState.campaign) return;
+    cdShowSectionError("rewards", "");
+    cdRewardsSyncDraftFromForm();
+
+    var poolsById = {};
+    (cdViewState.pools || []).forEach(function (p) { poolsById[p.pool_id] = p; });
+    var built = cdRewardTiersFromDraft(cdViewState.rewardsDraft || [], poolsById);
+    if (built.error) {
+      cdShowSectionError("rewards", cdRewardsFriendlyError(built.error));
+      return;
+    }
+
+    if (btnEl) { btnEl.disabled = true; btnEl.textContent = "Saving…"; }
+    var detailUrl = "/api/admin/gc-campaigns/" + encodeURIComponent(id);
+
+    api(detailUrl).then(function (latestResp) {
+      if (!latestResp || latestResp.status !== "ok" || !latestResp.campaign) {
+        throw new Error("stale_campaign_fetch_failed");
+      }
+      var latest = latestResp.campaign;
+      var latestReward = latest.reward_config || {};
+      var latestRules = latestReward.rules || [];
+      // Any non-"rank" rule (this editor never shows or edits one) always
+      // comes from THIS freshest read, never from whatever cdViewState.
+      // rewardsDraft was built from when the editor opened — a concurrent
+      // admin action that added/changed one of those rules elsewhere is
+      // never clobbered by this save. cdMergeRewardRules also reinserts
+      // the edited rank-rule block at its original position rather than
+      // always moving it to the front — see that function's comment for
+      // why list order is semantically significant here.
+      var mergedRewardConfig = Object.assign({}, latestReward, {
+        rules: cdMergeRewardRules(latestRules, built.rules),
+      });
+      return apiPutJson(detailUrl, { reward_config: mergedRewardConfig });
+    }).then(function (res) {
+      if (!res || !res.ok || !res.d || res.d.status !== "ok") {
+        cdShowSectionError("rewards", cdRewardsFriendlyError(res && res.d && res.d.code));
+        if (btnEl) { btnEl.disabled = false; btnEl.textContent = "Save Rewards"; }
+        return;
+      }
+      return api(detailUrl).then(function (freshResp) {
+        var freshCampaign = freshResp && freshResp.campaign;
+        if (!freshCampaign) {
+          cdShowSectionError("rewards", "Couldn't save rewards. Try again.");
+          if (btnEl) { btnEl.disabled = false; btnEl.textContent = "Save Rewards"; }
+          return;
+        }
+        cdViewState.campaign = freshCampaign;
+        cdViewState.editingSection = null;
+        cdViewState.rewardsDraft = [];
+        var titleEl = $("#view-title");
+        if (titleEl) titleEl.innerHTML = esc(freshCampaign.name || freshCampaign.campaign_id) + " " + gcDisplayPill(freshCampaign);
+        $("#cd-body").innerHTML = gcCampaignDetailHtml(freshCampaign, cdViewState.providers, cdViewState.pools, null, []);
+        toast("✅ Saved", "success");
+      });
+    }).catch(function () {
+      cdShowSectionError("rewards", "Couldn't save rewards. Try again.");
+      if (btnEl) { btnEl.disabled = false; btnEl.textContent = "Save Rewards"; }
     });
   }
 
