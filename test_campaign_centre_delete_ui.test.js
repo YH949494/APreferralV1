@@ -53,16 +53,21 @@ function loadFeatureSource() {
 // runtime execution).
 // ---------------------------------------------------------------------
 
-test("row template places data-gc-action=\"delete\" immediately after duplicate", () => {
-  const rowStart = JS.indexOf("function loadGcCampaigns(force) {");
-  const rowEnd = JS.indexOf("function loadMissionPool()", rowStart);
-  const rowSrc = JS.slice(rowStart, rowEnd);
-  const duplicateIdx = rowSrc.indexOf('data-gc-action="duplicate"');
-  const deleteIdx = rowSrc.indexOf('data-gc-action="delete"');
+// P0.4 moved every row action off the dense table into the "•••" overflow
+// menu (gcOverflowMenuHtml) — Delete's position is now checked there
+// instead of in loadGcCampaigns's own source (which no longer builds
+// per-row action markup inline; see test_admin_dashboard_p0_4_campaign_list
+// for the full P0.4 suite).
+test("overflow menu places data-gc-action=\"delete\" immediately after duplicate", () => {
+  const menuStart = JS.indexOf("function gcOverflowMenuHtml(campaign, actions) {");
+  const menuEnd = JS.indexOf("function gcCampaignRowHtml(campaign, rows) {", menuStart);
+  const menuSrc = JS.slice(menuStart, menuEnd);
+  const duplicateIdx = menuSrc.indexOf('data-gc-action="duplicate"');
+  const deleteIdx = menuSrc.indexOf('data-gc-action="delete"');
   assert.ok(duplicateIdx !== -1, "duplicate button not found");
   assert.ok(deleteIdx !== -1, "delete button not found");
   assert.ok(deleteIdx > duplicateIdx, "delete button must come after duplicate");
-  assert.match(rowSrc.slice(deleteIdx - 40, deleteIdx), /btn danger/, "delete button should use the destructive .btn.danger style");
+  assert.match(menuSrc.slice(deleteIdx - 40, deleteIdx), /danger/, "delete button should use the destructive style");
 });
 
 // ---------------------------------------------------------------------

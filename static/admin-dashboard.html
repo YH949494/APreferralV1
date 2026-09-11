@@ -1731,7 +1731,19 @@
           <div class="sub" style="margin-top:6px;">New campaigns always start as <b>draft</b> and stay admin-only until published — see Providers tab to mark a destination ready.</div>
         </div>
 
-        <div class="section-title" style="margin-bottom:8px;">Campaigns</div>
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:10px;">
+          <div class="section-title" style="margin:0;">Campaigns</div>
+          <button class="btn primary" id="gc-new-campaign-cta-btn">+ New Campaign</button>
+        </div>
+        <div class="seg" id="gc-status-filter" style="margin-bottom:14px;">
+          <button data-status="" class="active">All</button>
+          <button data-status="live">Live</button>
+          <button data-status="scheduled">Scheduled</button>
+          <button data-status="draft">Draft</button>
+          <button data-status="paused">Paused</button>
+          <button data-status="ended">Ended</button>
+          <button data-status="archived">Archived</button>
+        </div>
         <div id="gc-campaigns-body"></div>
       </section>
 

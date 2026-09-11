@@ -212,6 +212,24 @@ html, body {
 .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
 .seg button { background: var(--panel); color: var(--muted); border: none; padding: 7px 14px; cursor: pointer; font-size: 13px; }
 .seg button.active { background: var(--accent); color: #1a1a1a; font-weight: 600; }
+/* #gc-status-filter has 7 buttons (All/Live/Scheduled/Draft/Paused/Ended/
+   Archived) — wider than the .seg bar elsewhere in this file, so on a
+   narrow viewport it can exceed the content width. .seg's own
+   `overflow: hidden` (plus .main's own overflow-x: hidden) would silently
+   clip the rightmost buttons with no way to reach them, e.g. Ended/Archived,
+   with no way to reach them. Scoped to this one id (never `.seg` itself, so
+   every other segmented control on the page keeps its current, unclipped-
+   by-design behavior) and horizontal-scroll rather than wrap, to preserve
+   the existing single-row segmented-pill look instead of a two-row block. */
+#gc-status-filter {
+  display: flex;
+  flex-wrap: nowrap;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+}
+#gc-status-filter button { flex: 0 0 auto; }
 
 /* Cards */
 .card-grid {
@@ -448,7 +466,16 @@ pre.payload { background: var(--bg); border: 1px solid var(--border); border-rad
 .campaign-card-header { display:flex;justify-content:space-between;align-items:center;margin-bottom:6px; }
 .campaign-card-title { font-size:14px;font-weight:600;color:var(--text); }
 .campaign-card-meta { font-size:11px;color:var(--muted);display:flex;gap:12px;flex-wrap:wrap;margin-top:4px; }
-.campaign-card-actions { display:flex;gap:6px;margin-top:10px; }
+.campaign-card-actions { display:flex;gap:8px;margin-top:10px;align-items:center; }
+.campaign-card[data-gc-row-id] { cursor:pointer; }
+.gc-row-menu-wrap { position:relative;margin-left:auto; }
+.gc-kebab-btn { background:transparent;border:1px solid var(--border);border-radius:6px;width:34px;height:34px;cursor:pointer;font-size:16px;line-height:1;color:var(--muted); }
+.gc-kebab-btn:hover { background:var(--panel-2);color:var(--text); }
+.gc-row-menu { position:absolute;right:0;top:calc(100% + 4px);background:var(--panel);border:1px solid var(--border);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,0.35);min-width:170px;padding:4px;z-index:30; }
+.gc-row-menu button { display:block;width:100%;text-align:left;background:none;border:none;padding:8px 10px;font-size:13px;color:var(--text);cursor:pointer;border-radius:6px; }
+.gc-row-menu button:hover { background:var(--panel-2); }
+.gc-row-menu button.danger { color:var(--bad); }
+.gc-row-menu .btn { min-height:auto;border:none;background:none;box-sizing:border-box; }
 
 /* ---- Dashboard V2: toast framework ---- */
 .toast-stack {
