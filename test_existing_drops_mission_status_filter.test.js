@@ -219,6 +219,22 @@ test("a paused mission appears", async () => {
   assert.match(allText(tbody).join("\n"), /Paused Mission/);
 });
 
+// Codex review follow-up: every campaign starts life with status="draft"
+// (campaign_centre.create_campaign), and operational_state() in
+// mission_pool_ux.py surfaces that unchanged as state="draft" until it's
+// scheduled/launched. A brand-new, unpublished campaign is unfinished and
+// actionable — it must not disappear from Existing Drops just because it
+// hasn't been scheduled yet.
+test("a draft (newly created, unpublished) mission appears", async () => {
+  const missions = [mission({ campaign_id: "c_draft", name: "Draft Mission", state: "draft" })];
+  const { sandbox, tbody } = buildSandbox({ fetchImpl: fetchWith({ missions }) });
+  run(sandbox);
+  await sandbox.adm_list();
+
+  assert.equal(tbody.children.length, 1);
+  assert.match(allText(tbody).join("\n"), /Draft Mission/);
+});
+
 // ---------------------------------------------------------------------
 // 4. Completed mission is hidden
 // ---------------------------------------------------------------------

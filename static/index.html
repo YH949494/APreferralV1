@@ -3126,7 +3126,12 @@
     // Backends have used inconsistent status vocabularies over time
     // (state vs. campaign_status, "active" vs. "live", "closed" vs.
     // "ended", etc.), so normalize before matching against the allow-list.
+    // "draft" is included: every campaign starts in status="draft"
+    // (campaign_centre.create_campaign), and operational_state() in
+    // mission_pool_ux.py surfaces that as-is until it's scheduled/launched —
+    // an unpublished draft is unfinished and actionable, not archived.
     const ADM_MISSION_VISIBLE_STATUSES = new Set([
+      "draft",
       "upcoming", "scheduled",
       "live", "active",
       "paused",
