@@ -94,11 +94,18 @@ class FakeElement {
     this.value = "";
     this.disabled = false;
     this._listeners = {};
+    this._attrs = {};
   }
   get textContent() { return this._text; }
   set textContent(v) { this._text = v == null ? "" : String(v); }
   get innerHTML() { return this._html; }
   set innerHTML(v) { this._html = v == null ? "" : String(v); }
+  // P0.16 §G — openGcDeleteModal now stamps role/aria-modal/aria-labelledby
+  // onto the modal box via setAttribute; this stub needs to support it the
+  // same way a real DOM element would.
+  setAttribute(name, value) { this._attrs[name] = String(value); }
+  getAttribute(name) { return Object.prototype.hasOwnProperty.call(this._attrs, name) ? this._attrs[name] : null; }
+  removeAttribute(name) { delete this._attrs[name]; }
   appendChild(node) { node.parent = this; this.children.push(node); return node; }
   remove() {
     if (this.parent) {
@@ -119,6 +126,7 @@ class FakeElement {
 
 function makeDocument() {
   const body = new FakeElement("body");
+  const docListeners = {};
   function walk(node, id) {
     for (const c of node.children) {
       if (c.id === id) return c;
@@ -140,7 +148,19 @@ function makeDocument() {
     getElementById: () => null,
     querySelectorAll: () => [],
     querySelector: (sel) => (sel[0] === "#" ? walk(body, sel.slice(1)) : null),
-    addEventListener: () => {},
+    // P0.16 §G — openGcDeleteModal's Escape handling is now bound at
+    // document level (not just the input) so it still works while the
+    // input/confirm button are disabled during the DELETE request; close()
+    // always unregisters it afterward. A real (not no-op) listener registry
+    // is needed here so the new tests below can actually dispatch a
+    // document-level Escape keydown.
+    addEventListener: (evt, fn) => { (docListeners[evt] = docListeners[evt] || []).push(fn); },
+    removeEventListener: (evt, fn) => {
+      if (!docListeners[evt]) return;
+      docListeners[evt] = docListeners[evt].filter((f) => f !== fn);
+    },
+    _trigger: (evt, evtObj) => { (docListeners[evt] || []).slice().forEach((fn) => fn(evtObj)); },
+    _listenerCount: (evt) => (docListeners[evt] || []).length,
   };
 }
 
@@ -343,6 +363,98 @@ test("Cancel closes the modal without calling the API", () => {
   cancelBtn._trigger("click");
   assert.equal(overlay.isAttached(), false);
   assert.equal(fetchImpl.calls.length, 0);
+});
+
+// =======================================================================
+// P0.16 §E/§G — modal dialog semantics + Escape-while-disabled
+// =======================================================================
+
+test("the modal box carries role=dialog, aria-modal=true, and an aria-labelledby pointing at a real element", () => {
+  const { context, document } = makeContext();
+  context.openGcDeleteModal("summer-lucky-draw-2026", "Summer Lucky Draw");
+  const overlay = document.body.children[document.body.children.length - 1];
+  const box = overlay.children[0];
+  assert.equal(box.getAttribute("role"), "dialog");
+  assert.equal(box.getAttribute("aria-modal"), "true");
+  const labelledBy = box.getAttribute("aria-labelledby");
+  assert.ok(labelledBy, "aria-labelledby must be set");
+  const titleEl = box.children.find((c) => c.id === labelledBy);
+  assert.ok(titleEl, "aria-labelledby must point at an element that actually exists in the modal");
+  assert.equal(titleEl.textContent, "Delete campaign permanently?");
+});
+
+// Codex review (P1): closing the modal via Escape does NOT cancel the
+// underlying DELETE request — an admin who hits Escape mid-request would
+// otherwise see it as "I backed out" while the campaign still gets deleted
+// (or a failure gets written into a modal that's no longer on screen). So
+// Escape must be a safe no-op while the request is in flight, bound at
+// document level only so it can reliably resume working the moment the
+// request settles (the input/button being disabled is exactly the in-flight
+// window, so an input-only listener can't do this at all).
+test("Escape is a no-op while the DELETE request is in flight (never silently 'cancels' an irreversible request)", async () => {
+  const { context, document } = makeContext();
+  // Never resolves within this test — simulates a still-in-flight DELETE.
+  let resolveFetch;
+  const pending = new Promise((resolve) => { resolveFetch = resolve; });
+  context.fetch = () => pending;
+
+  context.openGcDeleteModal("summer-lucky-draw-2026", "Summer Lucky Draw");
+  const overlay = document.body.children[document.body.children.length - 1];
+  const input = findInput(overlay);
+  const confirmBtn = findByText(overlay, "Delete permanently");
+
+  input.value = "Summer Lucky Draw";
+  input._trigger("input");
+  confirmBtn._trigger("click");
+  await Promise.resolve();
+
+  assert.equal(input.disabled, true, "input must be disabled while the request is in flight");
+  assert.equal(confirmBtn.disabled, true, "confirm button must be disabled while the request is in flight");
+
+  document._trigger("keydown", { key: "Escape" });
+  assert.equal(overlay.isAttached(), true, "Escape must not close the modal while its own request is still in flight");
+
+  resolveFetch({ status: 200, ok: true, json: () => Promise.resolve({ status: "ok" }) });
+  await flush();
+  assert.equal(overlay.isAttached(), false, "the modal still closes on its own once the request actually succeeds");
+});
+
+test("Escape closes the modal normally before any request has started (idle state)", () => {
+  const { context, document } = makeContext();
+  context.openGcDeleteModal("summer-lucky-draw-2026", "Summer Lucky Draw");
+  const overlay = document.body.children[document.body.children.length - 1];
+  document._trigger("keydown", { key: "Escape" });
+  assert.equal(overlay.isAttached(), false, "Escape must still close an idle (not in-flight) modal");
+});
+
+test("Escape works again immediately after a failed request re-enables the modal's controls", async () => {
+  const { context, document, fetchImpl } = makeContext();
+  fetchImpl.push(500, { status: "error", code: "internal_error" });
+
+  context.openGcDeleteModal("summer-lucky-draw-2026", "Summer Lucky Draw");
+  const overlay = document.body.children[document.body.children.length - 1];
+  const input = findInput(overlay);
+  const confirmBtn = findByText(overlay, "Delete permanently");
+
+  input.value = "Summer Lucky Draw";
+  input._trigger("input");
+  confirmBtn._trigger("click");
+  await flush();
+
+  assert.equal(overlay.isAttached(), true, "still open after the failed request");
+  assert.equal(confirmBtn.disabled, false, "re-enabled after failure");
+
+  document._trigger("keydown", { key: "Escape" });
+  assert.equal(overlay.isAttached(), false, "Escape must work again once the request has settled");
+});
+
+test("closing the modal (Cancel) unregisters its document-level Escape listener — no leak across repeated opens", () => {
+  const { context, document } = makeContext();
+  context.openGcDeleteModal("summer-lucky-draw-2026", "Summer Lucky Draw");
+  assert.equal(document._listenerCount("keydown"), 1);
+  const overlay = document.body.children[document.body.children.length - 1];
+  findByText(overlay, "Cancel")._trigger("click");
+  assert.equal(document._listenerCount("keydown"), 0, "the keydown listener must be removed once the modal closes");
 });
 
 // ---------------------------------------------------------------------
