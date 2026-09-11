@@ -446,6 +446,12 @@ test("loadCampaignDetail() only ever calls the GET helper (api), never a mutatin
     fetchGcProviders: function () { return Promise.resolve([]); },
     fetchGcRewardPools: function () { return Promise.resolve([{ pool_id: "MP-1", name: "Prizes", stock: { available: 5 } }]); },
     gcPill: function (status) { return "<span>" + esc(status) + "</span>"; },
+    // P0.10: loadCampaignDetail's title pill now calls gcDisplayPill (the
+    // Mission-lifecycle-aware wrapper around gcPill) instead of gcPill
+    // directly — stubbed here the same way gcPill itself is, since this
+    // test only cares about the GET-only wiring property, not pill
+    // rendering (covered by the P0.10 suite instead).
+    gcDisplayPill: function (c) { return "<span>" + esc((c && c.status) || "") + "</span>"; },
     // Real checklist/HTML derivation is covered by the PURE_SRC tests above;
     // this test only cares that loadCampaignDetail wires GET-only data into
     // the composer and never reaches for a mutating helper, so the composer

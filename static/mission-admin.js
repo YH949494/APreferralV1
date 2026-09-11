@@ -1710,10 +1710,22 @@
       .then(function (r) {
         if (!r || r.status !== "ok") {
           host.toast("❌ " + ((r && r.code) || "action_failed"), "error");
-        } else if (action === "end_rewards") {
-          host.toast("✅ Ended " + num(r.count_affected) + " active reward(s)", "success");
         } else {
-          host.toast("✅ " + action + " ok", "success");
+          // Player Campaigns' own gc_campaigns list cache has no way to know
+          // this mutation happened — close/cancel/resume/process/end-rewards
+          // all change mission_pool/campaign.status fields that cache is
+          // built from. Without invalidating it here, returning to Player
+          // Campaigns right after would still render the pre-mutation state
+          // (e.g. a just-cancelled Mission still showing Live) until
+          // something unrelated happened to force a refresh. host provides
+          // this hook optionally so this module still works standalone/in
+          // tests that don't wire one.
+          if (host.invalidateCampaignsCache) host.invalidateCampaignsCache();
+          if (action === "end_rewards") {
+            host.toast("✅ Ended " + num(r.count_affected) + " active reward(s)", "success");
+          } else {
+            host.toast("✅ " + action + " ok", "success");
+          }
         }
         openDetail(campaignId);
       });
