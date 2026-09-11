@@ -6673,7 +6673,12 @@
         }
         var msg = typeof opts.successMessage === "function" ? opts.successMessage(res.d) : opts.successMessage;
         if (msg) toast("✅ " + msg, "success");
-        gcInvalidateCampaignsCache();
+        // Read-only actions (opts.invalidateCache: false — currently just
+        // Preview) never touch this: invalidating gcOptionsCache.campaigns
+        // here would otherwise null it out before onSuccess runs, so
+        // gcFindCachedCampaign could never find the list's own cached
+        // campaign for a preview opened from the Campaigns list.
+        if (opts.invalidateCache !== false) gcInvalidateCampaignsCache();
         if (opts.refresh !== false) gcDefaultRefresh(opts.id);
         if (opts.onSuccess) opts.onSuccess(res.d);
       }, function (err) {
@@ -6711,7 +6716,16 @@
   // when it isn't available. Never a second network call just for this.
   function gcFindCachedCampaign(campaignId) {
     if (!campaignId) return null;
-    if (cdViewState.campaign && cdViewState.campaign.campaign_id === campaignId) return cdViewState.campaign;
+    // cdViewState.campaign is only ever replaced wholesale by a fresh GET
+    // (see loadCampaignDetail's own comment above) — it is NEVER cleared on
+    // navigating back to the list, so it can still hold a stale snapshot of
+    // a campaign the admin already left Campaign Detail for. Trust it only
+    // while Campaign Detail is the actual active view; otherwise prefer the
+    // Campaigns list's own (freshly loaded) cache, which loadGcCampaigns
+    // keeps current for whatever's actually on screen.
+    if (state.view === "campaignDetail" && cdViewState.campaign && cdViewState.campaign.campaign_id === campaignId) {
+      return cdViewState.campaign;
+    }
     var list = gcOptionsCache.campaigns || [];
     for (var i = 0; i < list.length; i++) {
       if (list[i].campaign_id === campaignId) return list[i];
@@ -6792,6 +6806,10 @@
       id: campaignId, action: "preview", button: triggerBtn,
       loadingText: "Loading...",
       refresh: false,
+      // Preview never mutates the campaign — invalidating the Campaigns
+      // list cache here would only erase the very data gcFindCachedCampaign
+      // (called from onSuccess below) needs to enrich the modal.
+      invalidateCache: false,
       run: function () {
         return api("/api/admin/gc-campaigns/" + campaignId + "/preview").then(function (r) {
           return { ok: true, status: 200, d: r };

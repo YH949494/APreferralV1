@@ -345,6 +345,20 @@ test("Publish action: success reloads the canonical Campaign Detail, shows a suc
   assert.equal(calls.loadGcCampaigns.length, 0, "must never navigate back to the Campaigns list");
 });
 
+test("gcRunAction: a normal (mutating) action still invalidates the campaigns cache by default", async () => {
+  const { sandbox } = loadAction({ gcOptionsCache: { providers: [], campaigns: ["stub"], campaignsPromise: Promise.resolve(["stub"]) } });
+  await sandbox.gcRunAction(publishOpts(sandbox));
+  await flush();
+  assert.equal(sandbox.gcOptionsCache.campaigns, null, "publish/pause/archive/duplicate must still invalidate the cache");
+});
+
+test("gcRunAction: invalidateCache: false (Preview's own opt-out) leaves the campaigns cache untouched", async () => {
+  const { sandbox } = loadAction({ gcOptionsCache: { providers: [], campaigns: ["stub"], campaignsPromise: Promise.resolve(["stub"]) } });
+  await sandbox.gcRunAction(publishOpts(sandbox, { invalidateCache: false }));
+  await flush();
+  assert.deepEqual(sandbox.gcOptionsCache.campaigns, ["stub"], "a read-only action opting out must never invalidate the list cache");
+});
+
 test("Publish action: Resume uses its own confirm copy and success message", async () => {
   const { sandbox, calls } = loadAction();
   await sandbox.gcRunAction(publishOpts(sandbox, {
@@ -513,10 +527,11 @@ function previewResponse(overrides) {
   }, overrides || {});
 }
 
-test("Preview: gcOpenPreview from the Campaigns list context opens the modal", async () => {
+test("Preview: gcOpenPreview from the Campaigns list context opens the modal, enriched from the list cache", async () => {
   const resp = previewResponse();
   const { sandbox, document } = loadPreview({
-    gcOptionsCache: { providers: [activeProvider], campaigns: [standardDropCampaign()], campaignsPromise: Promise.resolve([]) },
+    state: { view: "gcCampaigns", campaignId: null },
+    gcOptionsCache: { providers: [activeProvider], campaigns: [standardDropCampaign({ status: "scheduled" })], campaignsPromise: Promise.resolve([]) },
     api: () => Promise.resolve(resp),
   });
   await sandbox.gcOpenPreview("summer-drop", makeBtn("Preview"));
@@ -524,11 +539,20 @@ test("Preview: gcOpenPreview from the Campaigns list context opens the modal", a
   assert.equal(document.body.children.length, 1, "modal overlay must be appended");
   const overlay = document.body.children[0];
   assert.equal(overlay.className, "modal-overlay");
+  const box = overlay.children[0];
+  // Regression (Codex review): gcRunAction must not invalidate the
+  // Campaigns list cache for a read-only Preview — otherwise
+  // gcFindCachedCampaign can never find this campaign and the modal would
+  // silently lose its status badge/destination summary.
+  assert.notEqual(sandbox.gcOptionsCache.campaigns, null, "the list cache must survive a Preview action");
+  assert.match(box.innerHTML, /scheduled/, "status badge should come from the (still-intact) list cache, not just the draft/scheduled admin_badges fallback");
+  assert.match(box.innerHTML, /MyWin/, "destination summary should be enriched from the cached campaign's provider");
 });
 
-test("Preview: gcOpenPreview from Campaign Detail (cdViewState.campaign set) opens the same modal helper", async () => {
+test("Preview: gcOpenPreview from Campaign Detail (cdViewState.campaign set, state.view campaignDetail) opens the same modal helper", async () => {
   const resp = previewResponse();
   const { sandbox, document } = loadPreview({
+    state: { view: "campaignDetail", campaignId: "summer-drop" },
     cdViewState: { campaign: standardDropCampaign() },
     api: () => Promise.resolve(resp),
   });
@@ -540,6 +564,21 @@ test("Preview: gcOpenPreview from Campaign Detail (cdViewState.campaign set) ope
   // not a second implementation.
   const box = document.body.children[0].children[0];
   assert.match(box.innerHTML, /draft/);
+});
+
+test("Preview: a stale cdViewState.campaign snapshot is ignored once the admin has left Campaign Detail", () => {
+  // Codex review regression: visit a live campaign's Detail (cdViewState.
+  // campaign is now populated and never cleared), go back to the list,
+  // pause it there (list cache updates, cdViewState does not) — previewing
+  // it from the list must use the fresh "paused" list entry, never the
+  // stale "live" Detail snapshot still sitting in cdViewState.
+  const { sandbox } = loadPreview({
+    state: { view: "gcCampaigns", campaignId: null },
+    cdViewState: { campaign: standardDropCampaign({ status: "live" }) },
+    gcOptionsCache: { providers: [activeProvider], campaigns: [standardDropCampaign({ status: "paused" })], campaignsPromise: Promise.resolve([]) },
+  });
+  const cached = sandbox.gcFindCachedCampaign("summer-drop");
+  assert.equal(cached.status, "paused", "must prefer the current list cache over a stale Detail snapshot outside Campaign Detail");
 });
 
 test("Preview: the old raw-JSON alert() is gone from the source", () => {
