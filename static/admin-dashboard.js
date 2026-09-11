@@ -5833,16 +5833,160 @@
     return GC_ROW_ACTION_LABELS[row.actionTarget] || ("Set up " + row.label.toLowerCase());
   }
 
-  function gcCampaignDetailChecklistHtml(rows) {
+  // ---- P0.5b: safe inline edit forms ------------------------------------
+  //
+  // These four checklist rows (campaign/when/registration/destination) are
+  // the only ones Campaign Detail may ever write to — mission and rewards
+  // stay routed to their existing admin surfaces (see gcCampaignDetailChecklistHtml
+  // and bindCampaignDetail below). Every PUT built from one of these forms
+  // sends the COMPLETE nested block (schedule/registration/destination),
+  // never a fragment: campaign_centre._validate_body reconstructs each
+  // nested block whole from whatever top-level key is present in the body
+  // (see campaign_centre.py), silently defaulting any sibling field that
+  // isn't included. cdSaveSection (below, in the orchestration section)
+  // always rebuilds these blocks from a freshly re-GET'd canonical
+  // campaign — never this page's in-memory snapshot — before PUTting.
+  var CD_EDITABLE_KEYS = ["campaign", "when", "registration", "destination"];
+
+  var CD_REGISTRATION_FIELD_ORDER = ["full_name", "contact_number", "country_region", "delivery_address"];
+  var CD_REGISTRATION_FIELD_LABELS = {
+    full_name: "Full name", contact_number: "Contact number",
+    country_region: "Region", delivery_address: "Delivery address",
+  };
+
+  // Mirrors campaign_registration.default_registration_config() exactly.
+  // validate_registration_config() always reconstructs the registration
+  // block from only the keys it recognizes (never preserves an unrecognized
+  // key, and defaults any recognized key that's missing) — so any inline
+  // edit here must start from every one of these keys, taken from a fresh
+  // canonical read, or an omitted one silently resets to this same default.
+  function cdDefaultRegistrationConfig() {
+    return {
+      enabled: false, miniapp_visible: true, modal_enabled: true,
+      required_fields: CD_REGISTRATION_FIELD_ORDER.slice(),
+      reminder_hours: 24,
+      audience: { scope: "all", regions: [] },
+      shipping: { scope: "all", regions: [] },
+      require_channel_subscription: false,
+      base_entries: 1,
+    };
+  }
+
+  function cdFieldError(section) {
+    return '<div id="cd-edit-' + esc(section) + '-error" style="display:none;background:rgba(255,107,107,0.12);border:1px solid var(--bad);color:var(--bad);border-radius:8px;padding:8px 12px;font-size:12px;"></div>';
+  }
+
+  function cdEditActionsHtml(section, extraHtml) {
+    return '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">' +
+      '<button class="btn" data-cd-cancel="' + esc(section) + '" type="button">Cancel</button>' +
+      '<button class="btn primary" data-cd-save="' + esc(section) + '" type="button">Save</button>' +
+      (extraHtml || "") +
+      '</div>';
+  }
+
+  function cdCampaignEditHtml(campaign) {
+    campaign = campaign || {};
+    return '<div style="margin-top:8px;display:grid;gap:10px;max-width:420px;">' +
+      '<label style="font-size:12px;">Campaign name<br/><input class="filter-input" id="cd-edit-name" style="width:100%;margin-top:4px;box-sizing:border-box;" value="' + esc(campaign.name || "") + '" /></label>' +
+      '<label style="font-size:12px;">Description<br/><textarea class="filter-input" id="cd-edit-description" style="width:100%;margin-top:4px;min-height:60px;box-sizing:border-box;">' + esc(campaign.description || "") + '</textarea></label>' +
+      cdFieldError("campaign") +
+      cdEditActionsHtml("campaign") +
+      '</div>';
+  }
+
+  function cdWhenEditHtml(campaign) {
+    var schedule = (campaign || {}).schedule || {};
+    var hasEnd = !!schedule.ends_at;
+    return '<div style="margin-top:8px;display:grid;gap:10px;max-width:420px;">' +
+      '<label style="font-size:12px;">Start (Asia/Kuala_Lumpur)<br/>' +
+      '<input class="filter-input" type="datetime-local" id="cd-edit-starts" style="width:100%;margin-top:4px;box-sizing:border-box;" value="' + esc(ccUtcToKlInputValue(schedule.starts_at)) + '" /></label>' +
+      '<label style="font-size:12px;display:flex;align-items:center;gap:6px;"><input type="checkbox" id="cd-edit-no-end"' + (hasEnd ? "" : " checked") + ' /> No end date</label>' +
+      '<div id="cd-edit-ends-wrap" style="' + (hasEnd ? "" : "display:none;") + '"><label style="font-size:12px;">End (Asia/Kuala_Lumpur)<br/>' +
+      '<input class="filter-input" type="datetime-local" id="cd-edit-ends" style="width:100%;margin-top:4px;box-sizing:border-box;" value="' + esc(ccUtcToKlInputValue(schedule.ends_at)) + '" /></label></div>' +
+      cdFieldError("when") +
+      cdEditActionsHtml("when") +
+      '</div>';
+  }
+
+  function cdRegistrationEditHtml(campaign) {
+    var reg = (campaign || {}).registration || {};
+    var required = reg.required_fields || CD_REGISTRATION_FIELD_ORDER;
+    var boxes = CD_REGISTRATION_FIELD_ORDER.map(function (key) {
+      var checked = required.indexOf(key) !== -1 ? " checked" : "";
+      return '<label style="font-size:12px;display:flex;align-items:center;gap:6px;">' +
+        '<input type="checkbox" class="cd-edit-reg-field" value="' + esc(key) + '"' + checked + ' /> ' + esc(CD_REGISTRATION_FIELD_LABELS[key]) + '</label>';
+    }).join("");
+    return '<div style="margin-top:8px;display:grid;gap:10px;max-width:420px;">' +
+      '<label style="font-size:12px;display:flex;align-items:center;gap:6px;"><input type="checkbox" id="cd-edit-reg-enabled"' + (reg.enabled ? " checked" : "") + ' /> Registration enabled</label>' +
+      '<div><div class="sub" style="margin-bottom:4px;">Required information</div>' + boxes + '</div>' +
+      cdFieldError("registration") +
+      cdEditActionsHtml("registration", '<button class="btn" data-cd-open-registration="1" type="button" style="margin-left:auto;background:transparent;border:1px solid var(--border);">Manage full registration settings →</button>') +
+      '</div>';
+  }
+
+  // /api/admin/providers caps its response at 200 rows (campaign_providers.
+  // list_providers), so a campaign's currently-linked provider can be
+  // absent from `providers` (older than the newest 200). Without a fallback
+  // option, the <select> would default to the empty "No provider" option,
+  // and saving path/ready without touching this dropdown would silently
+  // unlink a still-valid provider (Codex review finding) — so a linked-but-
+  // unlisted provider always gets its own selected option, carrying the
+  // real provider_id as its value (never as visible text, mirroring the
+  // beginner surface's normal "no provider_id shown" rule) so leaving the
+  // dropdown alone preserves the link.
+  function cdDestinationProviderOptionsHtml(providers, selectedId) {
+    var items = providers || [];
+    var isListed = !selectedId || items.some(function (p) { return p.provider_id === selectedId; });
+    var fallback = (selectedId && !isListed)
+      ? '<option value="' + esc(selectedId) + '" selected>Current provider (not in the loaded list — leave selected to keep it)</option>'
+      : "";
+    return '<option value="">No provider (configure later)</option>' +
+      fallback +
+      items.map(function (p) {
+        return '<option value="' + esc(p.provider_id) + '"' + (p.provider_id === selectedId ? " selected" : "") + '>' + esc(gcProviderOptionLabel(p)) + '</option>';
+      }).join("");
+  }
+
+  function cdDestinationEditHtml(campaign, providers) {
+    var dest = (campaign || {}).destination || {};
+    return '<div style="margin-top:8px;display:grid;gap:10px;max-width:420px;">' +
+      '<label style="font-size:12px;">Provider<br/><select class="filter-input" id="cd-edit-dest-provider" style="width:100%;margin-top:4px;box-sizing:border-box;">' +
+      cdDestinationProviderOptionsHtml(providers, dest.provider_id || "") + '</select></label>' +
+      '<label style="font-size:12px;">Destination<br/><input class="filter-input" id="cd-edit-dest-path" style="width:100%;margin-top:4px;box-sizing:border-box;" value="' + esc(dest.path || "") + '" /></label>' +
+      '<label style="font-size:12px;display:flex;align-items:center;gap:6px;"><input type="checkbox" id="cd-edit-dest-ready"' + (dest.ready ? " checked" : "") + ' /> Destination is ready to go live</label>' +
+      cdFieldError("destination") +
+      cdEditActionsHtml("destination") +
+      '</div>';
+  }
+
+  function gcCampaignDetailChecklistHtml(rows, ctx) {
+    ctx = ctx || {};
+    var editingSection = ctx.editingSection || null;
+    var campaign = ctx.campaign || {};
+    var providers = ctx.providers || [];
     return (rows || []).map(function (row) {
+      var editable = CD_EDITABLE_KEYS.indexOf(row.key) !== -1;
       var icon = row.complete ? '<span style="color:var(--ok);">✓</span>' : '<span style="color:var(--warn);">!</span>';
-      var actionBtn = (!row.complete && row.actionTarget)
-        ? '<div style="margin-left:20px;margin-top:6px;"><button class="btn" data-cd-goto="' + esc(row.actionTarget) + '">' + esc(gcChecklistActionLabel(row)) + '</button></div>'
-        : "";
-      return '<div class="section" style="margin-bottom:10px;padding:12px 14px;">' +
+      var body;
+      if (editable && editingSection === row.key) {
+        body = row.key === "campaign" ? cdCampaignEditHtml(campaign)
+          : row.key === "when" ? cdWhenEditHtml(campaign)
+          : row.key === "registration" ? cdRegistrationEditHtml(campaign)
+          : cdDestinationEditHtml(campaign, providers);
+      } else {
+        var actionBtn;
+        if (editable) {
+          actionBtn = '<div style="margin-left:20px;margin-top:6px;"><button class="btn" data-cd-edit="' + esc(row.key) + '">Edit</button></div>';
+        } else {
+          actionBtn = (!row.complete && row.actionTarget)
+            ? '<div style="margin-left:20px;margin-top:6px;"><button class="btn" data-cd-goto="' + esc(row.actionTarget) + '">' + esc(gcChecklistActionLabel(row)) + '</button></div>'
+            : "";
+        }
+        body = '<div class="sub" style="margin-top:4px;margin-left:20px;">' + esc(row.summary || "") + '</div>' + actionBtn;
+      }
+      return '<div class="section" style="margin-bottom:10px;padding:12px 14px;" data-cd-row="' + esc(row.key) + '">' +
         '<div style="display:flex;align-items:baseline;gap:8px;">' + icon + '<strong>' + esc(row.label) + '</strong></div>' +
-        '<div class="sub" style="margin-top:4px;margin-left:20px;">' + esc(row.summary || "") + '</div>' +
-        actionBtn +
+        body +
         '</div>';
     }).join("");
   }
@@ -5922,7 +6066,7 @@
 
   // ---- Composer + orchestration (DOM-touching) --------------------------
 
-  function gcCampaignDetailHtml(campaign, providers, pools) {
+  function gcCampaignDetailHtml(campaign, providers, pools, editingSection) {
     var rows = computeSetupChecklist(campaign, providers, pools);
     var progress = gcChecklistProgress(rows);
     var shareState = gcComputeShareState(campaign);
@@ -5935,7 +6079,7 @@
         '<div class="progress-label">Setup ' + progress.completed + ' / ' + progress.total + ' complete</div>' +
       '</div>' +
       '<div class="section-title" style="margin-bottom:8px;">Setup</div>' +
-      gcCampaignDetailChecklistHtml(rows) +
+      gcCampaignDetailChecklistHtml(rows, { editingSection: editingSection || null, campaign: campaign, providers: providers }) +
       '<div style="margin:14px 0;display:flex;gap:8px;flex-wrap:wrap;">' +
         gcCampaignDetailContinueHtml(rows, campaign) +
         '<button class="btn" data-gc-action="preview" data-id="' + esc(campaign.campaign_id) + '">Preview Campaign</button>' +
@@ -5955,6 +6099,16 @@
   // Entry point from the Campaigns list ("View Details"). No history/hash
   // routing (P0 scope) — a refresh returns to the normal dashboard, which
   // is an accepted limitation for this PR.
+  //
+  // cdViewState is this view's single in-memory snapshot of the last
+  // canonical GET — used only to re-render Edit/Cancel/Save transitions
+  // without a network round trip. It is never the source of truth for a
+  // save: cdSaveSection (below) always re-GETs the canonical campaign
+  // immediately before building a PUT body (see the P0.5b nested-block
+  // notes above CD_EDITABLE_KEYS), so a save can never merge onto a stale
+  // in-memory copy even if this page has sat open for several minutes.
+  var cdViewState = { campaign: null, providers: [], pools: [], editingSection: null };
+
   function renderCampaignDetail(campaignId) {
     state.campaignId = campaignId;
     switchView("campaignDetail");
@@ -5963,12 +6117,23 @@
   // GET-only: the single campaign fetch plus the two already-cached
   // lookups (P0.3's fetchGcProviders, and fetchGcRewardPools for mission_pool
   // campaigns only). Never issues a POST/PUT/DELETE — this view cannot
-  // mutate a campaign (regression constraint #2).
+  // mutate a campaign (regression constraint #2). P0.5b's Save flow
+  // (cdSaveSection) never routes through here for its own success
+  // re-render either — it re-GETs canonically and updates cdViewState
+  // directly, so a save can never race a concurrent loadCampaignDetail(force).
   function loadCampaignDetail(force) {
     var id = state.campaignId;
     if (!id) { statePanel("cd-body", "error", "No campaign selected."); return; }
     statePanel("cd-body", "loading", "Loading campaign…");
     api("/api/admin/gc-campaigns/" + encodeURIComponent(id)).then(function (resp) {
+      // The admin may have navigated to a different campaign (or back to
+      // the list) while this request was in flight — applying a resolved-
+      // late response for a campaign that's no longer the one on screen
+      // would silently overwrite cdViewState/the DOM with the wrong
+      // campaign's data, and a later Save would then write those stale
+      // values into whatever campaign_id is now actually selected (Codex
+      // review finding). Discard this response instead.
+      if (state.campaignId !== id) return null;
       if (!resp || resp.status !== "ok" || !resp.campaign) {
         statePanel("cd-body", "error", "Campaign not found.");
         return null;
@@ -5979,15 +6144,22 @@
         fetchGcProviders(force),
         needsPools ? fetchGcRewardPools(force) : Promise.resolve([]),
       ]).then(function (extra) {
+        if (state.campaignId !== id) return; // superseded while providers/pools were loading
         var providers = extra[0] || [];
         var pools = extra[1] || [];
+        cdViewState.campaign = campaign;
+        cdViewState.providers = providers;
+        cdViewState.pools = pools;
+        cdViewState.editingSection = null;
+        cdViewState.editingSnapshot = null;
         var bc = $("#breadcrumb");
         if (bc) bc.textContent = "🕹 Player Campaigns  /  Campaigns  /  " + (campaign.name || campaign.campaign_id);
         var titleEl = $("#view-title");
         if (titleEl) titleEl.innerHTML = esc(campaign.name || campaign.campaign_id) + " " + gcPill(campaign.status);
-        $("#cd-body").innerHTML = gcCampaignDetailHtml(campaign, providers, pools);
+        $("#cd-body").innerHTML = gcCampaignDetailHtml(campaign, providers, pools, null);
       });
     }).catch(function (e) {
+      if (state.campaignId !== id) return;
       statePanel("cd-body", "error", "Failed to load campaign: " + e.message);
     });
   }
@@ -6001,20 +6173,211 @@
         try { navigator.clipboard.writeText(link); toast("✅ Copied", "success"); } catch (err) { toast("Copy failed", "error"); }
         return;
       }
+
+      var openRegBtn = e.target && e.target.closest && e.target.closest("[data-cd-open-registration]");
+      if (openRegBtn) {
+        if (state.campaignId) openCampaignRegistrationConfig(state.campaignId);
+        return;
+      }
+
+      var cancelBtn = e.target && e.target.closest && e.target.closest("[data-cd-cancel]");
+      if (cancelBtn) { cdOpenEdit(null); return; }
+
+      var saveBtn = e.target && e.target.closest && e.target.closest("[data-cd-save]");
+      if (saveBtn) { cdSaveSection(saveBtn.dataset.cdSave, saveBtn); return; }
+
+      var editBtn = e.target && e.target.closest && e.target.closest("[data-cd-edit]");
+      if (editBtn) { cdOpenEdit(editBtn.dataset.cdEdit); return; }
+
       var goBtn = e.target && e.target.closest && e.target.closest("[data-cd-goto]");
       if (!goBtn) return;
       var target = goBtn.dataset.cdGoto;
       var id = state.campaignId;
       if (target === "back") { activateTab("growth", 0); return; }
       if (target === "publish-list") { activateTab("growth", 0); return; }
+      // Continue Setup's target can be one of the four inline-editable rows
+      // (when/registration/destination — campaign is never incomplete) —
+      // open the same inline editor the row's own [Edit] button does,
+      // rather than navigating away.
+      if (CD_EDITABLE_KEYS.indexOf(target) !== -1) { cdOpenEdit(target); return; }
       if (!id) return;
       if (target === "mission" || target === "rewards_mission") { openMissionAdmin(id); return; }
-      if (target === "registration") { openCampaignRegistrationConfig(id); return; }
-      // "when" (schedule), "rewards_tournament" and "destination" have no
-      // dedicated edit screen yet — inline editing is explicitly out of
-      // scope for this PR (P0.5a is read-only). Say so instead of a dead
-      // link or a fake editor.
-      toast("Editing this from here isn't available yet — Campaign Detail is read-only for now.", "warn");
+      // Tournament reward rules have no dedicated admin screen anywhere in
+      // this dashboard yet (reward_config.rules is a structured rule list —
+      // see reward_engine.py — with no existing CRUD UI to route to), and
+      // building one is explicitly out of scope for P0.5b. Say so instead
+      // of a dead link or a fake editor.
+      toast("Editing rewards from here isn't available yet — see Technical Details.", "warn");
+    });
+
+    document.addEventListener("change", function (e) {
+      if (e.target && e.target.id === "cd-edit-no-end") {
+        var wrap = $("#cd-edit-ends-wrap");
+        if (wrap) wrap.style.display = e.target.checked ? "none" : "";
+      }
+    });
+  }
+
+  // Pure re-render from the last canonical GET — never a network call.
+  // Edit/Cancel both funnel through here so opening/closing a form can
+  // never itself mark anything "saved".
+  function cdOpenEdit(section) {
+    if (!cdViewState.campaign) return;
+    cdViewState.editingSection = section || null;
+    // The exact campaign object shown when this form opened — cdViewState.
+    // campaign is only ever replaced wholesale by a fresh GET (loadCampaignDetail/
+    // cdSaveSection), never mutated in place, so holding this reference is
+    // enough to later tell "the admin actually changed this field" apart
+    // from "this field just still shows what was here when the form opened"
+    // (see cdSaveSection's per-field diff against this snapshot).
+    cdViewState.editingSnapshot = section ? cdViewState.campaign : null;
+    $("#cd-body").innerHTML = gcCampaignDetailHtml(cdViewState.campaign, cdViewState.providers, cdViewState.pools, cdViewState.editingSection);
+  }
+
+  // Friendly error surface for Campaign Detail's inline saves only (see the
+  // PR's error-mapping spec) — never the raw backend code/message. Technical
+  // Details / the browser console remain the only place raw detail surfaces.
+  var CD_ERROR_MESSAGES = {
+    invalid_required_fields: "Select at least one required registration field.",
+    provider_not_found: "This provider is unavailable. Choose another provider.",
+  };
+
+  function cdFriendlyErrorMessage(res) {
+    if (!res) return "Couldn't save changes. Try again.";
+    if (res.status === 409) return "The campaign changed while you were editing. Reloaded the latest version.";
+    var code = res.d && res.d.code;
+    return CD_ERROR_MESSAGES[code] || "Please check the highlighted fields.";
+  }
+
+  function cdShowSectionError(section, msg) {
+    var el = $("#cd-edit-" + section + "-error");
+    if (!el) return;
+    el.textContent = msg || "";
+    el.style.display = msg ? "" : "none";
+  }
+
+  // The one save path for every inline-editable section. For a nested block
+  // (schedule/registration/destination) this ALWAYS re-GETs the canonical
+  // campaign first and builds the PUT body from that fresh copy — never
+  // from cdViewState, which can be stale if this page has sat open for a
+  // while — then copies the complete existing block and overrides only the
+  // field(s) this form edits (see the CD_EDITABLE_KEYS comment above).
+  // After a successful PUT, the campaign is re-GET'd again before the
+  // checklist/progress/Continue-Setup state is ever recomputed — a save is
+  // never optimistically marked complete before that canonical GET lands.
+  function cdSaveSection(section, btnEl) {
+    var id = state.campaignId;
+    if (!id || !cdViewState.campaign) return;
+    cdShowSectionError(section, "");
+
+    var draftErr = null;
+    var buildBody = null;
+
+    if (section === "campaign") {
+      var name = (($("#cd-edit-name") || {}).value || "").trim();
+      var description = (($("#cd-edit-description") || {}).value || "").trim();
+      if (!name) draftErr = "Please check the highlighted fields.";
+      buildBody = function () { return { name: name, description: description }; };
+    } else if (section === "when") {
+      var startsVal = ($("#cd-edit-starts") || {}).value || "";
+      var noEnd = !!(($("#cd-edit-no-end") || {}).checked);
+      var endsVal = noEnd ? "" : (($("#cd-edit-ends") || {}).value || "");
+      var startsIso = ccKlInputToUtcIso(startsVal);
+      var endsIso = endsVal ? ccKlInputToUtcIso(endsVal) : null;
+      if (!startsIso) {
+        draftErr = "Please check the highlighted fields.";
+      } else if (endsIso && new Date(endsIso).getTime() <= new Date(startsIso).getTime()) {
+        draftErr = "End date must be after the start date.";
+      }
+      buildBody = function (latest) {
+        var latestSchedule = latest.schedule || {};
+        return { schedule: { starts_at: startsIso, ends_at: endsIso, timezone: latestSchedule.timezone || "Asia/Kuala_Lumpur" } };
+      };
+    } else if (section === "registration") {
+      var enabled = !!(($("#cd-edit-reg-enabled") || {}).checked);
+      var fields = $all(".cd-edit-reg-field").filter(function (cb) { return cb.checked; }).map(function (cb) { return cb.value; });
+      if (enabled && !fields.length) draftErr = "Select at least one required registration field.";
+      // Falls back to cdViewState.campaign (never an empty object) if this
+      // section was somehow saved without going through cdOpenEdit first —
+      // an empty fallback would make every field look "unchanged from
+      // nothing" and incorrectly skip overrides the admin actually made.
+      var initialReg = ((cdViewState.editingSnapshot || cdViewState.campaign || {}).registration) || {};
+      var initialFields = (initialReg.required_fields || CD_REGISTRATION_FIELD_ORDER).slice().sort();
+      var enabledChanged = enabled !== !!initialReg.enabled;
+      var fieldsChanged = fields.slice().sort().join("|") !== initialFields.join("|");
+      buildBody = function (latest) {
+        var base = Object.assign({}, cdDefaultRegistrationConfig(), latest.registration || {});
+        // Only override the field(s) this admin actually changed relative
+        // to what the form showed when opened — an untouched field always
+        // takes the freshest server value, so a concurrent edit to it
+        // (e.g. via the full registration settings screen) is never
+        // silently reverted just because this admin also touched the
+        // other one (Codex review finding).
+        if (enabledChanged) base.enabled = enabled;
+        if (fieldsChanged) base.required_fields = fields.length ? fields : CD_REGISTRATION_FIELD_ORDER.slice();
+        return { registration: base };
+      };
+    } else if (section === "destination") {
+      var providerId = (($("#cd-edit-dest-provider") || {}).value || "").trim();
+      var path = (($("#cd-edit-dest-path") || {}).value || "").trim();
+      var ready = !!(($("#cd-edit-dest-ready") || {}).checked);
+      // Same "never an empty fallback" reasoning as initialReg above.
+      var initialDest = ((cdViewState.editingSnapshot || cdViewState.campaign || {}).destination) || {};
+      var providerChanged = providerId !== (initialDest.provider_id || "");
+      var pathChanged = path !== (initialDest.path || "");
+      var readyChanged = ready !== !!initialDest.ready;
+      buildBody = function (latest) {
+        var latestDest = latest.destination || {};
+        // Same per-field-changed rule as registration above: a field this
+        // form displays but the admin didn't actually touch takes the
+        // freshest server value, never the (possibly now-stale) value that
+        // was merely sitting in the DOM from when this form opened.
+        return {
+          destination: {
+            provider_id: providerChanged ? providerId : (latestDest.provider_id || ""),
+            open_mode: latestDest.open_mode || "telegram_web_app",
+            path: pathChanged ? path : (latestDest.path || ""),
+            ready: readyChanged ? ready : !!latestDest.ready,
+          },
+        };
+      };
+    } else {
+      return;
+    }
+
+    if (draftErr) { cdShowSectionError(section, draftErr); return; }
+
+    if (btnEl) { btnEl.disabled = true; btnEl.textContent = "Saving…"; }
+    var detailUrl = "/api/admin/gc-campaigns/" + encodeURIComponent(id);
+
+    api(detailUrl).then(function (latestResp) {
+      if (!latestResp || latestResp.status !== "ok" || !latestResp.campaign) {
+        throw new Error("stale_campaign_fetch_failed");
+      }
+      return apiPutJson(detailUrl, buildBody(latestResp.campaign));
+    }).then(function (res) {
+      if (!res || !res.ok || !res.d || res.d.status !== "ok") {
+        cdShowSectionError(section, cdFriendlyErrorMessage(res));
+        if (btnEl) { btnEl.disabled = false; btnEl.textContent = "Save"; }
+        return;
+      }
+      return api(detailUrl).then(function (freshResp) {
+        var freshCampaign = freshResp && freshResp.campaign;
+        if (!freshCampaign) {
+          cdShowSectionError(section, "Couldn't save changes. Try again.");
+          if (btnEl) { btnEl.disabled = false; btnEl.textContent = "Save"; }
+          return;
+        }
+        cdViewState.campaign = freshCampaign;
+        cdViewState.editingSection = null;
+        var titleEl = $("#view-title");
+        if (titleEl) titleEl.innerHTML = esc(freshCampaign.name || freshCampaign.campaign_id) + " " + gcPill(freshCampaign.status);
+        $("#cd-body").innerHTML = gcCampaignDetailHtml(freshCampaign, cdViewState.providers, cdViewState.pools, null);
+        toast("✅ Saved", "success");
+      });
+    }).catch(function () {
+      cdShowSectionError(section, "Couldn't save changes. Try again.");
+      if (btnEl) { btnEl.disabled = false; btnEl.textContent = "Save"; }
     });
   }
 
