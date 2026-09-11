@@ -5731,19 +5731,19 @@
     var id = esc(campaign.campaign_id), name = esc(campaign.name || campaign.campaign_id || "");
     var items = [];
     if (actions.canPublish) {
-      items.push('<button data-gc-action="publish" data-id="' + id + '">' + esc(actions.publishLabel) + '</button>');
+      items.push('<button data-gc-action="publish" data-id="' + id + '" data-name="' + name + '">' + esc(actions.publishLabel) + '</button>');
     }
-    if (actions.canPause) items.push('<button data-gc-action="pause" data-id="' + id + '">Pause</button>');
+    if (actions.canPause) items.push('<button data-gc-action="pause" data-id="' + id + '" data-name="' + name + '">Pause</button>');
     // Close Mission / End Rewards legality stays owned by gcMissionActionsHtml
     // (defined above, shared with the pre-P0.4 table) — its <button class="btn"
     // ...> markup drops straight into this menu, same list position (between
     // Pause and Archive) it always had.
     items.push(gcMissionActionsHtml(campaign));
-    if (actions.canArchive) items.push('<button data-gc-action="archive" data-id="' + id + '">Archive</button>');
+    if (actions.canArchive) items.push('<button data-gc-action="archive" data-id="' + id + '" data-name="' + name + '">Archive</button>');
     items.push('<button data-gc-action="preview" data-id="' + id + '">Preview</button>');
     items.push('<button data-gc-action="registration" data-id="' + id + '">' +
       ((campaign.registration && campaign.registration.enabled) ? "Registration ✅" : "Registration") + '</button>');
-    items.push('<button data-gc-action="duplicate" data-id="' + id + '">Duplicate</button>');
+    items.push('<button data-gc-action="duplicate" data-id="' + id + '" data-name="' + name + '">Duplicate</button>');
     if (actions.canDelete) {
       items.push('<button class="danger" data-gc-action="delete" data-id="' + id + '" data-name="' + name + '">Delete</button>');
     }
@@ -6493,6 +6493,131 @@
     });
   }
 
+  // ---------------------------------------------------------------------
+  // gc_campaigns action hardening (P0.8) — the audit found every lifecycle
+  // action (Publish/Pause/Archive/Duplicate) calling apiPost(), which
+  // throws a bare `new Error("HTTP 400")` on any non-2xx response and
+  // discards the `{status:"error", code:"..."}` body _transition()/
+  // duplicate_campaign actually return — with no .catch() at any call
+  // site, that rejection was unhandled and the admin saw nothing at all.
+  // apiPostJson() already resolves (never rejects on a non-2xx status)
+  // with `{ok, status, d}`, so it — not apiPost — is the request helper
+  // every gc_campaigns action below uses; no change to apiPost/api's
+  // global throw-on-non-2xx behavior was needed or made.
+  //
+  // gcRunAction is the single choke point: every action funnels through
+  // it so no handler repeats its own .then/.catch/toast/refresh wiring,
+  // and none of them can regress into a silent failure or a repaint that
+  // outruns the backend's actual accept/reject decision.
+  var GC_ACTION_ERROR_MESSAGES = {
+    reward_rules_required: "Set up tournament rewards before publishing.",
+    destination_not_ready: "Complete the destination setup before publishing.",
+    provider_inactive: "The selected provider is inactive. Choose an active provider.",
+    provider_not_found: "The selected provider no longer exists. Choose another provider.",
+    mission_config_required: "Complete the mission setup before publishing.",
+    mission_pool_config_required: "Link a reward pool before publishing.",
+    invalid_status_transition: "This action is no longer available for the campaign's current status.",
+    not_found: "This campaign no longer exists.",
+    invalid_status_for_deletion: "This campaign can't be deleted in its current status — archive it first.",
+    duplicate_campaign_id: "A campaign with that ID already exists. Try again.",
+    campaign_id_previously_deleted: "That campaign ID was used and retired before, so it can't be reused.",
+    invalid_required_fields: "Select at least one required registration field.",
+    invalid_audience_scope: "Choose a valid audience option.",
+    invalid_audience_regions: "Choose valid audience regions.",
+    audience_regions_required: "Select at least one region for the selected audience.",
+    invalid_shipping_scope: "Choose a valid shipping option.",
+    invalid_shipping_regions: "Choose valid shipping regions.",
+    shipping_regions_required: "Select at least one region for the selected shipping option.",
+    invalid_reminder_hours: "Reminder hours must be a valid number of hours.",
+    invalid_base_entries: "Base entries must be a valid number.",
+    country_region_required_for_selected_audience: "Country/region must be a required field for a region-limited audience.",
+    preview_failed: "Couldn't load campaign preview. Try again.",
+  };
+
+  // Raw snake_case codes never reach the admin — only console.error, for
+  // debugging. An unmapped (but present) code still logs so a genuinely
+  // new backend code gets noticed instead of quietly showing the fallback
+  // forever.
+  function gcActionErrorMessage(res, fallback) {
+    var code = res && res.d && res.d.code;
+    if (code && GC_ACTION_ERROR_MESSAGES[code]) return GC_ACTION_ERROR_MESSAGES[code];
+    if (code) { try { console.error("[gc-action] unmapped backend code:", code); } catch (e) {} }
+    return fallback || "Couldn't complete this action. Try again.";
+  }
+
+  // Refreshes whichever canonical view is currently showing this campaign
+  // — never hardwired only to the Campaigns list DOM, so the same helper
+  // stays correct if a future Campaign Detail action routes through it too.
+  function gcDefaultRefresh(id) {
+    if (state.view === "gcCampaigns") loadGcCampaigns(true);
+    if (state.view === "campaignDetail" && state.campaignId === id) loadCampaignDetail(true);
+  }
+
+  // In-flight guard keyed by "<campaign_id>:<action>" — a second click on
+  // the same campaign+action while a request is outstanding is a no-op,
+  // not a second request.
+  var gcActionsInFlight = {};
+
+  // The one entry point for every gc_campaigns lifecycle/action call.
+  // `opts.run()` must resolve to the apiPostJson/apiPutJson-shaped
+  // `{ok, status, d}` — never a bare apiPost() promise, which throws away
+  // the backend's structured error code on failure.
+  //
+  // Guarantees: an optional confirm gate runs first; the triggering button
+  // (if given) is disabled for the duration; a rejected/non-"ok" response
+  // always shows a friendly error and NEVER a success toast or repaint;
+  // the returned promise never rejects (so this can never become an
+  // unhandled rejection no matter what `run()` does); and the campaign_id
+  // +action key can't run twice concurrently.
+  function gcRunAction(opts) {
+    var key = opts.id + ":" + opts.action;
+    if (gcActionsInFlight[key]) return Promise.resolve();
+    gcActionsInFlight[key] = true;
+
+    function finish() {
+      delete gcActionsInFlight[key];
+      if (opts.button) btnStop(opts.button);
+    }
+
+    var confirmed = opts.confirmMessage
+      ? confirmSimple(opts.confirmTitle || "Are you sure?", opts.confirmMessage)
+      : Promise.resolve(true);
+
+    return confirmed.then(function (ok) {
+      if (!ok) { finish(); return; }
+      if (opts.button) btnStart(opts.button, opts.loadingText || "Working...");
+      return Promise.resolve().then(opts.run).then(function (res) {
+        if (!res || !res.ok || !res.d || res.d.status !== "ok") {
+          toast("❌ " + gcActionErrorMessage(res, opts.fallbackError), "error");
+          return;
+        }
+        var msg = typeof opts.successMessage === "function" ? opts.successMessage(res.d) : opts.successMessage;
+        if (msg) toast("✅ " + msg, "success");
+        gcInvalidateCampaignsCache();
+        if (opts.refresh !== false) gcDefaultRefresh(opts.id);
+        if (opts.onSuccess) opts.onSuccess(res.d);
+      }, function (err) {
+        toast("❌ " + (opts.fallbackError || "Couldn't complete this action. Try again."), "error");
+        try { console.error("[gc-action]", opts.action, err); } catch (e) {}
+      }).then(finish, finish);
+    });
+  }
+
+  // Client-side proposal only, so a second Duplicate click doesn't have to
+  // land on the backend's own default (`<id>-copy`) and 409. The backend
+  // (duplicate_campaign) stays the source of truth and still rejects with
+  // duplicate_campaign_id/campaign_id_previously_deleted on a real
+  // collision — handled generically by GC_ACTION_ERROR_MESSAGES above —
+  // since gcKnownCampaignIds can be stale (it excludes tombstoned ids, and
+  // another tab may have just created one).
+  function gcNextDuplicateId(sourceId) {
+    var base = sourceId + "-copy";
+    if (!gcKnownCampaignIds[base]) return base;
+    var n = 2;
+    while (gcKnownCampaignIds[base + "-" + n]) n++;
+    return base + "-" + n;
+  }
+
   function bindGcCampaigns() {
     var nameField = $("#gc-c-name");
     if (nameField) nameField.addEventListener("input", gcUpdateAutoSlugPreview);
@@ -6545,9 +6670,37 @@
       if (!btn) return;
       var action = btn.dataset.gcAction, id = btn.dataset.id;
       if (action === "detail") renderCampaignDetail(id);
-      else if (action === "publish") apiPost("/api/admin/gc-campaigns/" + id + "/publish").then(function (r) { if (r.status !== "ok") toast("❌ " + r.code, "error"); loadGcCampaigns(true); });
-      else if (action === "pause") apiPost("/api/admin/gc-campaigns/" + id + "/pause").then(function () { loadGcCampaigns(true); });
-      else if (action === "archive") apiPost("/api/admin/gc-campaigns/" + id + "/archive").then(function () { loadGcCampaigns(true); });
+      else if (action === "publish") {
+        var isResume = (btn.textContent || "").trim() === "Resume";
+        gcRunAction({
+          id: id, action: "publish", button: btn,
+          loadingText: isResume ? "Resuming..." : "Publishing...",
+          run: function () { return apiPostJson("/api/admin/gc-campaigns/" + id + "/publish", {}); },
+          successMessage: isResume ? "Campaign resumed." : "Campaign published.",
+          fallbackError: isResume ? "Couldn't resume this campaign. Try again." : "Couldn't publish this campaign. Try again.",
+        });
+      }
+      else if (action === "pause") {
+        gcRunAction({
+          id: id, action: "pause", button: btn,
+          loadingText: "Pausing...",
+          run: function () { return apiPostJson("/api/admin/gc-campaigns/" + id + "/pause", {}); },
+          successMessage: "Campaign paused.",
+          fallbackError: "Couldn't pause this campaign. Try again.",
+        });
+      }
+      else if (action === "archive") {
+        var archiveName = btn.dataset.name || id;
+        gcRunAction({
+          id: id, action: "archive", button: btn,
+          loadingText: "Archiving...",
+          confirmTitle: "Archive campaign?",
+          confirmMessage: 'Archive "' + archiveName + '"? It stops being live/editable in the normal flow.',
+          run: function () { return apiPostJson("/api/admin/gc-campaigns/" + id + "/archive", {}); },
+          successMessage: "Campaign archived.",
+          fallbackError: "Couldn't archive this campaign. Try again.",
+        });
+      }
       else if (action === "mission") openMissionAdmin(id);
       else if (action === "registration") openCampaignRegistrationConfig(id);
       else if (action === "close-mission") {
@@ -6567,14 +6720,41 @@
           loadGcCampaigns(true);
         }).catch(function (e) { toast("❌ " + e.message, "error"); loadGcCampaigns(true); });
       }
-      else if (action === "duplicate") apiPost("/api/admin/gc-campaigns/" + id + "/duplicate").then(function (r) {
-        if (!r || r.status !== "ok") { toast("❌ " + ((r && r.code) || "duplicate_failed"), "error"); return; }
-        toast("✅ Duplicated as draft " + r.campaign_id, "success");
-        loadGcCampaigns(true);
-      });
-      else if (action === "preview") api("/api/admin/gc-campaigns/" + id + "/preview").then(function (r) {
-        alert("Card: " + JSON.stringify(r.card, null, 2) + "\n\nBadges: " + (r.admin_badges || []).join(", ") + "\n\nVisibility: " + JSON.stringify(r.effective_visibility));
-      });
+      else if (action === "duplicate") {
+        var dupName = btn.dataset.name || id;
+        var proposedId = gcNextDuplicateId(id);
+        gcRunAction({
+          id: id, action: "duplicate", button: btn,
+          loadingText: "Duplicating...",
+          run: function () { return apiPostJson("/api/admin/gc-campaigns/" + id + "/duplicate", { campaign_id: proposedId }); },
+          // Uses the campaign NAME, never the raw campaign_id — duplicate_campaign
+          // copies the source doc verbatim (including `name`), so the new
+          // draft shares the same display name as its source by design.
+          successMessage: 'Duplicated "' + dupName + '" as a new draft.',
+          fallbackError: "Couldn't duplicate this campaign. Try again.",
+          refresh: false,
+          onSuccess: function (d) {
+            if (d && d.campaign_id) renderCampaignDetail(d.campaign_id);
+            else loadGcCampaigns(true);
+          },
+        });
+      }
+      else if (action === "preview") {
+        gcRunAction({
+          id: id, action: "preview", button: btn,
+          loadingText: "Loading...",
+          refresh: false,
+          run: function () {
+            return api("/api/admin/gc-campaigns/" + id + "/preview").then(function (r) {
+              return { ok: true, status: 200, d: r };
+            });
+          },
+          fallbackError: GC_ACTION_ERROR_MESSAGES.preview_failed,
+          onSuccess: function (r) {
+            alert("Card: " + JSON.stringify(r.card, null, 2) + "\n\nBadges: " + (r.admin_badges || []).join(", ") + "\n\nVisibility: " + JSON.stringify(r.effective_visibility));
+          },
+        });
+      }
       else if (action === "delete") openGcDeleteModal(id, btn.dataset.name);
     });
 
@@ -7231,10 +7411,14 @@
     if (saveBtn) saveBtn.addEventListener("click", function () {
       var campaignId = crCfgState.campaignId;
       if (!campaignId) return;
-      apiPutJson("/api/admin/gc-campaigns/" + campaignId, { registration: crCfgReadForm() }).then(function (res) {
-        if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "update_failed"), "error"); return; }
-        toast("✅ Registration settings saved for " + campaignId, "success");
-        loadCampaignRegistrationConfigOptions();
+      gcRunAction({
+        id: campaignId, action: "registration-save", button: saveBtn,
+        loadingText: "Saving...",
+        run: function () { return apiPutJson("/api/admin/gc-campaigns/" + campaignId, { registration: crCfgReadForm() }); },
+        successMessage: "Registration settings saved.",
+        fallbackError: "Couldn't save registration settings. Try again.",
+        refresh: false,
+        onSuccess: function () { loadCampaignRegistrationConfigOptions(); },
       });
     });
 
