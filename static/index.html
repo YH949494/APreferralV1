@@ -3198,6 +3198,49 @@
         </td>`;
     }
 
+    // Existing Drops renders standard drops and Mission Pool campaigns as one
+    // time-ordered list: neither source is sorted on its own, and rows are
+    // never grouped by source. Each raw record is first normalized into a
+    // shared render model (id / source / start timestamp / original record)
+    // so the two shapes (drops_v2's startsAt vs. campaigns' starts_at) can be
+    // compared as absolute instants rather than as formatted KL strings —
+    // formatting only happens afterward, inside adm_dropRowHtml/adm_missionRowHtml.
+    function adm_parseStartTimestamp(iso) {
+      if (!iso) return NaN;
+      const t = new Date(iso).getTime();
+      return Number.isFinite(t) ? t : NaN;
+    }
+
+    function adm_normalizeDropRecord(d) {
+      return {
+        id: String(d.dropId || d.id || d._id || ""),
+        source: "drop",
+        startTs: adm_parseStartTimestamp(d.startsAt),
+        record: d,
+      };
+    }
+
+    function adm_normalizeMissionRecord(c) {
+      return {
+        id: String(c.campaign_id || ""),
+        source: "mission",
+        startTs: adm_parseStartTimestamp(c.starts_at),
+        record: c,
+      };
+    }
+
+    // Sort order: latest start first (descending); identical starts break
+    // ties by ascending canonical id (deterministic, independent of fetch
+    // order); missing/invalid start timestamps sink to the bottom.
+    function adm_compareExistingDropsRows(a, b) {
+      const aValid = Number.isFinite(a.startTs);
+      const bValid = Number.isFinite(b.startTs);
+      if (aValid !== bValid) return aValid ? -1 : 1;
+      if (!aValid) return 0; // both invalid: leave relative order alone
+      if (a.startTs !== b.startTs) return b.startTs - a.startTs;
+      return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+    }
+
     // Bumped on every adm_list() call so a call superseded by a newer one
     // (there are several non-awaited call sites: admin init, post-action
     // refreshes, etc.) can detect that and bail out after its awaits
@@ -3231,12 +3274,14 @@
 
       tbody.innerHTML = "";
 
+      // Both sources are normalized into one combined array and sorted
+      // together by start datetime — never sorted independently and then
+      // concatenated, which is what caused missions to pile up at the
+      // bottom regardless of when they actually start.
+      const rows = [];
+
       if (dropsResult.status === "fulfilled") {
-        dropsResult.value.forEach((d) => {
-          const tr = document.createElement("tr");
-          tr.innerHTML = adm_dropRowHtml(d);
-          tbody.appendChild(tr);
-        });
+        dropsResult.value.forEach((d) => rows.push(adm_normalizeDropRecord(d)));
       } else {
         const tr = document.createElement("tr");
         tr.innerHTML = `<td colspan="6" style="padding:6px;">Voucher endpoint error: ${escapeHtml(dropsResult.reason.message)}</td>`;
@@ -3250,17 +3295,20 @@
         // hidden from this operational "current campaigns" table.
         missionsResult.value
           .filter(adm_missionVisibleInExistingDrops)
-          .forEach((c) => {
-            const tr = document.createElement("tr");
-            tr.innerHTML = adm_missionRowHtml(c);
-            tbody.appendChild(tr);
-          });
+          .forEach((c) => rows.push(adm_normalizeMissionRecord(c)));
       } else {
         console.error("[adm_list] mission-pool/campaigns failed:", missionsResult.reason.message);
         const tr = document.createElement("tr");
         tr.innerHTML = `<td colspan="6" style="padding:6px;color:#b45309;">⚠ Mission Pool campaigns failed to load (standard drops above are unaffected): ${escapeHtml(missionsResult.reason.message)}</td>`;
         tbody.appendChild(tr);
       }
+
+      rows.sort(adm_compareExistingDropsRows);
+      rows.forEach((row) => {
+        const tr = document.createElement("tr");
+        tr.innerHTML = row.source === "mission" ? adm_missionRowHtml(row.record) : adm_dropRowHtml(row.record);
+        tbody.appendChild(tr);
+      });
 
       if (!tbody.children.length) {
         tbody.innerHTML = `<tr><td colspan="6" style="padding:6px;">No drops found.</td></tr>`;
