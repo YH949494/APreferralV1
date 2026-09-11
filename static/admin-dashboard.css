@@ -216,9 +216,20 @@ html, body {
    Archived) — wider than the .seg bar elsewhere in this file, so on a
    narrow viewport it can exceed the content width. .seg's own
    `overflow: hidden` (plus .main's own overflow-x: hidden) would silently
-   clip the rightmost buttons with no way to reach them; scope a horizontal
-   scroll to this one instance rather than changing every .seg on the page. */
-#gc-status-filter { max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+   clip the rightmost buttons with no way to reach them, e.g. Ended/Archived,
+   with no way to reach them. Scoped to this one id (never `.seg` itself, so
+   every other segmented control on the page keeps its current, unclipped-
+   by-design behavior) and horizontal-scroll rather than wrap, to preserve
+   the existing single-row segmented-pill look instead of a two-row block. */
+#gc-status-filter {
+  display: flex;
+  flex-wrap: nowrap;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+}
+#gc-status-filter button { flex: 0 0 auto; }
 
 /* Cards */
 .card-grid {

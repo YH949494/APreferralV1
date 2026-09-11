@@ -454,11 +454,35 @@ test("the filter bar's #gc-status-filter covers every backend status plus All", 
   });
 });
 
-test("#gc-status-filter stays reachable on narrow screens (its 7 buttons can overflow .seg's non-wrapping, overflow:hidden bar)", () => {
+test("#gc-status-filter gets its own dedicated horizontal-scroll rule (all 7 buttons stay reachable on narrow screens)", () => {
   const CSS = fs.readFileSync(path.join(__dirname, "static", "admin-dashboard.css"), "utf8");
-  const rule = CSS.slice(CSS.indexOf("#gc-status-filter"), CSS.indexOf("}", CSS.indexOf("#gc-status-filter")) + 1);
-  assert.notEqual(rule.indexOf("#gc-status-filter"), -1, "#gc-status-filter must have its own overflow rule");
-  assert.match(rule, /overflow-x:\s*auto/, "must be independently scrollable rather than clipped by .seg's overflow:hidden");
+  const filterRuleStart = CSS.indexOf("#gc-status-filter {");
+  assert.notEqual(filterRuleStart, -1, "#gc-status-filter must have its own dedicated rule, not rely on .seg alone");
+  const filterRule = CSS.slice(filterRuleStart, CSS.indexOf("}", filterRuleStart) + 1);
+  assert.match(filterRule, /display:\s*flex/);
+  assert.match(filterRule, /flex-wrap:\s*nowrap/, "single row — scrolls rather than wraps, per the preferred pattern");
+  assert.match(filterRule, /overflow-x:\s*auto/, "must be independently scrollable rather than clipped by .seg's overflow:hidden");
+  assert.match(filterRule, /overflow-y:\s*hidden/);
+
+  const buttonRuleStart = CSS.indexOf("#gc-status-filter button {");
+  assert.notEqual(buttonRuleStart, -1, "buttons must not shrink to fit — they need a dedicated no-shrink rule to stay tappable");
+  const buttonRule = CSS.slice(buttonRuleStart, CSS.indexOf("}", buttonRuleStart) + 1);
+  assert.match(buttonRule, /flex:\s*0 0 auto/);
+});
+
+test(".seg's shared global rule is unchanged by the #gc-status-filter fix — no other segmented control is affected", () => {
+  const CSS = fs.readFileSync(path.join(__dirname, "static", "admin-dashboard.css"), "utf8");
+  const segRuleStart = CSS.indexOf(".seg {");
+  assert.notEqual(segRuleStart, -1);
+  const segRule = CSS.slice(segRuleStart, CSS.indexOf("}", segRuleStart) + 1);
+  assert.equal(segRule, ".seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }",
+    ".seg itself must keep its original declaration, unmodified");
+  // Belt-and-braces: .seg must never itself gain scroll/wrap behavior —
+  // that would change every other segmented control on the page (Campaign
+  // Centre's #ac-status-filter / #campaigns-status-filter, etc.), which is
+  // exactly what this fix is scoped to avoid.
+  assert.doesNotMatch(segRule, /overflow-x/);
+  assert.doesNotMatch(segRule, /flex-wrap/);
 });
 
 // ---------------------------------------------------------------------
