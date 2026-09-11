@@ -6772,11 +6772,14 @@
       }
 
       // P0.14 §"No-provider dead end" / §"provider is inactive": routes to
-      // the existing Providers screen (state.campaignId is already set —
-      // this IS Campaign Detail — so gcRenderProvidersBackLink can offer a
-      // way back once the admin creates/activates a provider there).
+      // the existing Providers screen. Records provenance (gcProvidersBackCampaignId)
+      // so gcRenderProvidersBackLink only ever offers "Back to Campaign" when
+      // Providers was actually reached from here — never for an admin who
+      // navigated to Providers directly (sidebar/tab), where state.campaignId
+      // could still be some unrelated campaign left over from an earlier visit
+      // (Codex review finding).
       var gotoProvidersBtn = e.target && e.target.closest && e.target.closest("[data-cd-goto-providers]");
-      if (gotoProvidersBtn) { switchView("gcProviders"); return; }
+      if (gotoProvidersBtn) { gcProvidersBackCampaignId = state.campaignId || null; switchView("gcProviders"); return; }
 
       // P0.10 §10/§11: a Mission's schedule is a second-precision
       // eligibility cutoff — never opened in this page's minute-precision
@@ -9483,17 +9486,20 @@
   }
 
   // P0.14 §"Provider management return path": a campaign this admin was
-  // just setting up (state.campaignId, set by renderCampaignDetail and
-  // never cleared) gets a way back here after creating/activating a
-  // provider — never a new routing mechanism, just the one bit of state
-  // Campaign Detail already retains. Hidden when the admin arrived at
-  // Providers some other way (sidebar/tab nav) and state.campaignId is
-  // whatever campaign they last viewed, if any, since that's still a valid
-  // "go back" target either way.
+  // just setting up gets a way back here after creating/activating a
+  // provider. Gated on gcProvidersBackCampaignId — set only by Campaign
+  // Detail's "Manage Providers" CTA and cleared by switchView the instant
+  // any other view is entered — never on state.campaignId directly, which
+  // stays set to whatever campaign was last viewed long after that visit
+  // ends. Without that provenance check, navigating to Providers straight
+  // from the sidebar/tab bar would show a "Back to Campaign" link pointing
+  // at a stale, unrelated campaign (Codex review finding).
+  var gcProvidersBackCampaignId = null;
+
   function gcRenderProvidersBackLink() {
     var el = $("#gc-providers-back-link");
     if (!el) return;
-    if (!state.campaignId) { el.classList.add("hidden"); el.innerHTML = ""; return; }
+    if (!gcProvidersBackCampaignId) { el.classList.add("hidden"); el.innerHTML = ""; return; }
     el.classList.remove("hidden");
     el.innerHTML = '<button class="btn" data-gcp-back-to-campaign="1" style="background:transparent;border:1px solid var(--border);">← Back to Campaign</button>';
   }
@@ -9545,8 +9551,8 @@
     });
     document.addEventListener("click", function (e) {
       var backBtn = e.target && e.target.closest && e.target.closest("[data-gcp-back-to-campaign]");
-      if (!backBtn || !state.campaignId) return;
-      renderCampaignDetail(state.campaignId);
+      if (!backBtn || !gcProvidersBackCampaignId) return;
+      renderCampaignDetail(gcProvidersBackCampaignId);
     });
   }
 
@@ -11518,6 +11524,12 @@
   }
 
   function switchView(view) {
+    // P0.14: the Providers "Back to Campaign" link's provenance flag is only
+    // ever set by Campaign Detail's own "Manage Providers" CTA (right before
+    // it calls switchView("gcProviders")) — entering any OTHER view first,
+    // for any reason, means Providers (if visited later) was reached some
+    // other way, so the link must not claim a stale campaign as its origin.
+    if (view !== "gcProviders") gcProvidersBackCampaignId = null;
     state.view = view;
     VIEWS.forEach(function (v) { $("#view-" + v).classList.toggle("hidden", v !== view); });
     var found = inActivateTab ? null : findTabForView(view);
