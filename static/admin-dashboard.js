@@ -4779,7 +4779,7 @@
       html += '<button class="btn danger" data-mission-action="close" data-id="' + id + '">End</button> ';
       html += '<button class="btn" data-mission-action="open" data-id="' + id + '">Open/View</button>';
     } else if (bucket === "paused") {
-      html += '<button class="btn" data-mission-action="publish" data-id="' + id + '">Resume</button> ';
+      html += '<button class="btn" data-mission-action="publish" data-mission-resume="1" data-id="' + id + '">Resume</button> ';
       html += '<button class="btn danger" data-mission-action="cancel" data-id="' + id + '">End</button> ';
       html += '<button class="btn" data-mission-action="open" data-id="' + id + '">Open/View</button>';
     } else {
@@ -4800,6 +4800,14 @@
       "<td>" + fmt(c.winners) + "</td>" +
       "<td>" + fmt(c.pool_available) + "</td>" +
       "<td>" + mpActionsHtml(c) + "</td></tr>";
+  }
+
+  // Human-readable success copy for Existing Drops' Mission action buttons
+  // (P0.15) — never the old raw "✅ Mission updated" catch-all.
+  function mpDropsActionSuccessMessage(action, isResume) {
+    if (action === "publish") return isResume ? "Mission resumed." : "Mission published.";
+    return { pause: "Mission paused.", cancel: "Mission cancelled.", close: "Mission closed." }[action]
+      || "Mission updated.";
   }
 
   function loadDrops(force) {
@@ -4999,7 +5007,6 @@
         ? "/api/admin/gc-campaigns/" + encodeURIComponent(id) + "/" + action
         : "/api/admin/mission-pool/" + encodeURIComponent(id) + "/" + action;
 
-      btn.disabled = true;
       // Publish (Start/Resume) mirrors mission-admin.js's own runAction():
       // the gc-campaigns publish endpoint only checks that a mission config
       // and a pool id exist, not that the pool can still cover the winner
@@ -5007,15 +5014,25 @@
       // edit-state and refuses to publish when it's insufficient. Skipping
       // that check here would let an operator publish a mission whose
       // shared pool has since been drained, leaving winners with no reward.
+      // Deliberately not routed through gcRunAction — it isn't the backend
+      // action itself, and its specific messaging predates this pass.
       var preflight = action === "publish" ? mpInventoryPreflight(id) : Promise.resolve(true);
       preflight.then(function (clear) {
-        if (!clear) return null;
-        return apiPost(path).then(function (r) {
-          if (!r || r.status !== "ok") { toast("❌ " + ((r && r.code) || "action_failed"), "error"); return; }
-          toast("✅ Mission updated", "success");
+        if (!clear) return;
+        // P0.15 — was a bare apiPost() call (raw "HTTP <status>"/raw-code
+        // toasts, no in-flight guard beyond this one synchronous
+        // btn.disabled). Routed through the same gcRunAction choke point
+        // every other gc_campaigns/Mission action uses.
+        return gcRunAction({
+          id: id, action: action, button: btn,
+          loadingText: "Working...",
+          run: function () { return apiPostJson(path, {}); },
+          successMessage: mpDropsActionSuccessMessage(action, btn.dataset.missionResume === "1"),
+          fallbackError: "Couldn't complete this Mission action. Try again.",
+          refresh: false,
+          onSuccess: function () { loadDrops(true); },
         });
-      }).catch(function (e) { toast("❌ " + e.message, "error"); })
-        .finally(function () { btn.disabled = false; loadDrops(true); });
+      });
     });
   }
 
@@ -5089,13 +5106,6 @@
     return html;
   }
 
-  var GC_CLOSE_MISSION_CONFIRM = "Close this Mission?\n\n" +
-    "This stops new participation and sets the final submission cutoff.\n\n" +
-    "Existing submissions will remain and the campaign can proceed to processing.";
-
-  var GC_END_REWARDS_CONFIRM = "End active Mission rewards?\n\n" +
-    "This will immediately hide currently active winner rewards for this campaign.\n\n" +
-    "Allocated vouchers will remain recorded and will not be returned to inventory.";
 
   // ---------- Permanent campaign deletion (Campaign Centre) ----------
   //
@@ -5118,6 +5128,13 @@
     h3.textContent = "Delete campaign permanently?";
     box.appendChild(h3);
 
+    // The confirmation phrase is the campaign NAME, not the (intentionally
+    // hidden from beginners) technical campaign_id — falls back to the id
+    // only when the campaign has no name. This is a confirmation phrase,
+    // not an identity lookup: deletion below is still bound to campaignId
+    // regardless of what duplicate-named campaigns exist.
+    var confirmPhrase = (campaignName && campaignName.trim()) ? campaignName.trim() : campaignId;
+
     var nameP = document.createElement("p");
     nameP.innerHTML = "<strong>" + esc(campaignName || campaignId) + "</strong><br/><span class=\"sub\">" + esc(campaignId) + "</span>";
     box.appendChild(nameP);
@@ -5128,12 +5145,12 @@
     box.appendChild(warnP);
 
     var typeP = document.createElement("p");
-    typeP.innerHTML = "Type <strong>" + esc(campaignId) + "</strong> to confirm.";
+    typeP.innerHTML = "To confirm, type <strong>" + esc(confirmPhrase) + "</strong>.";
     box.appendChild(typeP);
 
     var input = document.createElement("input");
     input.className = "filter-input";
-    input.placeholder = "Type " + campaignId;
+    input.placeholder = "Type " + confirmPhrase;
     input.autocomplete = "off";
     box.appendChild(input);
 
@@ -5162,7 +5179,7 @@
     document.body.appendChild(overlay);
     if (input.focus) input.focus();
 
-    function matches() { return (input.value || "").trim() === campaignId; }
+    function matches() { return (input.value || "").trim() === confirmPhrase; }
     function syncEnabled() { confirmBtn.disabled = !matches(); }
     input.addEventListener("input", syncEnabled);
 
@@ -5181,9 +5198,9 @@
           btnStop(confirmBtn);
           input.disabled = false;
           syncEnabled();
-          errorEl.textContent = "❌ " + ((res.d && (res.d.code === "invalid_status_for_deletion"
+          errorEl.textContent = "❌ " + (res.d && res.d.code === "invalid_status_for_deletion"
             ? "Cannot delete a " + res.d.campaign_status + " campaign — archive it first."
-            : res.d.code)) || "delete_failed");
+            : gcActionErrorMessage(res, "Couldn't delete this campaign. Try again."));
           errorEl.style.display = "block";
           return;
         }
@@ -5194,7 +5211,7 @@
         btnStop(confirmBtn);
         input.disabled = false;
         syncEnabled();
-        errorEl.textContent = "❌ " + e.message;
+        errorEl.textContent = "❌ Couldn't delete this campaign. Try again.";
         errorEl.style.display = "block";
       });
     });
@@ -5305,21 +5322,54 @@
     if (current && items.some(function (c) { return c.campaign_id === current; })) select.value = current;
   }
 
+  // ---------- Share-safe campaign_id budget (P0.15) ----------
+  // Telegram's start-param constraint: "campaign_" + campaign_id must fit
+  // within 64 chars (see campaign_registration.CAMPAIGN_REG_START_PARAM_PREFIX
+  // / _TELEGRAM_START_PARAM_SAFE, which enforce the same 55-char budget
+  // server-side). One constant, reused everywhere a campaign_id is
+  // generated or validated client-side — never a sprinkled magic number.
+  var GC_LINK_SAFE_CAMPAIGN_ID_MAX = 55;
+  var GC_LINK_SAFE_CAMPAIGN_ID_CHARS_RE = /^[A-Za-z0-9_-]+$/;
+
+  function gcCampaignIdIsLinkSafe(campaignId) {
+    return typeof campaignId === "string" && campaignId.length > 0 &&
+      campaignId.length <= GC_LINK_SAFE_CAMPAIGN_ID_MAX &&
+      GC_LINK_SAFE_CAMPAIGN_ID_CHARS_RE.test(campaignId);
+  }
+
+  var GC_CAMPAIGN_ID_FORMAT_ERROR = "Campaign ID must use letters, numbers, - or _, and be " +
+    GC_LINK_SAFE_CAMPAIGN_ID_MAX + " characters or fewer.";
+
+  // Truncates `base` so `base + suffix` still fits the link-safe budget,
+  // trimming any separator left dangling by the cut. Shared by every
+  // candidate-id generator below so a `-2`/`-copy-3` suffix is never lost
+  // or distorted by a naive post-hoc truncation of the whole string.
+  function gcFitCampaignIdSuffix(base, suffix) {
+    var maxBaseLen = Math.max(0, GC_LINK_SAFE_CAMPAIGN_ID_MAX - suffix.length);
+    return (base || "").slice(0, maxBaseLen).replace(/-+$/g, "");
+  }
+
   // ---------- Campaign ID slug generation (P0.3) ----------
   // Deterministic, URL-safe: lowercase, hyphen-separated, unsafe characters
-  // stripped, repeated/leading/trailing separators collapsed. Only ever
-  // runs client-side to prefill the Technical Details field for a NEW
-  // campaign — editing an existing campaign never touches this.
+  // stripped, repeated/leading/trailing separators collapsed, then capped
+  // to the share-safe budget above. Only ever runs client-side to prefill
+  // the Technical Details field for a NEW campaign — editing an existing
+  // campaign never touches this.
   function gcSlugify(name) {
     var s = (name || "").toString();
     if (typeof s.normalize === "function") {
       s = s.normalize("NFKD").replace(/[̀-ͯ]/g, "");
     }
-    return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+    s = s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+    return gcFitCampaignIdSuffix(s, "");
   }
 
+  // Reserves room for the "-N" collision suffix so the final candidate
+  // never exceeds GC_LINK_SAFE_CAMPAIGN_ID_MAX, even for a base that was
+  // already at (or near) the cap.
   function gcSlugCandidate(base, n) {
-    return n <= 1 ? base : base + "-" + n;
+    var suffix = n <= 1 ? "" : "-" + n;
+    return gcFitCampaignIdSuffix(base, suffix) + suffix;
   }
 
   // Skips ids already known to be in active use (from the last campaigns
@@ -5921,20 +5971,44 @@
     return null;
   }
 
-  // The deep link is only ever populated server-side for a registration-
-  // enabled campaign (campaign_centre.get_campaign_route / list_campaigns,
-  // via campaign_registration.campaign_deep_link) — never assembled here
-  // from a bot username or raw campaign_id.
+  // P0.15 — distinguishes WHY a share link is unavailable instead of always
+  // blaming the bot username: campaign_centre._registration_share_fields /
+  // _mission_share_fields (server-side, mirroring mission_pool_ux's
+  // mission_link_unavailable_reason pattern) name the actual reason.
+  // campaign_id_not_link_safe is never described as fixable — a campaign_id
+  // is immutable once created, so this campaign's link is permanently
+  // unavailable, not "temporarily".
+  var GC_SHARE_UNAVAILABLE_REASON_TEXT = {
+    bot_username_not_configured: "Share link is temporarily unavailable — the bot username isn't configured yet.",
+    campaign_id_not_link_safe: "This campaign's ID is too long to create a Telegram share link.",
+  };
+
+  function gcShareUnavailableReasonText(campaignId, reasonCode) {
+    if (reasonCode && GC_SHARE_UNAVAILABLE_REASON_TEXT[reasonCode]) return GC_SHARE_UNAVAILABLE_REASON_TEXT[reasonCode];
+    // Defensive fallback for a campaign object fetched before this field
+    // existed (e.g. a stale gcOptionsCache.campaigns entry) — same
+    // diagnosis, computed client-side from the one shared length/charset rule.
+    if (campaignId && !gcCampaignIdIsLinkSafe(campaignId)) return GC_SHARE_UNAVAILABLE_REASON_TEXT.campaign_id_not_link_safe;
+    return GC_SHARE_UNAVAILABLE_REASON_TEXT.bot_username_not_configured;
+  }
+
+  // The deep link is only ever populated server-side (campaign_centre.
+  // get_campaign_route / list_campaigns) — never assembled here from a bot
+  // username or raw campaign_id. Mission campaigns get their own
+  // mission_<id> link the same way (mission_pool_ux.mission_deep_link,
+  // reused server-side — never a second deep-link rule invented here).
   function gcComputeShareState(campaign) {
     campaign = campaign || {};
     if (campaign.registration_deep_link) return { available: true, link: campaign.registration_deep_link };
-    var enabled = !!((campaign.registration || {}).enabled);
-    return {
-      available: false,
-      reason: enabled
-        ? "Share link is temporarily unavailable — the bot username isn't configured yet."
-        : "This campaign type doesn't have a shareable link.",
-    };
+    if (campaign.mission_link) return { available: true, link: campaign.mission_link };
+    var registrationEnabled = !!((campaign.registration || {}).enabled);
+    if (registrationEnabled) {
+      return { available: false, reason: gcShareUnavailableReasonText(campaign.campaign_id, campaign.registration_deep_link_unavailable_reason) };
+    }
+    if (gcIsMissionCampaign(campaign)) {
+      return { available: false, reason: gcShareUnavailableReasonText(campaign.campaign_id, campaign.mission_link_unavailable_reason) };
+    }
+    return { available: false, reason: "This campaign type doesn't have a shareable link." };
   }
 
   // ---- Pure HTML builders — Campaigns list row (P0.4) -------------------
@@ -7410,6 +7484,13 @@
       // mission_pool block (e.g. a just-cancelled Mission still showing
       // Live) until some unrelated action happened to force a refresh.
       invalidateCampaignsCache: gcInvalidateCampaignsCache,
+      // P0.15 — the single hardened choke point every gc_campaigns lifecycle
+      // action already runs through (friendly error mapping, in-flight/
+      // double-click guard, button disable). Exposed as a host callback so
+      // Mission Admin's own Close/Cancel/Resume/Process/End Rewards/Publish/
+      // Pause actions get the same guarantees without a second
+      // GC_ACTION_ERROR_MESSAGES-style dictionary living in mission-admin.js.
+      runAction: gcRunAction,
     });
     mod.load();
   }
@@ -7549,6 +7630,16 @@
     missing_starts_at: "Enter a start date and time.",
     ends_at_before_starts_at: "End date must be after the start date.",
     subscription_channel_required: "Add a channel username before requiring subscription — or turn the switch off.",
+    // P0.15 — Mission Admin action hardening. mission_pool.py's admin
+    // close/cancel/resume/process/end-rewards endpoints only ever return
+    // not_found (already mapped above), auth_failed, and (process only)
+    // mission_pool_disabled — confirmed by reading mission_pool.py rather
+    // than assumed; there are no per-transition codes (e.g.
+    // "mission_already_closed") to map because those endpoints are
+    // idempotent and don't guard against re-running an already-applied
+    // transition.
+    auth_failed: "Your session has expired. Sign in again.",
+    mission_pool_disabled: "Mission processing is currently disabled. Try again later.",
   };
 
   // Raw snake_case codes never reach the admin — only console.error, for
@@ -7625,6 +7716,14 @@
     });
   }
 
+  // `-copy` / `-copy-N` id proposal for Duplicate, using the same share-safe
+  // truncation as gcSlugCandidate (so a source id near the 55-char budget
+  // still gets a valid `-copy` suffix instead of an oversized candidate).
+  function gcDuplicateIdCandidate(sourceId, n) {
+    var suffix = n <= 1 ? "-copy" : "-copy-" + n;
+    return gcFitCampaignIdSuffix(sourceId, suffix) + suffix;
+  }
+
   // Client-side proposal only, so a second Duplicate click doesn't have to
   // land on the backend's own default (`<id>-copy`) and 409. The backend
   // (duplicate_campaign) stays the source of truth and still rejects with
@@ -7632,12 +7731,36 @@
   // collision — handled generically by GC_ACTION_ERROR_MESSAGES above —
   // since gcKnownCampaignIds can be stale (it excludes tombstoned ids, and
   // another tab may have just created one).
+  function gcFirstAvailableDuplicateSuffix(sourceId) {
+    var n = 1;
+    while (gcKnownCampaignIds[gcDuplicateIdCandidate(sourceId, n)]) n++;
+    return n;
+  }
+
   function gcNextDuplicateId(sourceId) {
-    var base = sourceId + "-copy";
-    if (!gcKnownCampaignIds[base]) return base;
-    var n = 2;
-    while (gcKnownCampaignIds[base + "-" + n]) n++;
-    return base + "-" + n;
+    return gcDuplicateIdCandidate(sourceId, gcFirstAvailableDuplicateSuffix(sourceId));
+  }
+
+  // P0.15 — a deleted campaign id is tombstoned, not freed: gcKnownCampaignIds
+  // excludes tombstones entirely (see comment above), so the client-side
+  // guess above can land on a retired `<id>-copy` and 409 forever with no
+  // way forward. Retries with the next `-copy-N` suffix on exactly the two
+  // collision codes the backend can return — never on an unrelated error —
+  // capped the same way campaign creation is (gcCreateCampaignAttempt's
+  // maxAttempts). The server stays fully authoritative: every candidate is
+  // still posted and can still be accepted or rejected on its own merits.
+  var GC_DUPLICATE_MAX_ATTEMPTS = 25;
+
+  function gcDuplicateCampaignAttempt(sourceId, n, maxAttempts) {
+    var candidateId = gcDuplicateIdCandidate(sourceId, n);
+    return apiPostJson("/api/admin/gc-campaigns/" + sourceId + "/duplicate", { campaign_id: candidateId }).then(function (res) {
+      var code = res.d && res.d.code;
+      var collision = code === "duplicate_campaign_id" || code === "campaign_id_previously_deleted";
+      if (collision && n < maxAttempts) {
+        return gcDuplicateCampaignAttempt(sourceId, n + 1, maxAttempts);
+      }
+      return res;
+    });
   }
 
   // ---- Preview modal (P0.9) ----------------------------------------------
@@ -7828,8 +7951,8 @@
           name: name,
           type: type,
           schedule: {
-            starts_at: $("#gc-c-starts").value ? new Date($("#gc-c-starts").value).toISOString() : null,
-            ends_at: $("#gc-c-ends").value ? new Date($("#gc-c-ends").value).toISOString() : null,
+            starts_at: ccKlInputToUtcIso($("#gc-c-starts").value),
+            ends_at: ccKlInputToUtcIso($("#gc-c-ends").value),
           },
           telegram: { channel_username: ($("#gc-c-channel").value || "").trim() },
           destination: { provider_id: ($("#gc-c-provider").value || "").trim(), path: ($("#gc-c-path").value || "").trim(), open_mode: gcDefaultOpenModeForType(type), ready: false },
@@ -7840,6 +7963,9 @@
         if (gcCampaignIdManuallyEdited) {
           var manualId = ($("#gc-c-id").value || "").trim();
           if (!manualId) { toast("❌ Campaign ID cannot be empty.", "error"); done(); return; }
+          if (!gcCampaignIdIsLinkSafe(manualId)) {
+            toast("❌ " + GC_CAMPAIGN_ID_FORMAT_ERROR, "error"); done(); return;
+          }
           gcCreateCampaignAttempt(baseBody, null, 1, manualId, createBtn).then(done);
         } else {
           var base = gcSlugify(name);
@@ -7898,33 +8024,47 @@
       else if (action === "mission") openMissionAdmin(id);
       else if (action === "registration") openCampaignRegistrationConfig(id);
       else if (action === "close-mission") {
-        if (!confirm(GC_CLOSE_MISSION_CONFIRM)) return;
-        apiPost("/api/admin/mission-pool/" + id + "/close").then(function (r) {
-          if (!r || r.status !== "ok") { toast("❌ " + ((r && r.code) || "close_failed"), "error"); return; }
-          toast("✅ Mission closed.", "success");
-          loadGcCampaigns(true);
-        }).catch(function (e) { toast("❌ " + e.message, "error"); loadGcCampaigns(true); });
+        // P0.15 — was a bare apiPost() (throws raw "HTTP <status>" on any
+        // non-2xx response, no in-flight guard, no button-disable). Routed
+        // through gcRunAction like every other lifecycle action above.
+        gcRunAction({
+          id: id, action: "close-mission", button: btn,
+          loadingText: "Closing...",
+          confirmTitle: "Close this Mission?",
+          confirmMessage: "This stops new participation and sets the final submission cutoff. Existing submissions will remain and the campaign can proceed to processing.",
+          run: function () { return apiPostJson("/api/admin/mission-pool/" + id + "/close", {}); },
+          successMessage: "Mission closed.",
+          fallbackError: "Couldn't close this Mission. Try again.",
+        });
       }
       else if (action === "end-rewards") {
-        if (!confirm(GC_END_REWARDS_CONFIRM)) return;
-        apiPost("/api/admin/mission-pool/" + id + "/end-rewards").then(function (r) {
-          if (!r || r.status !== "ok") { toast("❌ " + ((r && r.code) || "end_rewards_failed"), "error"); return; }
-          var n = r.count_affected || 0;
-          toast("✅ " + n + " active Mission reward" + (n === 1 ? "" : "s") + " ended.", "success");
-          loadGcCampaigns(true);
-        }).catch(function (e) { toast("❌ " + e.message, "error"); loadGcCampaigns(true); });
+        gcRunAction({
+          id: id, action: "end-rewards", button: btn,
+          loadingText: "Ending rewards...",
+          confirmTitle: "End active Mission rewards?",
+          confirmMessage: "This will immediately hide currently active winner rewards for this campaign. Allocated vouchers will remain recorded and will not be returned to inventory.",
+          run: function () { return apiPostJson("/api/admin/mission-pool/" + id + "/end-rewards", {}); },
+          successMessage: function (d) {
+            var n = (d && d.count_affected) || 0;
+            return "Rewards ended for " + n + " active Mission reward" + (n === 1 ? "" : "s") + ".";
+          },
+          fallbackError: "Couldn't end Mission rewards. Try again.",
+        });
       }
       else if (action === "duplicate") {
         var dupName = btn.dataset.name || id;
-        var proposedId = gcNextDuplicateId(id);
         gcRunAction({
           id: id, action: "duplicate", button: btn,
           loadingText: "Duplicating...",
-          run: function () { return apiPostJson("/api/admin/gc-campaigns/" + id + "/duplicate", { campaign_id: proposedId }); },
+          // P0.15 — a single client-side guess (gcNextDuplicateId) can land
+          // on a tombstoned `<id>-copy` and dead-end permanently; this
+          // retries with the next `-copy-N` suffix, capped, while the
+          // backend stays authoritative over every candidate it's offered.
+          run: function () { return gcDuplicateCampaignAttempt(id, gcFirstAvailableDuplicateSuffix(id), GC_DUPLICATE_MAX_ATTEMPTS); },
           // Uses the campaign NAME, never the raw campaign_id — duplicate_campaign
-          // copies the source doc verbatim (including `name`), so the new
-          // draft shares the same display name as its source by design.
-          successMessage: 'Duplicated "' + dupName + '" as a new draft.',
+          // (P0.15) now suffixes the source name with " (copy)" so the two
+          // cards never look visually identical.
+          successMessage: 'Duplicated "' + dupName + '" as "' + dupName + ' (copy)".',
           fallbackError: "Couldn't duplicate this campaign. Try again.",
           refresh: false,
           onSuccess: function (d) {
@@ -8320,7 +8460,9 @@
     if (step === 1) {
       if (!d.name || !d.name.trim()) return "Enter a campaign name.";
       if (d.campaignIdManuallyEdited) {
-        if (!(d.campaignId || "").trim()) return "Campaign ID cannot be empty.";
+        var wizManualId = (d.campaignId || "").trim();
+        if (!wizManualId) return "Campaign ID cannot be empty.";
+        if (!gcCampaignIdIsLinkSafe(wizManualId)) return GC_CAMPAIGN_ID_FORMAT_ERROR;
       } else if (!gcSlugify(d.name)) {
         return "Couldn't generate a campaign ID from that name — add letters or numbers, or set one manually under Technical Details.";
       }

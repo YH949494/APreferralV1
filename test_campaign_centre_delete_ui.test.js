@@ -34,6 +34,11 @@ const HELPERS_START = "  function esc(v) {";
 const HELPERS_END = "\n  function setMeta(text) {";
 const MODAL_START = "  // ---------- Permanent campaign deletion (Campaign Centre) ----------";
 const MODAL_END = "\n  function loadGcCampaigns(force) {";
+// P0.15 — the modal's error branch now maps codes through
+// gcActionErrorMessage/GC_ACTION_ERROR_MESSAGES (never a raw snake_case
+// code) instead of showing res.d.code verbatim.
+const ERROR_MAP_START = "  var GC_ACTION_ERROR_MESSAGES = {";
+const ERROR_MAP_END = "\n\n  // Refreshes whichever canonical view is currently showing this campaign";
 
 function slice(src, startMarker, endMarker) {
   const start = src.indexOf(startMarker);
@@ -44,7 +49,8 @@ function slice(src, startMarker, endMarker) {
 }
 
 function loadFeatureSource() {
-  return slice(JS, HELPERS_START, HELPERS_END) + "\n" + slice(JS, MODAL_START, MODAL_END);
+  return slice(JS, ERROR_MAP_START, ERROR_MAP_END) + "\n" +
+    slice(JS, HELPERS_START, HELPERS_END) + "\n" + slice(JS, MODAL_START, MODAL_END);
 }
 
 // ---------------------------------------------------------------------
@@ -203,25 +209,40 @@ test("modal starts with the Delete permanently button disabled", () => {
   assert.equal(confirmBtn.disabled, true);
 });
 
-test("typing anything other than the exact campaign id keeps the button disabled", () => {
+// P0.15 — the confirmation phrase is now the campaign NAME (beginner-
+// visible), not the hidden technical campaign_id: typing the id must no
+// longer satisfy the check, and typing the exact name must.
+test("typing anything other than the exact campaign name keeps the button disabled", () => {
   const { context, document } = makeContext();
   context.openGcDeleteModal("summer-lucky-draw-2026", "Summer Lucky Draw");
   const overlay = document.body.children[document.body.children.length - 1];
   const input = findInput(overlay);
   const confirmBtn = findByText(overlay, "Delete permanently");
 
-  input.value = "summer-lucky-draw";
+  input.value = "Summer Lucky";
   input._trigger("input");
   assert.equal(confirmBtn.disabled, true, "partial match must not enable the button");
 
-  input.value = "Summer Lucky Draw"; // display name, not the slug
+  input.value = "summer-lucky-draw-2026"; // the technical campaign_id, not the name
   input._trigger("input");
-  assert.equal(confirmBtn.disabled, true, "the campaign title must not satisfy the id check");
+  assert.equal(confirmBtn.disabled, true, "the campaign_id must not satisfy the name check");
 });
 
-test("typing the exact campaign id enables Delete permanently", () => {
+test("typing the exact campaign name enables Delete permanently", () => {
   const { context, document } = makeContext();
   context.openGcDeleteModal("summer-lucky-draw-2026", "Summer Lucky Draw");
+  const overlay = document.body.children[document.body.children.length - 1];
+  const input = findInput(overlay);
+  const confirmBtn = findByText(overlay, "Delete permanently");
+
+  input.value = "Summer Lucky Draw";
+  input._trigger("input");
+  assert.equal(confirmBtn.disabled, false);
+});
+
+test("a campaign with no name falls back to campaign_id as the confirmation phrase", () => {
+  const { context, document } = makeContext();
+  context.openGcDeleteModal("summer-lucky-draw-2026", "");
   const overlay = document.body.children[document.body.children.length - 1];
   const input = findInput(overlay);
   const confirmBtn = findByText(overlay, "Delete permanently");
@@ -249,7 +270,7 @@ test("successful delete: closes the modal, toasts success, and refreshes the tab
   const input = findInput(overlay);
   const confirmBtn = findByText(overlay, "Delete permanently");
 
-  input.value = "summer-lucky-draw-2026";
+  input.value = "Summer Lucky Draw";
   input._trigger("input");
   confirmBtn._trigger("click");
   await flush();
@@ -273,7 +294,7 @@ test("failed delete (409 live/paused): modal stays open and shows the backend er
   const input = findInput(overlay);
   const confirmBtn = findByText(overlay, "Delete permanently");
 
-  input.value = "summer-lucky-draw-2026";
+  input.value = "Summer Lucky Draw";
   input._trigger("input");
   confirmBtn._trigger("click");
   await flush();
@@ -288,7 +309,12 @@ test("failed delete (409 live/paused): modal stays open and shows the backend er
   assert.match(errorNode.textContent, /live/);
 });
 
-test("generic failure keeps the modal open with the raw error code", async () => {
+// P0.15 — was "keeps the modal open with the raw error code" (a bug this
+// PR fixes): any code other than invalid_status_for_deletion now goes
+// through gcActionErrorMessage/GC_ACTION_ERROR_MESSAGES, so an unmapped
+// code like internal_error falls back to the generic friendly message —
+// never the raw snake_case string.
+test("generic/unmapped failure keeps the modal open with a friendly message, never the raw error code", async () => {
   const { context, document, fetchImpl, toasts } = makeContext();
   fetchImpl.push(500, { status: "error", code: "internal_error" });
 
@@ -297,7 +323,7 @@ test("generic failure keeps the modal open with the raw error code", async () =>
   const input = findInput(overlay);
   const confirmBtn = findByText(overlay, "Delete permanently");
 
-  input.value = "summer-lucky-draw-2026";
+  input.value = "Summer Lucky Draw";
   input._trigger("input");
   confirmBtn._trigger("click");
   await flush();
@@ -305,7 +331,8 @@ test("generic failure keeps the modal open with the raw error code", async () =>
   assert.equal(overlay.isAttached(), true);
   assert.equal(toasts.length, 0);
   const errorNode = overlay.children[0].children.find((c) => c.style && c.style.display === "block");
-  assert.match(errorNode.textContent, /internal_error/);
+  assert.doesNotMatch(errorNode.textContent, /internal_error/, "must never leak the raw snake_case code");
+  assert.match(errorNode.textContent, /Couldn't delete this campaign\. Try again\./);
 });
 
 test("Cancel closes the modal without calling the API", () => {

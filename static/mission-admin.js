@@ -1698,7 +1698,34 @@
   // Operations actions
   // -----------------------------------------------------------------------
 
-  function postAction(action, campaignId) {
+  // Human-readable success copy per action (P0.15) — never the old raw
+  // "✅ <action> ok" template. end_rewards is handled separately below
+  // since its message needs the backend's count_affected.
+  var MISSION_ACTION_SUCCESS_MESSAGES = {
+    publish: "Mission published.",
+    pause: "Mission paused.",
+    close: "Mission closed.",
+    cancel: "Mission cancelled.",
+    resume: "Mission resumed.",
+    process: "Mission processing started.",
+  };
+
+  function missionActionSuccessMessage(action, d) {
+    if (action === "end_rewards") {
+      var n = num((d && d.count_affected) || 0);
+      return "Rewards ended for " + n + " active Mission reward" + (n === 1 ? "" : "s") + ".";
+    }
+    return MISSION_ACTION_SUCCESS_MESSAGES[action] || "Done.";
+  }
+
+  // P0.15 — was a bare host.apiPost() call: threw a raw "HTTP <status>" on
+  // any non-2xx response (turned by the local .catch below into a literal
+  // `code: "HTTP 404"`, toasted raw), had no in-flight/double-click guard,
+  // and never disabled the triggering button. Routed through
+  // host.runAction (== admin-dashboard.js's gcRunAction, the same choke
+  // point every gc_campaigns lifecycle action already uses) instead of a
+  // second GC_ACTION_ERROR_MESSAGES-style dictionary living in this module.
+  function postAction(action, campaignId, button) {
     // publish/pause are the shared Campaign Centre lifecycle; close, cancel,
     // resume, process and end-rewards are the official Phase 1/2 Mission
     // endpoints. The UI never writes campaign status or reward rows itself.
@@ -1706,34 +1733,25 @@
     var path = (action === "publish" || action === "pause")
       ? "/api/admin/gc-campaigns/" + encodeURIComponent(campaignId) + "/" + action
       : "/api/admin/mission-pool/" + encodeURIComponent(campaignId) + "/" + endpointAction;
-    return host.apiPost(path).catch(function (e) { return { status: "error", code: e.message }; })
-      .then(function (r) {
-        if (!r || r.status !== "ok") {
-          host.toast("❌ " + ((r && r.code) || "action_failed"), "error");
-        } else {
-          // Player Campaigns' own gc_campaigns list cache has no way to know
-          // this mutation happened — close/cancel/resume/process/end-rewards
-          // all change mission_pool/campaign.status fields that cache is
-          // built from. Without invalidating it here, returning to Player
-          // Campaigns right after would still render the pre-mutation state
-          // (e.g. a just-cancelled Mission still showing Live) until
-          // something unrelated happened to force a refresh. host provides
-          // this hook optionally so this module still works standalone/in
-          // tests that don't wire one.
-          if (host.invalidateCampaignsCache) host.invalidateCampaignsCache();
-          if (action === "end_rewards") {
-            host.toast("✅ Ended " + num(r.count_affected) + " active reward(s)", "success");
-          } else {
-            host.toast("✅ " + action + " ok", "success");
-          }
-        }
-        openDetail(campaignId);
-      });
+    return host.runAction({
+      id: campaignId, action: action, button: button,
+      loadingText: "Working...",
+      run: function () { return host.apiPostJson(path, {}); },
+      successMessage: function (d) { return missionActionSuccessMessage(action, d); },
+      fallbackError: "Couldn't complete this Mission action. Try again.",
+      // gcRunAction's own gcDefaultRefresh only knows about the gc_campaigns
+      // list/Campaign Detail views, not this module's own canonical detail
+      // panel — refresh that here instead (invalidateCache stays on its
+      // default of true, so the shared gc_campaigns cache is still
+      // invalidated even though this refresh is opted out).
+      refresh: false,
+      onSuccess: function () { openDetail(campaignId); },
+    });
   }
 
-  function runAction(action, campaignId) {
+  function runAction(action, campaignId, button) {
     if (CONFIRM_COPY[action] && !host.confirm(CONFIRM_COPY[action])) return Promise.resolve();
-    if (action !== "publish") return postAction(action, campaignId);
+    if (action !== "publish") return postAction(action, campaignId, button);
 
     // §8: publishing (and resuming, which is the same transition) is blocked
     // when the pool cannot cover the winner target. campaign_centre._transition
@@ -1741,7 +1759,10 @@
     // an operator could publish a mission whose shared pool has since been
     // drained — or whose winner target was raised — and winners would end up
     // with no reward. The verdict is re-read here rather than trusted from
-    // the rendered page: stock is shared and moves under us.
+    // the rendered page: stock is shared and moves under us. This pre-flight
+    // check is deliberately NOT routed through host.runAction — it isn't the
+    // backend action itself, and its specific messaging (naming the pool,
+    // the shortfall) predates and is out of scope for this hardening pass.
     return softGet("/api/admin/mission-pool/" + encodeURIComponent(campaignId) + "/edit-state")
       .then(function (state) {
         if (!state || state.status !== "ok") {
@@ -1757,7 +1778,7 @@
           openDetail(campaignId);
           return null;
         }
-        return postAction(action, campaignId);
+        return postAction(action, campaignId, button);
       });
   }
 
@@ -1772,7 +1793,7 @@
     var root = el();
     if (!root || !root.contains(button)) return;
     event.preventDefault();
-    dispatch(button.getAttribute("data-mp-action"), button.getAttribute("data-mp-id"));
+    dispatch(button.getAttribute("data-mp-action"), button.getAttribute("data-mp-id"), button);
   }
 
   /**
@@ -1780,7 +1801,7 @@
    * separate from the DOM event so the whole surface can be driven — and
    * tested — without a browser.
    */
-  function dispatch(action, id) {
+  function dispatch(action, id, button) {
     if (action === "refresh") { loadList(); return; }
     if (action === "back-to-list") { loadList(); return; }
     if (action === "create") { startCreate(null); return; }
@@ -1821,7 +1842,7 @@
     if (action === "save-draft") { captureCreateStep(); submitCreate(false); return; }
     if (action === "publish-new") { captureCreateStep(); submitCreate(true); return; }
     if (["publish", "pause", "close", "cancel", "resume", "process", "end_rewards"].indexOf(action) !== -1) {
-      runAction(action, id);
+      runAction(action, id, button);
       return;
     }
   }
