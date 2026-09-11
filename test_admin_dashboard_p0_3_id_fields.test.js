@@ -277,7 +277,7 @@ test("gcCreateCampaignAttempt: gives up and reports a friendly message after too
   assert.ok(!toasts[toasts.length - 1].includes("duplicate_campaign_id"));
 });
 
-test("gcCreateCampaignAttempt: non-collision failure surfaces its own code, not a slug-retry", async () => {
+test("gcCreateCampaignAttempt: non-collision failure is not retried as a slug-retry, and never shows the raw backend code (P0.14)", async () => {
   const toasts = [];
   const { calls, fn } = makeApiPostJsonStub([
     { ok: false, d: { status: "error", code: "missing_name" } },
@@ -285,7 +285,12 @@ test("gcCreateCampaignAttempt: non-collision failure surfaces its own code, not 
   const s = loadAttemptSandbox(fn, toasts);
   await s.gcCreateCampaignAttempt({ name: "", type: "tournament" }, "october-lucky-draw", 1, null, null);
   assert.equal(calls.length, 1);
-  assert.ok(toasts[0].includes("missing_name"));
+  assert.ok(toasts[0].includes("❌"));
+  // P0.14 P1-1: gcCreateCampaignAttempt now routes non-collision failures
+  // through gcActionErrorMessage (same friendly-mapping choke point every
+  // other gc_campaigns action uses) instead of concatenating the raw
+  // snake_case code straight into the toast.
+  assert.ok(!toasts[0].includes("missing_name"));
 });
 
 // ---------------------------------------------------------------------

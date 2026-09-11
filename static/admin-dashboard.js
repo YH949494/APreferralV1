@@ -5457,6 +5457,45 @@
     return (providers || []).filter(function (p) { return p.provider_id === providerId; })[0] || null;
   }
 
+  // ---- P0.14: open_mode — mirrors campaign_centre._ALLOWED_OPEN_MODES_BY_TYPE
+  // exactly (single source of truth is the backend map; this is a literal
+  // copy, never derived/guessed) so a beginner-facing selector can never
+  // offer a value the backend would reject with open_mode_not_allowed_for_type,
+  // and the wizard/legacy-create default can never hardcode a value a type
+  // doesn't actually support (the exact P1-1 bug: the legacy form hardcoded
+  // "telegram_web_app" for every type, including
+  // external_subscription_verification, which has only ever allowed
+  // "external_url").
+  var GC_ALLOWED_OPEN_MODES_BY_TYPE = {
+    tournament: ["telegram_web_app", "external_url"],
+    external_subscription_verification: ["external_url"],
+    external_website: ["external_url", "telegram_web_app"],
+    mission_pool: ["telegram_web_app"],
+  };
+
+  function gcAllowedOpenModesForType(type) {
+    return GC_ALLOWED_OPEN_MODES_BY_TYPE[type] || ["telegram_web_app", "external_url"];
+  }
+
+  // One shared default-picker (gcDefaultOpenModeForType) used by both the
+  // wizard and the legacy create form — never two copies of this mapping.
+  // Product default: stay inside the Mini App (telegram_web_app) whenever
+  // the type allows it; otherwise fall back to whatever that type actually
+  // supports.
+  function gcDefaultOpenModeForType(type) {
+    var allowed = gcAllowedOpenModesForType(type);
+    return allowed.indexOf("telegram_web_app") !== -1 ? "telegram_web_app" : allowed[0];
+  }
+
+  // Beginner-facing labels — the raw backend enum (telegram_web_app/
+  // external_url) never renders as visible text (P0.3's "no raw enum" rule).
+  var GC_OPEN_MODE_LABELS = {
+    telegram_web_app: "Telegram Mini App",
+    external_url: "External browser",
+  };
+
+  function gcOpenModeLabel(mode) { return GC_OPEN_MODE_LABELS[mode] || gcHumanizeFallback(mode); }
+
   function gcFindPool(pools, poolId) {
     if (!poolId) return null;
     return (pools || []).filter(function (p) { return p.pool_id === poolId; })[0] || null;
@@ -6169,13 +6208,71 @@
       }).join("");
   }
 
+  // P0.14 §"open_mode control": mirrors cdDestinationProviderOptionsHtml's
+  // own fallback pattern exactly — a stored open_mode that isn't in this
+  // type's currently-allowed set (a legacy value, or a future backend
+  // addition this map hasn't caught up to) keeps its own "Current setting"
+  // option instead of the select silently defaulting to — and, on save,
+  // silently rewriting the campaign to — the first allowed value.
+  function cdOpenModeOptionsHtml(type, current) {
+    var allowed = gcAllowedOpenModesForType(type);
+    var isListed = !current || allowed.indexOf(current) !== -1;
+    var fallback = (current && !isListed)
+      ? '<option value="' + esc(current) + '" selected>Current setting (' + esc(gcOpenModeLabel(current)) + ')</option>'
+      : "";
+    return fallback + allowed.map(function (m) {
+      return '<option value="' + esc(m) + '"' + (m === current ? " selected" : "") + '>' + esc(gcOpenModeLabel(m)) + '</option>';
+    }).join("");
+  }
+
+  // P0.14 §"No-provider dead end" / §"Provider management return path":
+  // zero providers is never an inert "No provider (configure later)"
+  // dropdown — it's a CTA straight to Providers (data-cd-goto-providers,
+  // handled in bindCampaignDetail). A provider IS linked but deactivated
+  // (elsewhere, or never activated after P0.13's "new providers are
+  // inactive" finding) gets a visible warning + the same CTA, but keeps the
+  // normal dropdown — deactivating a provider must never silently unlink it
+  // from campaigns still pointed at it.
+  function cdDestinationProviderBlockHtml(providers, dest) {
+    var providerId = dest.provider_id || "";
+    if (!(providers || []).length) {
+      return '<div class="sub" style="margin-bottom:8px;">No destinations are set up yet.</div>' +
+        '<button class="btn" type="button" data-cd-goto-providers="1">Manage Providers</button>';
+    }
+    var selected = gcFindProvider(providers, providerId);
+    var warning = (selected && !selected.active)
+      ? '<div class="sub" style="color:var(--bad);margin:6px 0;">This provider is inactive and can’t be used for a live campaign.</div>' +
+        '<button class="btn" type="button" data-cd-goto-providers="1" style="margin-bottom:6px;">Manage Providers</button>'
+      : "";
+    return '<label style="font-size:12px;">Provider<br/><select class="filter-input" id="cd-edit-dest-provider" style="width:100%;margin-top:4px;box-sizing:border-box;">' +
+      cdDestinationProviderOptionsHtml(providers, providerId) + '</select></label>' + warning;
+  }
+
+  // P0.14 §"P0-1 frontend": the same "Where users go" editor now also owns
+  // the beginner-facing Telegram subscription switch — telegram is a
+  // separate nested top-level block from destination, but both are edited
+  // and saved together here (cdSaveSection's "destination" case builds and
+  // PUTs both), never a second inline editor. channel_id has no control
+  // here (P0.14 spec: "preserve it, do not expose it") — cdSaveSection
+  // always carries the latest channel_id forward untouched.
   function cdDestinationEditHtml(campaign, providers) {
-    var dest = (campaign || {}).destination || {};
+    campaign = campaign || {};
+    var dest = campaign.destination || {};
+    var telegram = campaign.telegram || {};
+    var hasProviders = !!(providers || []).length;
     return '<div style="margin-top:8px;display:grid;gap:10px;max-width:420px;">' +
-      '<label style="font-size:12px;">Provider<br/><select class="filter-input" id="cd-edit-dest-provider" style="width:100%;margin-top:4px;box-sizing:border-box;">' +
-      cdDestinationProviderOptionsHtml(providers, dest.provider_id || "") + '</select></label>' +
-      '<label style="font-size:12px;">Destination<br/><input class="filter-input" id="cd-edit-dest-path" style="width:100%;margin-top:4px;box-sizing:border-box;" value="' + esc(dest.path || "") + '" /></label>' +
-      '<label style="font-size:12px;display:flex;align-items:center;gap:6px;"><input type="checkbox" id="cd-edit-dest-ready"' + (dest.ready ? " checked" : "") + ' /> Destination is ready to go live</label>' +
+      cdDestinationProviderBlockHtml(providers, dest) +
+      (hasProviders ? (
+        '<label style="font-size:12px;">Destination<br/><input class="filter-input" id="cd-edit-dest-path" style="width:100%;margin-top:4px;box-sizing:border-box;" value="' + esc(dest.path || "") + '" /></label>' +
+        '<label style="font-size:12px;display:flex;align-items:center;gap:6px;"><input type="checkbox" id="cd-edit-dest-ready"' + (dest.ready ? " checked" : "") + ' /> Destination is ready to go live</label>' +
+        '<label style="font-size:12px;">Opens in<br/><select class="filter-input" id="cd-edit-dest-openmode" style="width:100%;margin-top:4px;box-sizing:border-box;">' +
+        cdOpenModeOptionsHtml(campaign.type, dest.open_mode || "telegram_web_app") + '</select></label>'
+      ) : "") +
+      '<div style="border-top:1px solid var(--border);padding-top:10px;">' +
+      '<label style="font-size:12px;display:flex;align-items:center;gap:6px;"><input type="checkbox" id="cd-edit-tg-require-sub"' + (telegram.require_subscription ? " checked" : "") + ' /> Require channel subscription</label>' +
+      '<div id="cd-edit-tg-channel-wrap" style="margin-top:8px;' + (telegram.require_subscription ? "" : "display:none;") + '">' +
+      '<label style="font-size:12px;">Channel username<br/><input class="filter-input" id="cd-edit-tg-channel-username" style="width:100%;margin-top:4px;box-sizing:border-box;" value="' + esc(telegram.channel_username || "") + '" placeholder="AdvantPlayOfficial" /></label>' +
+      '</div></div>' +
       cdFieldError("destination") +
       cdEditActionsHtml("destination") +
       '</div>';
@@ -6674,6 +6771,16 @@
         return;
       }
 
+      // P0.14 §"No-provider dead end" / §"provider is inactive": routes to
+      // the existing Providers screen. Records provenance (gcProvidersBackCampaignId)
+      // so gcRenderProvidersBackLink only ever offers "Back to Campaign" when
+      // Providers was actually reached from here — never for an admin who
+      // navigated to Providers directly (sidebar/tab), where state.campaignId
+      // could still be some unrelated campaign left over from an earlier visit
+      // (Codex review finding).
+      var gotoProvidersBtn = e.target && e.target.closest && e.target.closest("[data-cd-goto-providers]");
+      if (gotoProvidersBtn) { gcProvidersBackCampaignId = state.campaignId || null; switchView("gcProviders"); return; }
+
       // P0.10 §10/§11: a Mission's schedule is a second-precision
       // eligibility cutoff — never opened in this page's minute-precision
       // inline editor. Routes to the existing Mission Admin Edit flow
@@ -6781,6 +6888,10 @@
         var wrap = $("#cd-edit-ends-wrap");
         if (wrap) wrap.style.display = e.target.checked ? "none" : "";
       }
+      if (e.target && e.target.id === "cd-edit-tg-require-sub") {
+        var channelWrap = $("#cd-edit-tg-channel-wrap");
+        if (channelWrap) channelWrap.style.display = e.target.checked ? "" : "none";
+      }
     });
   }
 
@@ -6815,6 +6926,12 @@
   var CD_ERROR_MESSAGES = {
     invalid_required_fields: "Select at least one required registration field.",
     provider_not_found: "This provider is unavailable. Choose another provider.",
+    // P0.14: destination/telegram inline-save error codes — same three
+    // schedule/open_mode codes and the new subscription_channel_required
+    // guard from campaign_centre._validate_body.
+    open_mode_not_allowed_for_type: "That destination type doesn't support this campaign type. Choose a different option.",
+    invalid_open_mode: "Choose a valid destination option.",
+    subscription_channel_required: "Add a channel username before requiring subscription — or turn the switch off.",
   };
 
   function cdFriendlyErrorMessage(res) {
@@ -6901,16 +7018,46 @@
         return { registration: base };
       };
     } else if (section === "destination") {
-      var providerId = (($("#cd-edit-dest-provider") || {}).value || "").trim();
-      var path = (($("#cd-edit-dest-path") || {}).value || "").trim();
-      var ready = !!(($("#cd-edit-dest-ready") || {}).checked);
+      // Every element below is conditionally rendered (no providers yet ->
+      // no path/ready/open_mode inputs at all) — reading via the DOM node
+      // itself, not just its value, so an absent field is correctly treated
+      // as "not touched" rather than as an empty string the admin typed.
+      var providerEl = $("#cd-edit-dest-provider");
+      var providerId = (providerEl ? providerEl.value : "").trim();
+      var pathEl = $("#cd-edit-dest-path");
+      var path = (pathEl ? pathEl.value : "").trim();
+      var readyEl = $("#cd-edit-dest-ready");
+      var ready = !!(readyEl && readyEl.checked);
+      var openModeEl = $("#cd-edit-dest-openmode");
+      var openMode = openModeEl ? openModeEl.value : "";
+      var tgRequireEl = $("#cd-edit-tg-require-sub");
+      var tgRequireSub = !!(tgRequireEl && tgRequireEl.checked);
+      var tgChannelEl = $("#cd-edit-tg-channel-username");
+      var tgChannelUsername = (tgChannelEl ? tgChannelEl.value : "").trim();
+
       // Same "never an empty fallback" reasoning as initialReg above.
-      var initialDest = ((cdViewState.editingSnapshot || cdViewState.campaign || {}).destination) || {};
-      var providerChanged = providerId !== (initialDest.provider_id || "");
-      var pathChanged = path !== (initialDest.path || "");
-      var readyChanged = ready !== !!initialDest.ready;
+      var initialCampaign = cdViewState.editingSnapshot || cdViewState.campaign || {};
+      var initialDest = initialCampaign.destination || {};
+      var initialTg = initialCampaign.telegram || {};
+      var providerChanged = !!providerEl && providerId !== (initialDest.provider_id || "");
+      var pathChanged = !!pathEl && path !== (initialDest.path || "");
+      var readyChanged = !!readyEl && ready !== !!initialDest.ready;
+      var openModeChanged = !!openModeEl && openMode !== (initialDest.open_mode || "telegram_web_app");
+      var tgRequireChanged = tgRequireSub !== !!initialTg.require_subscription;
+      var tgChannelChanged = tgChannelUsername !== (initialTg.channel_username || "");
+
+      // Friendly client-side guard mirroring campaign_centre._validate_body's
+      // subscription_channel_required rejection (P0.14 §"Server / Preview
+      // consistency": "admin should be prevented from saving that invalid
+      // setup if possible") — a channel_id already on file (never exposed
+      // here, see cdDestinationEditHtml) also satisfies it, same as backend.
+      if (tgRequireSub && !tgChannelUsername && !initialTg.channel_id) {
+        draftErr = "Add a channel username before requiring subscription — or turn the switch off.";
+      }
+
       buildBody = function (latest) {
         var latestDest = latest.destination || {};
+        var latestTg = latest.telegram || {};
         // Same per-field-changed rule as registration above: a field this
         // form displays but the admin didn't actually touch takes the
         // freshest server value, never the (possibly now-stale) value that
@@ -6918,9 +7065,21 @@
         return {
           destination: {
             provider_id: providerChanged ? providerId : (latestDest.provider_id || ""),
-            open_mode: latestDest.open_mode || "telegram_web_app",
+            open_mode: openModeChanged ? openMode : (latestDest.open_mode || "telegram_web_app"),
             path: pathChanged ? path : (latestDest.path || ""),
             ready: readyChanged ? ready : !!latestDest.ready,
+          },
+          telegram: {
+            // Defaults true (mirrors campaign_centre._validate_body's own
+            // `bool(raw_tg.get("require_identity", True))` default) — never
+            // false just because a legacy/fixture document happens to omit
+            // the field.
+            require_identity: latestTg.require_identity !== false,
+            require_subscription: tgRequireChanged ? tgRequireSub : !!latestTg.require_subscription,
+            // channel_id has no control in this editor — always carried
+            // forward untouched (P0.14 spec: "preserve it, do not expose it").
+            channel_id: latestTg.channel_id != null ? latestTg.channel_id : null,
+            channel_username: tgChannelChanged ? tgChannelUsername : (latestTg.channel_username || ""),
           },
         };
       };
@@ -7333,7 +7492,7 @@
           : "❌ Couldn't find a free campaign ID for this name after several tries. Set one manually under Technical Details.",
           "error");
       } else {
-        toast("❌ " + (code || "create_failed"), "error");
+        toast("❌ " + gcActionErrorMessage(res, "Couldn't create the campaign. Try again."), "error");
       }
     }).catch(function (e) {
       if (opts.onError) { opts.onError(false, manualId, "network_error"); return; }
@@ -7380,6 +7539,16 @@
     invalid_base_entries: "Base entries must be a valid number.",
     country_region_required_for_selected_audience: "Country/region must be a required field for a region-limited audience.",
     preview_failed: "Couldn't load campaign preview. Try again.",
+    // P0.14 — legacy-create + Campaign Detail destination/subscription errors.
+    // open_mode_not_allowed_for_type is the exact P1-1 bug (legacy form
+    // hardcoded "telegram_web_app" for every type); the other three are
+    // campaign_centre._validate_body's schedule/telegram codes, reachable
+    // from the same legacy create form and Campaign Detail's inline saves.
+    open_mode_not_allowed_for_type: "That destination type doesn't support this campaign type. Choose a different option.",
+    invalid_open_mode: "Choose a valid destination option.",
+    missing_starts_at: "Enter a start date and time.",
+    ends_at_before_starts_at: "End date must be after the start date.",
+    subscription_channel_required: "Add a channel username before requiring subscription — or turn the switch off.",
   };
 
   // Raw snake_case codes never reach the admin — only console.error, for
@@ -7663,7 +7832,7 @@
             ends_at: $("#gc-c-ends").value ? new Date($("#gc-c-ends").value).toISOString() : null,
           },
           telegram: { channel_username: ($("#gc-c-channel").value || "").trim() },
-          destination: { provider_id: ($("#gc-c-provider").value || "").trim(), path: ($("#gc-c-path").value || "").trim(), open_mode: "telegram_web_app", ready: false },
+          destination: { provider_id: ($("#gc-c-provider").value || "").trim(), path: ($("#gc-c-path").value || "").trim(), open_mode: gcDefaultOpenModeForType(type), ready: false },
         };
 
         createBtn.disabled = true;
@@ -8206,7 +8375,7 @@
       destination: {
         provider_id: (d.destination.providerId || "").trim(),
         path: (d.destination.path || "").trim(),
-        open_mode: "telegram_web_app",
+        open_mode: gcDefaultOpenModeForType(type.backendType),
         ready: false,
       },
     };
@@ -8228,13 +8397,13 @@
         gcInvalidateCampaignsCache();
         renderCampaignDetail(candidateId);
       },
-      onError: function (collision, manualIdUsed) {
+      onError: function (collision, manualIdUsed, code) {
         if (btnEl) { btnEl.disabled = false; btnEl.textContent = "Create Campaign"; }
         gcwShowError("step5", collision
           ? (manualIdUsed != null
               ? "That Campaign ID is already in use. Choose another one."
               : "Couldn't find a free campaign ID for this name. Set one manually under Technical Details.")
-          : "Couldn't create campaign. Try again.");
+          : gcActionErrorMessage({ d: { code: code } }, "Couldn't create campaign. Try again."));
       },
     });
   }
@@ -9316,7 +9485,27 @@
     });
   }
 
+  // P0.14 §"Provider management return path": a campaign this admin was
+  // just setting up gets a way back here after creating/activating a
+  // provider. Gated on gcProvidersBackCampaignId — set only by Campaign
+  // Detail's "Manage Providers" CTA and cleared by switchView the instant
+  // any other view is entered — never on state.campaignId directly, which
+  // stays set to whatever campaign was last viewed long after that visit
+  // ends. Without that provenance check, navigating to Providers straight
+  // from the sidebar/tab bar would show a "Back to Campaign" link pointing
+  // at a stale, unrelated campaign (Codex review finding).
+  var gcProvidersBackCampaignId = null;
+
+  function gcRenderProvidersBackLink() {
+    var el = $("#gc-providers-back-link");
+    if (!el) return;
+    if (!gcProvidersBackCampaignId) { el.classList.add("hidden"); el.innerHTML = ""; return; }
+    el.classList.remove("hidden");
+    el.innerHTML = '<button class="btn" data-gcp-back-to-campaign="1" style="background:transparent;border:1px solid var(--border);">← Back to Campaign</button>';
+  }
+
   function loadGcProviders(force) {
+    gcRenderProvidersBackLink();
     statePanel("gc-providers-body", "loading", "Loading providers…");
     fetchGcProviders(force).then(function (items) {
       renderGcProviderSelect();
@@ -9359,6 +9548,11 @@
       if (!btn) return;
       var action = btn.dataset.gcpAction, id = btn.dataset.id;
       apiPost("/api/admin/providers/" + id + "/" + action).then(function (r) { if (r.status !== "ok") toast("❌ " + r.code, "error"); loadGcProviders(true); });
+    });
+    document.addEventListener("click", function (e) {
+      var backBtn = e.target && e.target.closest && e.target.closest("[data-gcp-back-to-campaign]");
+      if (!backBtn || !gcProvidersBackCampaignId) return;
+      renderCampaignDetail(gcProvidersBackCampaignId);
     });
   }
 
@@ -11330,6 +11524,12 @@
   }
 
   function switchView(view) {
+    // P0.14: the Providers "Back to Campaign" link's provenance flag is only
+    // ever set by Campaign Detail's own "Manage Providers" CTA (right before
+    // it calls switchView("gcProviders")) — entering any OTHER view first,
+    // for any reason, means Providers (if visited later) was reached some
+    // other way, so the link must not claim a stale campaign as its origin.
+    if (view !== "gcProviders") gcProvidersBackCampaignId = null;
     state.view = view;
     VIEWS.forEach(function (v) { $("#view-" + v).classList.toggle("hidden", v !== view); });
     var found = inActivateTab ? null : findTabForView(view);
