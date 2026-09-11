@@ -648,3 +648,103 @@ test("Preview: no cached campaign at all falls back to the admin_badges draft hi
   const html = sandbox.gcPreviewModalBodyHtml(resp, null);
   assert.match(html, />draft</);
 });
+
+// =======================================================================
+// 8. Cache invalidation (Codex review, P1) — gcEffectiveDisplayState is
+// only as truthful as the cached campaign it reads. Without this, an
+// operator who cancels/closes/resumes/processes a Mission from Mission
+// Admin and returns to Player Campaigns would still see the loaded-before-
+// the-mutation gcOptionsCache.campaigns entry — the exact "cancelled shows
+// Live" bug this PR fixes, reintroduced by staleness instead of by a wrong
+// derivation. mission-admin.js's postAction() is the single choke point
+// every lifecycle mutation (close/cancel/resume/process/end_rewards/
+// publish/pause) already flows through, so that's the one place this hook
+// needs to fire from.
+// =======================================================================
+const MISSION_JS_PATH = path.join(__dirname, "static", "mission-admin.js");
+
+function freshMissionModule() {
+  delete require.cache[require.resolve(MISSION_JS_PATH)];
+  return require(MISSION_JS_PATH);
+}
+
+function makeMissionHost(routes, extra) {
+  const calls = [];
+  function respond(method, pathname) {
+    calls.push({ method, path: pathname });
+    const handler = routes[method + " " + pathname];
+    return handler ? Promise.resolve(handler) : Promise.reject(new Error("no route for " + method + " " + pathname));
+  }
+  return Object.assign({
+    $: () => undefined,
+    esc: (v) => String(v == null ? "" : v),
+    api: (p) => respond("GET", p),
+    apiPost: (p) => respond("POST", p),
+    apiPostJson: (p) => respond("POSTJ", p),
+    apiPutJson: (p) => respond("PUTJ", p),
+    toast: () => {},
+    confirm: () => true,
+    copy: () => {},
+  }, extra || {}, { __calls: calls });
+}
+
+async function flushMission(n) {
+  for (let i = 0; i < (n || 6); i++) await Promise.resolve();
+}
+
+["close", "cancel", "resume", "process", "end_rewards"].forEach((action) => {
+  test("mission-admin.js: a successful '" + action + "' invalidates the host's campaigns cache when provided", async () => {
+    const mod = freshMissionModule();
+    let invalidated = 0;
+    const endpointAction = action === "end_rewards" ? "end-rewards" : action;
+    const host = makeMissionHost(
+      {
+        ["POST /api/admin/mission-pool/m1/" + endpointAction]: { status: "ok", count_affected: 1 },
+        "GET /api/admin/gc-campaigns/m1": { status: "ok", campaign: { campaign_id: "m1", type: "mission_pool", status: "live" } },
+        "GET /api/admin/mission-pool/m1/edit-state": { status: "ok", reward: { sufficient: true } },
+        "GET /api/admin/mission-pool/m1/summary": { status: "ok", grains: {} },
+      },
+      { invalidateCampaignsCache: () => { invalidated++; } }
+    );
+    mod.init(host);
+    await mod.dispatch(action, "m1");
+    await flushMission();
+    assert.equal(invalidated, 1, "invalidateCampaignsCache must fire exactly once on a successful " + action);
+  });
+});
+
+test("mission-admin.js: a FAILED action never invalidates the cache", async () => {
+  const mod = freshMissionModule();
+  let invalidated = 0;
+  const host = makeMissionHost(
+    {
+      "POST /api/admin/mission-pool/m1/close": { status: "error", code: "already_closed" },
+      "GET /api/admin/gc-campaigns/m1": { status: "ok", campaign: { campaign_id: "m1", type: "mission_pool", status: "live" } },
+      "GET /api/admin/mission-pool/m1/edit-state": { status: "ok", reward: { sufficient: true } },
+      "GET /api/admin/mission-pool/m1/summary": { status: "ok", grains: {} },
+    },
+    { invalidateCampaignsCache: () => { invalidated++; } }
+  );
+  mod.init(host);
+  await mod.dispatch("close", "m1");
+  await flushMission();
+  assert.equal(invalidated, 0, "a rejected mutation changed nothing server-side and must not invalidate the cache");
+});
+
+test("mission-admin.js: postAction never throws when host provides no invalidateCampaignsCache (back-compat for existing hosts/tests)", async () => {
+  const mod = freshMissionModule();
+  const host = makeMissionHost({
+    "POST /api/admin/mission-pool/m1/close": { status: "ok" },
+    "GET /api/admin/gc-campaigns/m1": { status: "ok", campaign: { campaign_id: "m1", type: "mission_pool", status: "live" } },
+    "GET /api/admin/mission-pool/m1/edit-state": { status: "ok", reward: { sufficient: true } },
+    "GET /api/admin/mission-pool/m1/summary": { status: "ok", grains: {} },
+  });
+  delete host.invalidateCampaignsCache;
+  mod.init(host);
+  await assert.doesNotReject(async () => { await mod.dispatch("close", "m1"); await flushMission(); });
+});
+
+test("wiring: admin-dashboard.js's loadMissionPool() passes gcInvalidateCampaignsCache into mission-admin.js's init()", () => {
+  const src = extractFunctionSource(JS, "loadMissionPool");
+  assert.match(src, /invalidateCampaignsCache:\s*gcInvalidateCampaignsCache/);
+});

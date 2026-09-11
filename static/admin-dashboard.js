@@ -6734,6 +6734,14 @@
       toast: toast, esc: esc,
       confirm: function (msg) { return window.confirm(msg); },
       copy: function (text) { try { navigator.clipboard.writeText(text); } catch (e) {} },
+      // P0.10 follow-up (Codex review): Close/Cancel/Resume/Process/End
+      // Rewards all mutate mission_pool/gc_campaigns.status server-side, but
+      // none of that reaches gcOptionsCache.campaigns on their own — without
+      // this hook, returning to Player Campaigns right after would still
+      // render gcEffectiveDisplayState() from the pre-mutation cached
+      // mission_pool block (e.g. a just-cancelled Mission still showing
+      // Live) until some unrelated action happened to force a refresh.
+      invalidateCampaignsCache: gcInvalidateCampaignsCache,
     });
     mod.load();
   }
