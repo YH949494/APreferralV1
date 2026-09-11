@@ -9,7 +9,10 @@
  *    fixed five rows).
  *  - Progress counts only applicable rows.
  *  - gcFirstIncompleteRequiredRow() / gcCampaignDetailContinueHtml() drive
- *    "Continue Setup" / "Ready to Publish".
+ *    "Continue Setup" / "Publish Campaign" (P0.9 replaced the old dead-end
+ *    "Ready to Publish — go to Campaigns list" copy with a real CTA; see
+ *    test_admin_dashboard_p0_9_publish_preview.test.js for the full Publish/
+ *    Preview suite).
  *  - gcComputeShareState() for the Share Campaign section.
  *  - Technical Details carries raw backend ids; the beginner checklist/
  *    advanced views never do.
@@ -308,13 +311,14 @@ test("Continue Setup targets the earliest incomplete row, not just any incomplet
 // ---------------------------------------------------------------------
 // 12. All complete -> ready state
 // ---------------------------------------------------------------------
-test("all complete campaign -> Ready to Publish, not Continue Setup", () => {
+test("all complete campaign -> Publish Campaign button, not Continue Setup", () => {
   const campaign = tournamentCampaign();
   const rows = M.computeSetupChecklist(campaign, [activeProvider], []);
   assert.equal(M.gcFirstIncompleteRequiredRow(rows), null);
   assert.equal(M.gcIsReadyToPublish(rows, campaign), true);
   const html = M.gcCampaignDetailContinueHtml(rows, campaign);
-  assert.match(html, /Ready to Publish/);
+  assert.match(html, /Publish Campaign/);
+  assert.match(html, /data-gc-action="publish"/);
   assert.doesNotMatch(html, /Continue Setup/);
 });
 
@@ -325,7 +329,7 @@ test("all complete campaign -> Ready to Publish, not Continue Setup", () => {
 // visibility *timing* (has it started/ended yet), a different question
 // from "would clicking Publish succeed right now".
 
-test("draft campaign scheduled to start in the future is still Ready to Publish (not a visibility/timing question)", () => {
+test("draft campaign scheduled to start in the future still shows Publish Campaign (not a visibility/timing question)", () => {
   const campaign = tournamentCampaign({
     schedule: { starts_at: "2027-01-01T00:00:00Z", ends_at: null },
     effective_visibility: {
@@ -337,17 +341,17 @@ test("draft campaign scheduled to start in the future is still Ready to Publish 
   assert.equal(M.gcFirstIncompleteRequiredRow(rows), null);
   assert.equal(M.gcIsReadyToPublish(rows, campaign), true);
   const html = M.gcCampaignDetailContinueHtml(rows, campaign);
-  assert.match(html, /Ready to Publish/);
+  assert.match(html, /Publish Campaign/);
 });
 
-test("archived campaign with every field complete is never Ready to Publish (archived cannot transition to live)", () => {
+test("archived campaign with every field complete never shows Publish Campaign (archived cannot transition to live)", () => {
   const campaign = tournamentCampaign({ status: "archived" });
   const rows = M.computeSetupChecklist(campaign, [activeProvider], []);
   assert.equal(M.gcFirstIncompleteRequiredRow(rows), null, "fields are all complete");
   assert.equal(M.gcCanTransitionToLive("archived"), false);
   assert.equal(M.gcIsReadyToPublish(rows, campaign), false);
   const html = M.gcCampaignDetailContinueHtml(rows, campaign);
-  assert.doesNotMatch(html, /Ready to Publish/);
+  assert.doesNotMatch(html, /Publish Campaign/);
   assert.match(html, /can.t be published/);
 });
 

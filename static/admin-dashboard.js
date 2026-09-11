@@ -5701,6 +5701,60 @@
     return !gcFirstIncompleteRequiredRow(rows) && gcCanTransitionToLive((campaign || {}).status);
   }
 
+  // ---- Plain-English translator for campaign_centre.visibility_explanation
+  // reason strings (P0.9 §8). Scoped to exactly the two gc_campaigns surfaces
+  // that ever see these reasons — the Campaign Detail publish-block message
+  // (structural destination/provider reasons only, see
+  // gcServerPublishBlockReason below) and the Preview modal (the full
+  // reason list) — never a dashboard-wide reason-mapping system. An
+  // unrecognized reason (a future backend addition this map hasn't caught
+  // up to yet) degrades to a generic sentence, never the raw string.
+  function gcVisibilityReasonText(reason) {
+    reason = String(reason || "");
+    var statusMatch = reason.match(/^status is '([a-z_]+)', not 'live'$/);
+    if (statusMatch) {
+      var GC_STATUS_REASON_TEXT = {
+        draft: "This campaign is still a draft.",
+        scheduled: "This campaign hasn't started yet.",
+        paused: "This campaign is currently paused.",
+        ended: "This campaign has ended.",
+        archived: "This campaign is archived.",
+      };
+      return GC_STATUS_REASON_TEXT[statusMatch[1]] || "This campaign is not currently live.";
+    }
+    if (reason === "schedule.starts_at is not set") return "This campaign doesn't have a start date set yet.";
+    var startMatch = reason.match(/^scheduled to start at (.+)$/);
+    if (startMatch) {
+      var startWhen = ccUtcToKlDisplay(startMatch[1]);
+      return "This campaign hasn't started yet" + (startWhen && startWhen !== "—" ? " — starts " + startWhen + "." : ".");
+    }
+    if (/^ended at /.test(reason)) return "This campaign has already ended.";
+    if (reason === "destination.ready is false") return "Destination setup is incomplete.";
+    if (reason === "linked provider does not exist") return "The selected provider no longer exists.";
+    if (reason === "linked provider is inactive") return "The selected provider is inactive.";
+    return "Campaign is not currently visible to players.";
+  }
+
+  // Structural (non-timing) reasons from effective_visibility that also
+  // block campaign_centre._transition()'s own publish gate for a
+  // destination-requiring campaign (mirrors _transition's destination/
+  // provider checks exactly — see the gcCanTransitionToLive comment above
+  // for why the timing-only reasons, e.g. "scheduled to start at …", must
+  // never gate Publish the same way: a campaign scheduled for tomorrow is
+  // still publishable today). effective_visibility is recomputed server-
+  // side on every canonical GET, so this catches a provider/destination
+  // going stale (e.g. deactivated in another tab) between page loads even
+  // when the locally-cached providers list and checklist still look green.
+  var GC_PUBLISH_BLOCKING_REASONS = ["destination.ready is false", "linked provider does not exist", "linked provider is inactive"];
+
+  function gcServerPublishBlockReason(campaign) {
+    var reasons = ((campaign || {}).effective_visibility || {}).reasons || [];
+    for (var i = 0; i < reasons.length; i++) {
+      if (GC_PUBLISH_BLOCKING_REASONS.indexOf(reasons[i]) !== -1) return reasons[i];
+    }
+    return null;
+  }
+
   // The deep link is only ever populated server-side for a registration-
   // enabled campaign (campaign_centre.get_campaign_route / list_campaigns,
   // via campaign_registration.campaign_deep_link) — never assembled here
@@ -5731,7 +5785,8 @@
     var id = esc(campaign.campaign_id), name = esc(campaign.name || campaign.campaign_id || "");
     var items = [];
     if (actions.canPublish) {
-      items.push('<button data-gc-action="publish" data-id="' + id + '" data-name="' + name + '">' + esc(actions.publishLabel) + '</button>');
+      items.push('<button data-gc-action="publish" data-id="' + id + '" data-name="' + name + '"' +
+        (actions.publishLabel === "Resume" ? ' data-gc-resume="1"' : '') + '>' + esc(actions.publishLabel) + '</button>');
     }
     if (actions.canPause) items.push('<button data-gc-action="pause" data-id="' + id + '" data-name="' + name + '">Pause</button>');
     // Close Mission / End Rewards legality stays owned by gcMissionActionsHtml
@@ -5992,19 +6047,45 @@
     }).join("");
   }
 
+  // P0.9: Campaign Detail's lifecycle CTA — the completed "Setup → Preview →
+  // Publish" surface. Never a second/looser publish gate: readiness is
+  // judged in the exact order campaign_centre._transition() itself would
+  // reject a request, so this button can never render for a request the
+  // backend is actually about to refuse.
   function gcCampaignDetailContinueHtml(rows, campaign) {
+    campaign = campaign || {};
     var next = gcFirstIncompleteRequiredRow(rows);
     if (next) {
       return '<button class="btn primary" data-cd-goto="' + esc(next.actionTarget || "") + '">Continue Setup → ' + esc(next.label) + '</button>';
     }
-    if (gcIsReadyToPublish(rows, campaign)) {
-      return '<button class="btn" data-cd-goto="publish-list">✓ Ready to Publish — go to Campaigns list</button>';
+    var status = campaign.status;
+    // Checked before gcCanTransitionToLive: GC_VALID_STATUS_TRANSITIONS
+    // treats live->live as a legal no-op transition, but Publish must never
+    // render for an already-live campaign — show its live status instead.
+    if (status === "live") {
+      return '<div class="sub">✓ This campaign is live.</div>';
     }
-    // Every applicable row is complete, but the campaign's current status
-    // (ended/archived) can never transition to "live" — never claim
-    // readiness for a campaign that can't actually be published.
-    return '<div class="sub">Setup is complete, but a ‘' + esc((campaign && campaign.status) || "") +
-      '’ campaign can’t be published — see Technical Details below.</div>';
+    if (!gcCanTransitionToLive(status)) {
+      // Every applicable row is complete, but the campaign's current status
+      // (ended/archived) can never transition to "live" — never claim
+      // readiness for a campaign that can't actually be published.
+      return '<div class="sub">Setup is complete, but a ‘' + esc(status || "") +
+        '’ campaign can’t be published — see Technical Details below.</div>';
+    }
+    // Checklist agrees the campaign is ready, but effective_visibility (re-
+    // computed server-side on this exact canonical GET) still reports a
+    // structural destination/provider problem — e.g. a provider deactivated
+    // in another tab since this page's providers cache was last filled.
+    // Trust the server over the local checklist and don't offer Publish.
+    var blockReason = gcServerPublishBlockReason(campaign);
+    if (blockReason) {
+      return '<div class="sub">' + esc(gcVisibilityReasonText(blockReason)) + '</div>';
+    }
+    var isResume = status === "paused";
+    var label = isResume ? "Resume Campaign" : "Publish Campaign";
+    return '<button class="btn primary" data-gc-action="publish" data-id="' + esc(campaign.campaign_id) +
+      '" data-name="' + esc(campaign.name || campaign.campaign_id || "") + '"' +
+      (isResume ? ' data-gc-resume="1"' : '') + '>' + esc(label) + '</button>';
   }
 
   function gcCampaignDetailShareHtml(shareState) {
@@ -6195,7 +6276,6 @@
       var target = goBtn.dataset.cdGoto;
       var id = state.campaignId;
       if (target === "back") { activateTab("growth", 0); return; }
-      if (target === "publish-list") { activateTab("growth", 0); return; }
       // Continue Setup's target can be one of the four inline-editable rows
       // (when/registration/destination — campaign is never incomplete) —
       // open the same inline editor the row's own [Edit] button does,
@@ -6618,6 +6698,151 @@
     return base + "-" + n;
   }
 
+  // ---- Preview modal (P0.9) ----------------------------------------------
+  //
+  // The preview endpoint's `card` is intentionally minimal (campaign_id,
+  // name, type, description, button_text, banner_url — see campaign_centre.
+  // preview_campaign) and never carries a friendly status word or
+  // destination/provider names. Rather than widen that response, the modal
+  // opportunistically enriches itself from campaign data this dashboard has
+  // already loaded elsewhere — cdViewState.campaign (Campaign Detail) or the
+  // Campaigns list's own cache (gcOptionsCache.campaigns, populated by
+  // fetchGcCampaignsList) — falling back to a plainer render with neither
+  // when it isn't available. Never a second network call just for this.
+  function gcFindCachedCampaign(campaignId) {
+    if (!campaignId) return null;
+    if (cdViewState.campaign && cdViewState.campaign.campaign_id === campaignId) return cdViewState.campaign;
+    var list = gcOptionsCache.campaigns || [];
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].campaign_id === campaignId) return list[i];
+    }
+    return null;
+  }
+
+  // Mirrors computeSetupChecklist's own destinationApplicable rule (never
+  // shown for mission_pool or a registration-enabled campaign — neither has
+  // an external destination in the publish gate) so this never claims a
+  // "not ready" destination for a campaign type that doesn't have one.
+  // Provider is only ever named (never its raw provider_id) — same rule
+  // Advanced Settings already follows.
+  function gcPreviewDestinationSummary(campaign) {
+    if (!campaign) return null;
+    var isMissionPool = campaign.mechanic === "mission_pool" || campaign.type === "mission_pool";
+    var registrationEnabled = !!((campaign.registration || {}).enabled);
+    if (isMissionPool || registrationEnabled) return null;
+    var dest = campaign.destination || {};
+    if (!dest.provider_id && !dest.path) return null;
+    var provider = gcFindProvider(gcOptionsCache.providers || [], dest.provider_id || "");
+    var label = provider ? (provider.name || "Provider") : "No provider linked";
+    return label + (dest.ready ? " — ready" : " — not ready yet");
+  }
+
+  // Pure HTML builder for the preview modal body — no DOM, no network,
+  // reused by the modal below and directly testable. Never renders
+  // campaign_id/provider_id, the raw `type` enum, JSON, a snake_case code,
+  // a raw `publicly_visible` boolean literal, or a raw UTC timestamp — only
+  // the plain-English translations above.
+  function gcPreviewModalBodyHtml(resp, cachedCampaign) {
+    resp = resp || {};
+    var card = resp.card || {};
+    var vis = resp.effective_visibility || {};
+    var badges = resp.admin_badges || [];
+    var statusBadge = cachedCampaign ? gcPill(cachedCampaign.status) : (badges.indexOf("draft") !== -1 ? gcPill("draft") : "");
+    var destSummary = gcPreviewDestinationSummary(cachedCampaign);
+    var reasons = vis.reasons || [];
+
+    var html = '<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap;">' +
+      statusBadge + '<h3 style="margin:0;">Campaign Preview</h3></div>' +
+      '<div style="font-weight:600;font-size:15px;margin-bottom:6px;word-break:break-word;">' + esc(card.name || "Untitled campaign") + '</div>';
+
+    if (card.banner_url) {
+      html += '<img src="' + esc(card.banner_url) + '" alt="" style="max-width:100%;border-radius:8px;margin-bottom:8px;display:block;" />';
+    }
+    if (card.description) {
+      html += '<p class="sub" style="white-space:pre-wrap;word-break:break-word;">' + esc(card.description) + '</p>';
+    }
+    if (card.button_text) {
+      html += '<div style="margin:8px 0;"><span class="sub">Button:</span> <strong>' + esc(card.button_text) + '</strong></div>';
+    }
+    if (destSummary) {
+      html += '<div class="sub" style="margin-bottom:8px;">Destination: ' + esc(destSummary) + '</div>';
+    }
+
+    html += '<div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);">' +
+      '<strong>Visibility</strong><br/><span class="sub">' +
+      (vis.publicly_visible ? "✓ Visible to players" : "Not visible yet") + '</span></div>';
+
+    if (!vis.publicly_visible && reasons.length) {
+      html += '<ul style="margin:8px 0 0 18px;padding:0;">' +
+        reasons.map(function (r) { return '<li class="sub">' + esc(gcVisibilityReasonText(r)) + '</li>'; }).join("") +
+        '</ul>';
+    }
+    return html;
+  }
+
+  // The one preview UI entry point — reused by both the Campaigns list
+  // overflow menu and Campaign Detail's "Preview Campaign" button (both
+  // dispatch the same delegated `data-gc-action="preview"` click below), so
+  // there is exactly one preview renderer, never two. Network/loading-state/
+  // error handling all stay on gcRunAction — the same choke point every
+  // other gc_campaigns action uses — so this can never regress into a
+  // silent failure or an unhandled rejection.
+  function gcOpenPreview(campaignId, triggerBtn) {
+    return gcRunAction({
+      id: campaignId, action: "preview", button: triggerBtn,
+      loadingText: "Loading...",
+      refresh: false,
+      run: function () {
+        return api("/api/admin/gc-campaigns/" + campaignId + "/preview").then(function (r) {
+          return { ok: true, status: 200, d: r };
+        });
+      },
+      fallbackError: GC_ACTION_ERROR_MESSAGES.preview_failed,
+      onSuccess: function (r) { gcRenderPreviewModal(campaignId, r); },
+    });
+  }
+
+  function gcRenderPreviewModal(campaignId, resp) {
+    var cached = gcFindCachedCampaign(campaignId);
+    var overlay = document.createElement("div");
+    overlay.className = "modal-overlay";
+    var box = document.createElement("div");
+    box.className = "modal-box";
+    box.style.maxWidth = "480px";
+    // The read-only preview body is inert markup (no interactive elements),
+    // so it's set once via innerHTML from the pure gcPreviewModalBodyHtml
+    // builder. The Close button is built via createElement/appendChild
+    // (matching openGcDeleteModal, not confirmSimple's id+querySelector
+    // pattern) so wiring it never depends on an HTML parser round-trip.
+    box.innerHTML = gcPreviewModalBodyHtml(resp, cached);
+    var actions = document.createElement("div");
+    actions.className = "modal-actions";
+    var closeBtn = document.createElement("button");
+    closeBtn.className = "btn primary";
+    closeBtn.textContent = "Close";
+    actions.appendChild(closeBtn);
+    box.appendChild(actions);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+
+    function close() {
+      overlay.remove();
+      document.removeEventListener("keydown", onKeydown);
+    }
+    function onKeydown(e) { if (e.key === "Escape") close(); }
+    closeBtn.addEventListener("click", close);
+    overlay.addEventListener("click", function (e) { if (e.target === overlay) close(); });
+    document.addEventListener("keydown", onKeydown);
+    if (closeBtn.focus) closeBtn.focus();
+
+    // Raw reason strings never render in the DOM (gcPreviewModalBodyHtml
+    // only ever emits gcVisibilityReasonText's translations) — this is the
+    // one place the untranslated backend text may still surface, and only
+    // to the console, for admins debugging an unfamiliar reason.
+    var reasons = ((resp && resp.effective_visibility) || {}).reasons || [];
+    if (reasons.length) { try { console.debug("[gc-preview] raw visibility reasons:", reasons); } catch (e) {} }
+  }
+
   function bindGcCampaigns() {
     var nameField = $("#gc-c-name");
     if (nameField) nameField.addEventListener("input", gcUpdateAutoSlugPreview);
@@ -6671,10 +6896,20 @@
       var action = btn.dataset.gcAction, id = btn.dataset.id;
       if (action === "detail") renderCampaignDetail(id);
       else if (action === "publish") {
-        var isResume = (btn.textContent || "").trim() === "Resume";
+        // data-gc-resume (set by gcOverflowMenuHtml / gcCampaignDetailContinueHtml
+        // from the same GC_VALID_STATUS_TRANSITIONS-derived logic) — never
+        // inferred from the button's visible label text, which P0.9's
+        // Campaign Detail button ("Resume Campaign") no longer matches the
+        // list overflow's ("Resume") on.
+        var isResume = btn.dataset.gcResume === "1";
+        var publishName = btn.dataset.name || id;
         gcRunAction({
           id: id, action: "publish", button: btn,
           loadingText: isResume ? "Resuming..." : "Publishing...",
+          confirmTitle: (isResume ? "Resume " : "Publish ") + publishName + "?",
+          confirmMessage: isResume
+            ? "This will make the campaign live again."
+            : "This will make the campaign live when its schedule and visibility rules allow.",
           run: function () { return apiPostJson("/api/admin/gc-campaigns/" + id + "/publish", {}); },
           successMessage: isResume ? "Campaign resumed." : "Campaign published.",
           fallbackError: isResume ? "Couldn't resume this campaign. Try again." : "Couldn't publish this campaign. Try again.",
@@ -6740,20 +6975,10 @@
         });
       }
       else if (action === "preview") {
-        gcRunAction({
-          id: id, action: "preview", button: btn,
-          loadingText: "Loading...",
-          refresh: false,
-          run: function () {
-            return api("/api/admin/gc-campaigns/" + id + "/preview").then(function (r) {
-              return { ok: true, status: 200, d: r };
-            });
-          },
-          fallbackError: GC_ACTION_ERROR_MESSAGES.preview_failed,
-          onSuccess: function (r) {
-            alert("Card: " + JSON.stringify(r.card, null, 2) + "\n\nBadges: " + (r.admin_badges || []).join(", ") + "\n\nVisibility: " + JSON.stringify(r.effective_visibility));
-          },
-        });
+        // Shared with Campaign Detail's own "Preview Campaign" button (same
+        // data-gc-action="preview", same delegated handler) — gcOpenPreview
+        // is the one preview UI entry point, never a second renderer.
+        gcOpenPreview(id, btn);
       }
       else if (action === "delete") openGcDeleteModal(id, btn.dataset.name);
     });

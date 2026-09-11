@@ -523,8 +523,24 @@ test("I: Duplicate's success toast never includes the raw campaign_id template",
   assert.match(chunk, /dupName/);
 });
 
-test("I: Preview is caught (never a bare .then with no .catch) and maps failures to the spec's exact copy", () => {
+// P0.9 moved Preview's gcRunAction/error-mapping wiring off the inline
+// click-handler branch and into the shared gcOpenPreview(campaignId,
+// triggerBtn) helper (so the Campaigns list and Campaign Detail's own
+// Preview button — both dispatch this same branch — render through exactly
+// one preview UI, never two). The click-handler branch itself is now just
+// the delegation call; the actual gcRunAction/error-mapping wiring is
+// asserted against gcOpenPreview's own definition below.
+test("I: Preview delegates to the shared gcOpenPreview helper (never a bare .then with no .catch)", () => {
   const chunk = gcActionBranch("preview");
+  assert.match(chunk, /gcOpenPreview\(id,\s*btn\)/);
+});
+
+test("I: gcOpenPreview itself is caught (never a bare .then with no .catch) and maps failures to the spec's exact copy", () => {
+  const start = JS.indexOf("function gcOpenPreview(");
+  assert.notEqual(start, -1, "gcOpenPreview helper not found");
+  const end = JS.indexOf("\n  function gcRenderPreviewModal(", start);
+  assert.ok(end > start, "could not bound gcOpenPreview's body");
+  const chunk = JS.slice(start, end);
   assert.match(chunk, /gcRunAction\(/);
   assert.match(chunk, /GC_ACTION_ERROR_MESSAGES\.preview_failed/);
 });
