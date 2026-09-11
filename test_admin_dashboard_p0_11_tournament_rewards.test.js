@@ -393,6 +393,7 @@ function loadOrchestration(overrides) {
   const fullSrc = PROVIDER_LABEL_SRC + "\n" + KL_SRC + "\n" + PURE_SRC + "\n" + ORCH_SRC +
     "\nthis.cdSaveSection = cdSaveSection; this.cdOpenEdit = cdOpenEdit; this.cdViewState = cdViewState; " +
     "this.cdSaveRewards = cdSaveRewards; this.cdRewardTiersFromDraft = cdRewardTiersFromDraft; " +
+    "this.cdMergeRewardRules = cdMergeRewardRules; " +
     "this.cdRewardsInitDraft = cdRewardsInitDraft; this.cdRewardsSyncDraftFromForm = cdRewardsSyncDraftFromForm; " +
     "this.cdRewardsFriendlyError = cdRewardsFriendlyError; " +
     "this.__triggerClick = function (selector, dataset) { " +
@@ -501,10 +502,10 @@ test("Schema: adjacent-but-not-overlapping ranges (1-4, 5-8) are accepted", () =
   assert.equal(sandbox.cdRewardTiersFromDraft(draft, { "pool-gold-secret": goldPool, "pool-silver-secret": silverPool }).error, undefined);
 });
 
-test("Schema: malformed rules array (empty draft) builds an empty rules list without error", () => {
+test("Schema: an empty draft is rejected (at_least_one_tier_required) rather than silently building an empty rules list — see the Codex-review test group below for why", () => {
   const { sandbox } = loadOrchestration();
   const built = sandbox.cdRewardTiersFromDraft([], {});
-  assert.deepEqual(plain(built.rules), []);
+  assert.equal(built.error, "at_least_one_tier_required");
 });
 
 test("pool_type is stamped from the selected pool's own registered pool_type — never left to guess a mismatched default", () => {
@@ -622,6 +623,87 @@ test("Save safety: a non-rank rule already on the campaign is preserved verbatim
   assert.equal(body.reward_config.rules.length, 2);
   const preserved = body.reward_config.rules.filter((r) => r.rule_id === "consolation")[0];
   assert.deepEqual(preserved, consolationRule);
+});
+
+// Codex review (P1): reward_engine.match_rule() returns the first matching
+// rule in list order, and a tournament winner's context carries both
+// `rank` and `score` — so a preserved rule that matches on something else
+// (score_threshold, a catch-all "participation" consolation rule, ...) can
+// match the exact same context a rank rule would. Naively concatenating
+// every edited rank rule before every preserved rule would silently move a
+// bonus rule's priority, or let a catch-all start shadowing every rank
+// rule it wasn't already ordered ahead of.
+test("cdMergeRewardRules reinserts the rank-rule block at the ORIGINAL position of the first rank rule — a preceding bonus rule keeps precedence", () => {
+  const { sandbox } = loadOrchestration();
+  const bonusRule = { rule_id: "bonus", condition_type: "score_threshold", params: { min_score: 99999 }, pool_id: "pool-bonus" };
+  const oldRank1 = { rule_id: "r1", condition_type: "rank", params: { min_rank: 1, max_rank: 1 }, pool_id: "pool-gold-secret" };
+  const trailingRule = { rule_id: "trailing", condition_type: "campaign_tag", params: { tag: "x" }, pool_id: "pool-x" };
+  const latestRules = [bonusRule, oldRank1, trailingRule];
+  const editedRank = [{ rule_id: "r1", condition_type: "rank", params: { min_rank: 1, max_rank: 5 }, pool_id: "pool-gold-secret" }];
+
+  const merged = sandbox.cdMergeRewardRules(latestRules, editedRank);
+
+  assert.deepEqual(plain(merged.map((r) => r.rule_id)), ["bonus", "r1", "trailing"]);
+});
+
+test("cdMergeRewardRules inserts new rank tiers at the very front when no rank rule existed yet — never after an existing catch-all rule", () => {
+  const { sandbox } = loadOrchestration();
+  const catchAll = { rule_id: "consolation", condition_type: "participation", params: {}, pool_id: "pool-shared" };
+  const editedRank = [{ rule_id: "new1", condition_type: "rank", params: { min_rank: 1, max_rank: 1 }, pool_id: "pool-gold-secret" }];
+
+  const merged = sandbox.cdMergeRewardRules([catchAll], editedRank);
+
+  // The rank rule must come BEFORE the always-matching catch-all, or
+  // reward_engine.match_rule() would never reach it for any winner.
+  assert.deepEqual(plain(merged.map((r) => r.rule_id)), ["new1", "consolation"]);
+});
+
+test("Save safety: a preceding bonus rule's precedence over the rank tiers survives an unrelated tier edit (Codex P1)", async () => {
+  const { sandbox, calls, apiQueue, setFieldNodes } = loadOrchestration();
+  const bonusRule = { rule_id: "bonus", condition_type: "score_threshold", params: { min_score: 99999 }, pool_id: "pool-bonus", reward_label: "Perfect Score Bonus" };
+  const rankRule = { rule_id: "r1", condition_type: "rank", params: { min_rank: 1, max_rank: 1 }, pool_id: "pool-gold-secret" };
+  sandbox.cdViewState.campaign = tournamentCampaign({ reward_config: { rules: [bonusRule, rankRule] } });
+  sandbox.cdViewState.pools = [goldPool];
+  sandbox.cdViewState.rewardsDraft = [{ key: "t1", ruleId: "r1", minRank: "1", maxRank: "2", poolId: "pool-gold-secret", originalPoolId: "pool-gold-secret", originalRewardLabel: null, originalPoolType: null }];
+  const latest = tournamentCampaign({ reward_config: { rules: [bonusRule, rankRule] } });
+  apiQueue.push({ status: "ok", campaign: latest });
+  apiQueue.push({ status: "ok", campaign: latest });
+
+  setFieldNodes([fieldNode("t1", "minRank", "1"), fieldNode("t1", "maxRank", "2"), fieldNode("t1", "poolId", "pool-gold-secret")]);
+  sandbox.cdSaveRewards({});
+  await flush();
+
+  const body = plain(calls.apiPutJson[0].body);
+  assert.deepEqual(body.reward_config.rules.map((r) => r.rule_id), ["bonus", "r1"]);
+});
+
+// Codex review (P1): with zero rank rules, tournament_integration.
+// _validate_payload()'s allowed_ranks (built purely from rank-type rules
+// via reward_engine.rank_ranges) is empty, so every submitted winner would
+// be rejected with winner_rank_outside_reward_rules — even though a
+// preserved non-rank rule could leave reward_config.rules non-empty and
+// the checklist/publish gate reading "configured". Removing every tier
+// must be blocked, not silently accepted.
+test("Removing every tier is rejected — a Tournament can never be saved with zero rank rules", () => {
+  const { sandbox } = loadOrchestration();
+  const built = sandbox.cdRewardTiersFromDraft([], {});
+  assert.equal(built.error, "at_least_one_tier_required");
+});
+
+test("Save safety: removing the last rank tier while a preserved consolation rule remains is rejected client-side, never reaches the network", async () => {
+  const { sandbox, calls, node, setFieldNodes } = loadOrchestration();
+  const consolationRule = { rule_id: "consolation", condition_type: "participation", params: {}, pool_id: "pool-shared" };
+  sandbox.cdViewState.campaign = tournamentCampaign({ reward_config: { rules: [consolationRule, { rule_id: "r1", condition_type: "rank", params: { min_rank: 1, max_rank: 1 }, pool_id: "pool-gold-secret" }] } });
+  sandbox.cdViewState.pools = [goldPool];
+  sandbox.cdViewState.rewardsDraft = []; // admin removed the only rank tier
+  setFieldNodes([]);
+
+  sandbox.cdSaveRewards({});
+  await flush();
+
+  assert.deepEqual(calls.api, []);
+  assert.deepEqual(calls.apiPutJson, []);
+  assert.match(node("#cd-edit-rewards-error").textContent, /Add at least one reward tier/);
 });
 
 test("Save safety: concurrent update — another admin changed a sibling field between GET and PUT; the newest sibling survives, not this page's stale snapshot", async () => {

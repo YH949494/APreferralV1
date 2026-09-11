@@ -7095,6 +7095,17 @@
         return { error: "overlapping_rank_ranges" };
       }
     }
+    // At least one rank tier is required (Codex review finding). Without
+    // one, tournament_integration._validate_payload()'s allowed_ranks —
+    // built purely from rank-type rules via reward_engine.rank_ranges —
+    // is empty, so EVERY submitted winner is rejected with
+    // winner_rank_outside_reward_rules even though a preserved non-rank
+    // rule could otherwise leave reward_config.rules non-empty and the
+    // checklist/publish gate reading "configured". Removing every tier
+    // must be blocked here, not silently accepted as a valid save.
+    if (!built.length) {
+      return { error: "at_least_one_tier_required" };
+    }
     return { rules: built };
   }
 
@@ -7109,6 +7120,7 @@
     invalid_rank_range: "Check the reward tiers — rank must start at 1 and the end rank can't be before the start rank.",
     overlapping_rank_ranges: "Reward rank ranges can't overlap.",
     missing_pool_id: "Choose a reward pool for every tier.",
+    at_least_one_tier_required: "Add at least one reward tier before saving.",
     invalid_pool: "Choose a valid reward pool.",
     pool_not_found: "One of the selected reward pools no longer exists.",
     invalid_rules: "Couldn't save rewards. Try again.",
@@ -7119,6 +7131,32 @@
 
   function cdRewardsFriendlyError(code) {
     return CD_REWARDS_ERROR_MESSAGES[code] || "Couldn't save rewards. Try again.";
+  }
+
+  // Codex review finding: reinserts the edited rank-rule block at the
+  // position the FIRST original rank rule occupied in the freshest GET (or
+  // the very front if none existed yet) instead of always moving every
+  // rank rule ahead of every preserved rule. reward_engine.match_rule()
+  // returns the first matching rule in list order, and a tournament
+  // winner's context carries both `rank` and `score`
+  // (tournament_rewards._create_or_confirm_rewards) — so a preserved rule
+  // matching on something else (score_threshold, participation, ...) can
+  // match the very same context a rank rule would. Concatenating every
+  // rank rule before every preserved rule would silently change which rule
+  // wins for such a winner, or let a catch-all "participation" rule
+  // (always matches) start shadowing every rank rule if it wasn't already
+  // ordered before them. Every OTHER preserved rule keeps its exact
+  // relative order among the other preserved rules.
+  function cdMergeRewardRules(latestRules, editedRankRules) {
+    latestRules = latestRules || [];
+    var anchorIdx = -1;
+    for (var i = 0; i < latestRules.length; i++) {
+      if (latestRules[i].condition_type === "rank") { anchorIdx = i; break; }
+    }
+    var withoutRank = latestRules.filter(function (r) { return r.condition_type !== "rank"; });
+    var insertAt = anchorIdx === -1 ? 0 :
+      latestRules.slice(0, anchorIdx).filter(function (r) { return r.condition_type !== "rank"; }).length;
+    return withoutRank.slice(0, insertAt).concat(editedRankRules, withoutRank.slice(insertAt));
   }
 
   function cdSaveRewards(btnEl) {
@@ -7149,10 +7187,12 @@
       // comes from THIS freshest read, never from whatever cdViewState.
       // rewardsDraft was built from when the editor opened — a concurrent
       // admin action that added/changed one of those rules elsewhere is
-      // never clobbered by this save.
-      var preservedRules = latestRules.filter(function (r) { return r.condition_type !== "rank"; });
+      // never clobbered by this save. cdMergeRewardRules also reinserts
+      // the edited rank-rule block at its original position rather than
+      // always moving it to the front — see that function's comment for
+      // why list order is semantically significant here.
       var mergedRewardConfig = Object.assign({}, latestReward, {
-        rules: built.rules.concat(preservedRules),
+        rules: cdMergeRewardRules(latestRules, built.rules),
       });
       return apiPutJson(detailUrl, { reward_config: mergedRewardConfig });
     }).then(function (res) {
