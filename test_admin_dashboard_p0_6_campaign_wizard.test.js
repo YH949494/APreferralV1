@@ -168,10 +168,15 @@ function loadWizard(extra) {
       activateTab: (m, i) => activateTabCalls.push([m, i]),
       renderCampaignDetail: (id) => renderCampaignDetailCalls.push(id),
       gcInvalidateCampaignsCache: () => {},
-      fetchGcProviders: () => Promise.resolve((extra && extra.providers) || []),
       gcProviderOptionLabel: (p) => (p.name || p.provider_id) + " — " + (p.type || "") + " (" + (p.active ? "active" : "inactive") + ")",
     }
   );
+  // OPTIONS_SRC declares its own real `fetchGcProviders` (it calls the
+  // module's `api()`, which this sandbox never provides) — a `function`
+  // declaration always wins over the same-named property seeded into the
+  // sandbox object above, so the stub must be reasserted after the sandbox
+  // script has run, directly on its global object.
+  sandbox.fetchGcProviders = () => Promise.resolve((extra && extra.providers) || []);
   return Object.assign(sandbox.__x, {
     apiPostJsonCalls, toasts, switchViewCalls, activateTabCalls, renderCampaignDetailCalls,
     missionDispatchCalls, doc, elements,
@@ -293,6 +298,12 @@ test("Step 3 (schedule): no end date is valid (end is optional)", () => {
   assert.equal(w.gcwValidateStep(2), null);
 });
 
+test("Step 3 (schedule): unchecking 'No end date' but leaving Ends blank is rejected, never a silent indefinite campaign", () => {
+  const w = loadWizard();
+  Object.assign(w.gcw.draft, { starts_at: "2026-10-01T09:00", noEnd: false, ends_at: "" });
+  assert.equal(w.gcwValidateStep(2), "Enter an end date and time, or check 'No end date'.");
+});
+
 test("Step 3 (schedule): a valid end after start passes", () => {
   const w = loadWizard();
   Object.assign(w.gcw.draft, { starts_at: "2026-10-01T09:00", noEnd: false, ends_at: "2026-10-31T23:59" });
@@ -347,6 +358,33 @@ test("gcwSubmit sends ends_at: null when the admin left 'No end date' checked", 
   });
   await w.gcwSubmit(null);
   assert.equal(w.apiPostJsonCalls[0].body.schedule.ends_at, null);
+});
+
+test("gcwSubmit forwards the Step 2 description into the create payload", async () => {
+  const w = loadWizard();
+  Object.assign(w.gcw.draft, {
+    wizardType: "external", name: "October Lucky Draw", description: "Monthly lucky draw for the community",
+    starts_at: "2026-10-01T09:00", campaignIdManuallyEdited: true, campaignId: "october-lucky-draw",
+  });
+  await w.gcwSubmit(null);
+  assert.equal(w.apiPostJsonCalls[0].body.description, "Monthly lucky draw for the community");
+});
+
+test("gcwEnterStep: providers resolving late does not clobber a provider/path already typed on Setup", async () => {
+  let resolveProviders;
+  const w = loadWizard({
+    providers: new Promise((resolve) => { resolveProviders = resolve; }),
+    elements: { "gcw-body": makeEl({}) },
+  });
+  w.gcw.draft.wizardType = "tournament";
+  w.gcw.step = 3;
+  w.gcwEnterStep(3);
+  // The admin types a destination path while the providers request is still
+  // pending — the DOM element the wizard would read back on capture.
+  w.elements["gcw-path"] = makeEl({ value: "/typed-while-loading" });
+  resolveProviders([]);
+  await Promise.resolve().then(() => Promise.resolve()); // flush the fetchGcProviders().then() microtask
+  assert.equal(w.gcw.draft.destination.path, "/typed-while-loading", "typed input must survive the late re-render");
 });
 
 // ---------------------------------------------------------------------

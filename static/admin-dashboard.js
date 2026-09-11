@@ -6446,10 +6446,10 @@
   // the legacy inline form observe the outcome without this function itself
   // touching #gc-c-id/toast/loadGcCampaigns: {onSuccess(candidateId), onError
   // (collision, manualId, code)}. Every existing call site omits it and gets
-  // the original default behavior unchanged. `baseBody.registration`, when
-  // present, is forwarded as-is — campaign_centre._validate_body accepts a
-  // `registration` block on create the same way it does on update (P0.6's
-  // Registration/Giveaway wizard type is the first caller to set it).
+  // the original default behavior unchanged. `baseBody.registration`/
+  // `baseBody.description`, when present, are forwarded as-is —
+  // campaign_centre._validate_body accepts both on create the same way it
+  // does on update (P0.6's wizard is the first caller to set either).
   function gcCreateCampaignAttempt(baseBody, base, n, manualId, createBtn, opts) {
     opts = opts || {};
     var maxAttempts = 25;
@@ -6463,6 +6463,7 @@
       destination: baseBody.destination,
     };
     if (baseBody.registration) body.registration = baseBody.registration;
+    if (baseBody.description) body.description = baseBody.description;
     return apiPostJson("/api/admin/gc-campaigns", body).then(function (res) {
       if (res.ok && res.d && res.d.status === "ok") {
         if (opts.onSuccess) { opts.onSuccess(candidateId); return; }
@@ -6905,7 +6906,15 @@
   // once the fetch resolves if the admin is still on that step.
   function gcwEnterStep(step) {
     if (step === 3 && gcw.draft.wizardType !== "registration") {
-      fetchGcProviders().then(function () { if (gcw.step === step) gcwRender(); }).catch(function () {});
+      // The admin can start typing a provider/destination path while this
+      // request is still in flight — capture whatever is on screen before
+      // the resolved-late re-render replaces it, or that input is silently
+      // lost (Codex review).
+      fetchGcProviders().then(function () {
+        if (gcw.step !== step) return;
+        gcwCaptureStep();
+        gcwRender();
+      }).catch(function () {});
     }
     gcwRender();
   }
@@ -6955,7 +6964,11 @@
     }
     if (step === 2) {
       if (!d.starts_at) return "Enter a start date and time.";
-      if (!d.noEnd && d.ends_at) {
+      if (!d.noEnd) {
+        // "No end date" was explicitly unchecked — that's a stated intent to
+        // set one, so a blank Ends field is an error, not a silent
+        // indefinite campaign (Codex review).
+        if (!d.ends_at) return "Enter an end date and time, or check 'No end date'.";
         var startIso = ccKlInputToUtcIso(d.starts_at);
         var endIso = ccKlInputToUtcIso(d.ends_at);
         if (startIso && endIso && new Date(endIso) <= new Date(startIso)) return "End time must be after start time.";
@@ -6989,6 +7002,7 @@
     var endsIso = (!d.noEnd && d.ends_at) ? ccKlInputToUtcIso(d.ends_at) : null;
     var baseBody = {
       name: (d.name || "").trim(),
+      description: (d.description || "").trim(),
       type: type.backendType,
       schedule: { starts_at: startsIso, ends_at: endsIso },
       telegram: (type.registration && d.registration.requireChannelSubscription)
