@@ -3095,57 +3095,142 @@
       updateAdmCreatePoolVisibility(admTypeEl.value);      
     }
 
+    // Existing Drops shows two data sources merged into one authoritative
+    // render pass: standard voucher drops (db.drops, via drops_v2) and
+    // Mission Pool campaigns (gc_campaigns with mechanic="mission_pool",
+    // via the same /api/admin/mission-pool/campaigns endpoint Campaign
+    // Centre's Mission Reward Pool list uses). This is an admin operational
+    // overview, so admin-only missions are included on purpose — only
+    // normal-user-facing surfaces (Live Missions) hide them.
+    //
+    // Mission rows never wire up start_now/pause/end_now: those post to
+    // drops_v2's lifecycle endpoint, which has no idea what a campaign_id
+    // is. A mission row only gets "Open" (opens the Campaign Centre) and
+    // "Copy ID" (reuses the existing generic .copy-drop-id-btn handler).
+    async function adm_fetchMissionCampaigns(tail) {
+      const res = await v2Fetch(`/api/admin/mission-pool/campaigns${tail}`);
+      const bodyText = await res.text();
+      if (!res.ok) {
+        throw new Error(`mission-pool/campaigns ${res.status}: ${bodyText.slice(0, 300)}`);
+      }
+      let data;
+      try { data = JSON.parse(bodyText); } catch { throw new Error("mission-pool/campaigns: invalid JSON"); }
+      if (data.status !== "ok") throw new Error(`mission-pool/campaigns: ${bodyText.slice(0, 300)}`);
+      return data.campaigns || [];
+    }
+
+    function adm_missionRowHtml(c) {
+      const id = c.campaign_id || "";
+      const stats = `${c.submissions || 0} subs / ${c.winners || 0} win`;
+      const status = c.state || c.campaign_status || "";
+      const visWarning = c.admin_only
+        ? `<div style="font-size:11px;color:#b45309;">⚠ Admin-only${c.visibility_reason ? ": " + escapeHtml(c.visibility_reason) : ""}</div>`
+        : "";
+      return `
+        <td style="text-align:left; padding:6px;">${escapeHtml(c.name || "")}${visWarning}</td>
+        <td>mission</td>
+        <td>${escapeHtml(status)}</td>
+        <td>${fmtKL(c.starts_at)} → ${fmtKL(c.ends_at)}</td>
+        <td>${stats}</td>
+        <td>
+          <button type="button" class="btn btn-secondary adm-mission-open-btn" data-id="${escapeHtml(id)}">Open</button>
+          <button type="button" class="btn btn-secondary copy-drop-id-btn" data-copy-dropid="${escapeHtml(id)}">📋 Copy ID</button>
+        </td>`;
+    }
+
+    async function adm_fetchStandardDrops(tail) {
+      const res = await v2Fetch(`${API_V2}/admin/drops_v2${tail}`);
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      const data = await res.json();
+      if (data.status !== "ok") throw new Error(JSON.stringify(data));
+      return data.items || [];
+    }
+
+    function adm_dropRowHtml(d) {
+      const id = d.dropId || d.id || d._id;
+      const stats = d.type === "pooled"
+        ? `${d.codesFree}/${d.codesTotal} free`
+        : `${d.claimed}/${d.assigned} claimed`;
+      const totalCodes = d.type === "pooled" ? (d.codesTotal || 0) : (d.assigned || 0);
+      const claimedCodes = d.type === "pooled" ? Math.max(0, (d.codesTotal || 0) - (d.codesFree || 0)) : (d.claimed || 0);
+      const isDeleting = d.deletionStatus === "deleting";
+      const dis = isDeleting ? "disabled" : "";
+      return `
+        <td style="text-align:left; padding:6px;">${d.name} <span style="font-size:12px;color:#666;">[${d.priority}]</span></td>
+        <td>${d.type}</td>
+        <td>${isDeleting ? "deleting…" : d.status}</td>
+        <td>${fmtKL(d.startsAt)} → ${fmtKL(d.endsAt)}</td>
+        <td>${stats}</td>
+        <td>
+          <button data-op="start_now" data-id="${id}" ${dis}>Start</button>
+          <button data-op="pause"     data-id="${id}" ${dis}>Pause</button>
+          <button data-op="end_now"   data-id="${id}" ${dis}>End</button>
+          <button type="button" class="btn btn-secondary adm-edit-dates-btn" data-id="${id}" data-name="${escapeHtml(d.name || "")}" data-starts="${escapeHtml(d.startsAt || "")}" data-ends="${escapeHtml(d.endsAt || "")}" ${dis}>🖊 Edit</button>
+          <button type="button" class="btn btn-secondary copy-drop-id-btn" data-copy-dropid="${id}">📋 Copy ID</button>
+          <button type="button" class="btn btn-danger adm-delete-drop-btn" data-id="${id}" data-name="${escapeHtml(d.name || "")}" data-total="${totalCodes}" data-claimed="${claimedCodes}" data-deleting="${isDeleting ? "1" : ""}" style="background:#dc2626;color:#fff;border:none;border-radius:6px;padding:6px 10px;cursor:pointer;">${isDeleting ? "⏳ Retry delete" : "🗑 Delete"}</button>
+        </td>`;
+    }
+
+    // Bumped on every adm_list() call so a call superseded by a newer one
+    // (there are several non-awaited call sites: admin init, post-action
+    // refreshes, etc.) can detect that and bail out after its awaits
+    // instead of clobbering or duplicating what the newer call rendered.
+    let admListGen = 0;
+
     async function adm_list() {
       const tbody = document.querySelector("#adm_table tbody");
       if (!tbody) return;
+      const myGen = ++admListGen;
       tbody.innerHTML = `<tr><td colspan="6" style="padding:6px;">Loading…</td></tr>`;
 
-      try {
-        const userId = getAdminUserId();
-        if (!userId) {
-          tbody.innerHTML = `<tr><td colspan="6" style="padding:6px;">Admin user ID required. Open via Telegram to manage drops.</td></tr>`;
-          return;
-        }
-        const tail = buildAdminQueryTail();
-        const res = await v2Fetch(`${API_V2}/admin/drops_v2${tail}`);
-        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-        const data = await res.json();
-        if (data.status !== "ok") throw new Error(JSON.stringify(data));
+      const userId = getAdminUserId();
+      if (!userId) {
+        if (myGen !== admListGen) return;
+        tbody.innerHTML = `<tr><td colspan="6" style="padding:6px;">Admin user ID required. Open via Telegram to manage drops.</td></tr>`;
+        return;
+      }
+      const tail = buildAdminQueryTail();
 
-        tbody.innerHTML = "";
-        (data.items || []).forEach((d) => {
-          const id = d.dropId || d.id || d._id;
-          const stats = d.type === "pooled"
-            ? `${d.codesFree}/${d.codesTotal} free`
-            : `${d.claimed}/${d.assigned} claimed`;
-          const totalCodes = d.type === "pooled" ? (d.codesTotal || 0) : (d.assigned || 0);
-          const claimedCodes = d.type === "pooled" ? Math.max(0, (d.codesTotal || 0) - (d.codesFree || 0)) : (d.claimed || 0);
-          const isDeleting = d.deletionStatus === "deleting";
-          const dis = isDeleting ? "disabled" : "";
+      // Standard drops and mission-pool campaigns are independent data
+      // sources fetched concurrently: one failing must never hide the
+      // other (a transient drops_v2 outage shouldn't blank out missions,
+      // and vice versa — the exact symptom this table already had).
+      const [dropsResult, missionsResult] = await Promise.allSettled([
+        adm_fetchStandardDrops(tail),
+        adm_fetchMissionCampaigns(tail),
+      ]);
 
+      if (myGen !== admListGen) return; // a newer adm_list() call already owns the table
+
+      tbody.innerHTML = "";
+
+      if (dropsResult.status === "fulfilled") {
+        dropsResult.value.forEach((d) => {
           const tr = document.createElement("tr");
-          tr.innerHTML = `
-            <td style="text-align:left; padding:6px;">${d.name} <span style="font-size:12px;color:#666;">[${d.priority}]</span></td>
-            <td>${d.type}</td>
-            <td>${isDeleting ? "deleting…" : d.status}</td>
-            <td>${fmtKL(d.startsAt)} → ${fmtKL(d.endsAt)}</td>
-            <td>${stats}</td>
-            <td>
-              <button data-op="start_now" data-id="${id}" ${dis}>Start</button>
-              <button data-op="pause"     data-id="${id}" ${dis}>Pause</button>
-              <button data-op="end_now"   data-id="${id}" ${dis}>End</button>
-              <button type="button" class="btn btn-secondary adm-edit-dates-btn" data-id="${id}" data-name="${escapeHtml(d.name || "")}" data-starts="${escapeHtml(d.startsAt || "")}" data-ends="${escapeHtml(d.endsAt || "")}" ${dis}>🖊 Edit</button>
-              <button type="button" class="btn btn-secondary copy-drop-id-btn" data-copy-dropid="${id}">📋 Copy ID</button>
-              <button type="button" class="btn btn-danger adm-delete-drop-btn" data-id="${id}" data-name="${escapeHtml(d.name || "")}" data-total="${totalCodes}" data-claimed="${claimedCodes}" data-deleting="${isDeleting ? "1" : ""}" style="background:#dc2626;color:#fff;border:none;border-radius:6px;padding:6px 10px;cursor:pointer;">${isDeleting ? "⏳ Retry delete" : "🗑 Delete"}</button>
-            </td>`;
+          tr.innerHTML = adm_dropRowHtml(d);
           tbody.appendChild(tr);
         });
+      } else {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="6" style="padding:6px;">Voucher endpoint error: ${escapeHtml(dropsResult.reason.message)}</td>`;
+        tbody.appendChild(tr);
+      }
 
-        if (!tbody.children.length) {
-          tbody.innerHTML = `<tr><td colspan="6" style="padding:6px;">No drops found.</td></tr>`;
-        }
-      } catch (e) {
-        tbody.innerHTML = `<tr><td colspan="6" style="padding:6px;">Voucher endpoint error: ${e.message}</td></tr>`;
+      if (missionsResult.status === "fulfilled") {
+        missionsResult.value.forEach((c) => {
+          const tr = document.createElement("tr");
+          tr.innerHTML = adm_missionRowHtml(c);
+          tbody.appendChild(tr);
+        });
+      } else {
+        console.error("[adm_list] mission-pool/campaigns failed:", missionsResult.reason.message);
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="6" style="padding:6px;color:#b45309;">⚠ Mission Pool campaigns failed to load (standard drops above are unaffected): ${escapeHtml(missionsResult.reason.message)}</td>`;
+        tbody.appendChild(tr);
+      }
+
+      if (!tbody.children.length) {
+        tbody.innerHTML = `<tr><td colspan="6" style="padding:6px;">No drops found.</td></tr>`;
       }
     }
 
@@ -6695,6 +6780,17 @@
           }
         }
       }
+    });
+
+    document.addEventListener("click", (e) => {
+      const btn = e.target.closest(".adm-mission-open-btn");
+      if (!btn) return;
+      e.preventDefault();
+      // Mission rows never call the drops lifecycle endpoints — the only
+      // safe, well-defined action here is opening the Campaign Centre
+      // dashboard, where the campaign can be found by name or by the ID
+      // "Copy ID" places on the clipboard.
+      window.open("/admin", "_blank", "noopener");
     });
 
     document.addEventListener("click", async (e) => {

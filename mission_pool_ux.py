@@ -825,11 +825,14 @@ def admin_mission_campaigns():
         counts = entries.get(campaign_id) or {}
         reward_counts = rewards.get(campaign_id) or {}
         pool_id = block.get("pool_id") or ""
+        admin_only = mp.is_admin_only(doc)
         out.append({
             "campaign_id": campaign_id,
             "name": doc.get("name", ""),
             "state": operational_state(doc),
             "campaign_status": doc.get("status"),
+            "admin_only": admin_only,
+            "visibility_reason": doc.get("visibility_reason") if admin_only else None,
             "cancelled": bool(block.get("cancelled")),
             "processing_stage": block.get("processing_stage") or mp.STAGE_PENDING,
             "starts_at": _iso(schedule.get("starts_at")),
