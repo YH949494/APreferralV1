@@ -496,14 +496,28 @@ test(".seg's shared global rule is unchanged by the #gc-status-filter fix — no
   });
 });
 
+// P0.6 superseded the beginner "+ New Campaign" entry point with a guided
+// creation wizard (gcOpenCampaignWizard) — the legacy inline form
+// (gcScrollToCreateForm) is still reachable but no longer what these CTAs
+// open. See test_admin_dashboard_p0_6_campaign_wizard.test.js for the
+// wizard's own coverage.
 test("empty states for filters an admin can act on (live/scheduled/draft/all) offer a + New Campaign CTA", () => {
   ["live", "scheduled", "draft", ""].forEach((statusFilter) => {
     const state = M.gcEmptyStateForFilter(statusFilter);
-    assert.match(state.ctaHtml || "", /gcScrollToCreateForm/, "status=" + JSON.stringify(statusFilter));
+    assert.match(state.ctaHtml || "", /gcOpenCampaignWizard/, "status=" + JSON.stringify(statusFilter));
   });
 });
 
-test("+ New Campaign reuses the existing inline create form (scroll+focus), not a new wizard", () => {
+test("+ New Campaign opens the guided creation wizard, not a direct backend call", () => {
+  const start = JS.indexOf("window.gcOpenCampaignWizard = function");
+  assert.notEqual(start, -1, "window.gcOpenCampaignWizard not found");
+  const end = JS.indexOf("};", start) + 2;
+  const fnText = JS.slice(start, end);
+  assert.match(fnText, /switchView\("gcCampaignWizard"\)/, "must open the wizard view");
+  assert.doesNotMatch(fnText, /fetch\(|apiPost\(/, "must not itself create a campaign — only open the wizard");
+});
+
+test("the legacy inline create form (gcScrollToCreateForm) still only scrolls/focuses, never creates a campaign", () => {
   const start = JS.indexOf("window.gcScrollToCreateForm = function");
   assert.notEqual(start, -1, "window.gcScrollToCreateForm not found");
   const end = JS.indexOf("};", start) + 2;

@@ -5805,9 +5805,10 @@
   }
 
   // Every filtered view stays useful (P0.4 §7) — never a blank table. The
-  // "+ New Campaign" CTA reuses the existing inline Create Campaign form
-  // (gcScrollToCreateForm), not a new creation flow.
-  var GC_NEW_CAMPAIGN_CTA = '<button class="btn primary" onclick="gcScrollToCreateForm()">+ New Campaign</button>';
+  // "+ New Campaign" CTA opens the guided creation wizard (P0.6,
+  // gcOpenCampaignWizard) — the legacy inline form is still reachable via
+  // "Advanced / Legacy Create Form" on the Campaigns list itself.
+  var GC_NEW_CAMPAIGN_CTA = '<button class="btn primary" onclick="gcOpenCampaignWizard()">+ New Campaign</button>';
   var GC_EMPTY_STATES_BY_FILTER = {
     live: { icon: "🚀", title: "No live campaigns", sub: "There are no campaigns running right now.", ctaHtml: GC_NEW_CAMPAIGN_CTA },
     scheduled: { icon: "🗓", title: "No scheduled campaigns", sub: "Campaigns scheduled for a future date will show up here.", ctaHtml: GC_NEW_CAMPAIGN_CTA },
@@ -6441,7 +6442,16 @@
   // is therefore safe to retry with a different id. A manually-entered id
   // (Advanced) is never suffixed — the admin chose it on purpose, so a
   // collision there is reported back for them to change it themselves.
-  function gcCreateCampaignAttempt(baseBody, base, n, manualId, createBtn) {
+  // `opts` (added for P0.6's wizard — see gcwSubmit) lets a caller other than
+  // the legacy inline form observe the outcome without this function itself
+  // touching #gc-c-id/toast/loadGcCampaigns: {onSuccess(candidateId), onError
+  // (collision, manualId, code)}. Every existing call site omits it and gets
+  // the original default behavior unchanged. `baseBody.registration`, when
+  // present, is forwarded as-is — campaign_centre._validate_body accepts a
+  // `registration` block on create the same way it does on update (P0.6's
+  // Registration/Giveaway wizard type is the first caller to set it).
+  function gcCreateCampaignAttempt(baseBody, base, n, manualId, createBtn, opts) {
+    opts = opts || {};
     var maxAttempts = 25;
     var candidateId = manualId != null ? manualId : gcSlugCandidate(base, n);
     var body = {
@@ -6452,8 +6462,10 @@
       telegram: baseBody.telegram,
       destination: baseBody.destination,
     };
+    if (baseBody.registration) body.registration = baseBody.registration;
     return apiPostJson("/api/admin/gc-campaigns", body).then(function (res) {
       if (res.ok && res.d && res.d.status === "ok") {
+        if (opts.onSuccess) { opts.onSuccess(candidateId); return; }
         toast("✅ Campaign created as draft (" + candidateId + ")", "success");
         var idField = $("#gc-c-id");
         if (idField) idField.value = candidateId;
@@ -6463,8 +6475,9 @@
       var code = res.d && res.d.code;
       var collision = code === "duplicate_campaign_id" || code === "campaign_id_previously_deleted";
       if (collision && manualId == null && n < maxAttempts) {
-        return gcCreateCampaignAttempt(baseBody, base, n + 1, null, createBtn);
+        return gcCreateCampaignAttempt(baseBody, base, n + 1, null, createBtn, opts);
       }
+      if (opts.onError) { opts.onError(collision, manualId, code); return; }
       if (collision) {
         toast(manualId != null
           ? "❌ That Campaign ID is already taken (or was used before and retired). Try a different one under Technical Details."
@@ -6474,6 +6487,7 @@
         toast("❌ " + (code || "create_failed"), "error");
       }
     }).catch(function (e) {
+      if (opts.onError) { opts.onError(false, manualId, "network_error"); return; }
       toast("❌ Couldn't create the campaign. Try again.", "error");
     });
   }
@@ -6571,7 +6585,7 @@
     });
 
     var newCtaBtn = $("#gc-new-campaign-cta-btn");
-    if (newCtaBtn) newCtaBtn.addEventListener("click", gcScrollToCreateForm);
+    if (newCtaBtn) newCtaBtn.addEventListener("click", gcOpenCampaignWizard);
 
     // Row "•••" overflow menu: toggle on the kebab, close any other open
     // menu first (at most one open at a time), and close on outside click.
@@ -6603,20 +6617,498 @@
     });
   }
 
-  // "+ New Campaign" (P0.4 §6) reuses the existing inline Create Campaign
-  // form/flow rather than a new creation wizard — it only scrolls to and
-  // focuses that form. Used by the list header CTA and every empty state's
-  // CTA button (embedded as an onclick= string in gcEmptyStateForFilter's
-  // HTML, so this must stay a global, not a closure-local function).
+  // Scrolls to and focuses the legacy inline Create Campaign form (now
+  // collapsed under "Advanced / Legacy Create Form" — P0.6). No longer the
+  // beginner "+ New Campaign" entry point (see gcOpenCampaignWizard below),
+  // but kept as a global function since it's still reachable from the
+  // Campaigns list for admins who want direct control over the raw fields.
   window.gcScrollToCreateForm = function () {
     switchView("gcCampaigns");
     setTimeout(function () {
+      var details = $("#gc-legacy-form-details");
+      if (details) details.open = true;
       var section = document.querySelector("#view-gcCampaigns .section");
       if (section && section.scrollIntoView) section.scrollIntoView({ behavior: "smooth", block: "start" });
       var nameField = $("#gc-c-name");
       if (nameField && nameField.focus) nameField.focus();
     }, 60);
   };
+
+  // ---------------------------------------------------------------------
+  // Campaign Creation Wizard (P0.6) — beginner-friendly guided flow that
+  // creates a gc_campaigns shell without ever showing campaign_id,
+  // provider_id, pool_id, a raw backend `type` string, destination.ready, or
+  // the status machine. This is the "+ New Campaign" entry point now (see
+  // GC_NEW_CAMPAIGN_CTA / #gc-new-campaign-cta-btn above); the legacy
+  // technical form (gcScrollToCreateForm) stays available for power users.
+  //
+  // Reuses, never reimplements: gcSlugify/gcSlugCandidate/
+  // gcFirstAvailableSuffix/gcCreateCampaignAttempt (P0.3 slug + collision
+  // retry), ccKlInputToUtcIso/ccUtcToKlInputValue/ccUtcToKlDisplay (P0.5b KL
+  // converters), fetchGcProviders/gcProviderOptionLabel (P0.3 provider
+  // cache), renderCampaignDetail (P0.5a) for the post-create hand-off.
+  //
+  // Mission is deliberately NOT created through this wizard.
+  // campaign_centre._validate_body validates mission_config AND
+  // mission_pool.pool_id unconditionally on CREATE (create is never partial)
+  // for type "mission_pool" — a bare shell for that type is rejected by the
+  // backend (missing_mission_type / missing_pool_id), so it cannot safely be
+  // deferred to "configure later" the way Tournament/registration fields can.
+  // static/mission-admin.js already has a complete, safe create flow that
+  // collects exactly what that gate requires — selecting "Mission" in Step 1
+  // hands off to it directly instead of duplicating it here.
+  // ---------------------------------------------------------------------
+
+  var GCW_STEP_LABELS = ["Campaign type", "Basic details", "Schedule", "Setup", "Review"];
+
+  // Wizard type card -> exact backend `type` (campaign_centre.CAMPAIGN_TYPES
+  // is exactly tournament / external_subscription_verification /
+  // external_website / mission_pool) plus whether registration turns on.
+  // There is no native "giveaway" gc_campaigns type — Registration/Giveaway
+  // maps onto external_website with registration.enabled=true, the same
+  // orthogonal block campaign_registration.py validates for every campaign
+  // type (see docs/campaign-centre.md and the P0.6 PR description for this
+  // exact, deliberate mapping — never invented/silent).
+  var GCW_TYPES = {
+    tournament: { backendType: "tournament", label: "Tournament", registration: false },
+    registration: { backendType: "external_website", label: "Registration / Giveaway", registration: true },
+    external: { backendType: "external_website", label: "External / Standard Campaign", registration: false },
+  };
+
+  var GCW_REGISTRATION_FIELD_ORDER = ["full_name", "contact_number", "country_region", "delivery_address"];
+  var GCW_REGISTRATION_FIELD_LABELS = {
+    full_name: "Full name", contact_number: "Contact number",
+    country_region: "Region / Country", delivery_address: "Delivery address",
+  };
+
+  function gcwDefaultDraft() {
+    return {
+      wizardType: null,
+      name: "",
+      description: "",
+      starts_at: "",
+      ends_at: "",
+      noEnd: true,
+      campaignId: "",
+      campaignIdManuallyEdited: false,
+      registration: {
+        requiredFields: GCW_REGISTRATION_FIELD_ORDER.slice(),
+        requireChannelSubscription: false,
+        channelUsername: "",
+      },
+      destination: { providerId: "", path: "" },
+    };
+  }
+
+  var gcw = { step: 0, draft: gcwDefaultDraft() };
+
+  function gcwHasMeaningfulInput() {
+    var d = gcw.draft;
+    return !!(d.wizardType || (d.name && d.name.trim()) || (d.description && d.description.trim()) ||
+      d.starts_at || d.ends_at || d.campaignIdManuallyEdited);
+  }
+
+  function gcwField(label, inner, sub) {
+    return '<div style="margin-bottom:14px;max-width:480px;">' +
+      '<label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">' + esc(label) + '</label>' +
+      inner + (sub ? '<div class="sub" style="margin-top:4px;">' + sub + '</div>' : '') + '</div>';
+  }
+
+  function gcwFieldError(key) {
+    return '<div id="gcw-error-' + esc(key) + '" style="display:none;background:rgba(255,107,107,0.12);border:1px solid var(--bad);color:var(--bad);border-radius:8px;padding:8px 12px;font-size:12px;margin-top:8px;max-width:480px;"></div>';
+  }
+
+  function gcwShowError(key, msg) {
+    var el = $("#gcw-error-" + key);
+    if (!el) return;
+    el.textContent = msg || "";
+    el.style.display = msg ? "" : "none";
+  }
+
+  function gcwSummaryRow(label, value) {
+    return '<div style="display:flex;gap:8px;font-size:13px;padding:4px 0;flex-wrap:wrap;">' +
+      '<div style="min-width:110px;color:var(--muted);">' + esc(label) + '</div><div>' + esc(value) + '</div></div>';
+  }
+
+  function gcwSelectedProviderLabel(providerId) {
+    if (!providerId) return "";
+    var p = (gcOptionsCache.providers || []).filter(function (x) { return x.provider_id === providerId; })[0];
+    return p ? gcProviderOptionLabel(p) : providerId;
+  }
+
+  // ---- Step 1: campaign type ---------------------------------------------
+
+  var GCW_TYPE_CARDS = [
+    { key: "tournament", title: "Tournament", desc: "Run a competition with winners and rewards." },
+    { key: "registration", title: "Registration / Giveaway", desc: "Collect participant registrations for a lucky draw or giveaway." },
+    { key: "mission", title: "Mission", desc: "Users complete a mission and receive rewards." },
+    { key: "external", title: "External / Standard Campaign", desc: "Send players out to an outside page or destination." },
+  ];
+
+  function gcwStep1Html(d) {
+    return '<div class="sub" style="margin-bottom:12px;">What do you want to create?</div>' +
+      '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;">' +
+      GCW_TYPE_CARDS.map(function (c) {
+        var selected = d.wizardType === c.key;
+        return '<button type="button" class="btn' + (selected ? " primary" : "") + '" data-gcw-type="' + c.key + '" ' +
+          'style="text-align:left;height:auto;padding:14px;display:flex;flex-direction:column;gap:4px;white-space:normal;">' +
+          '<span style="font-weight:700;">' + esc(c.title) + '</span>' +
+          '<span style="font-weight:400;font-size:12px;' + (selected ? "" : "color:var(--muted);") + '">' + esc(c.desc) + '</span>' +
+          '</button>';
+      }).join("") + '</div>';
+  }
+
+  // ---- Step 2: basic details ----------------------------------------------
+
+  function gcwStep2Html(d) {
+    var base = gcSlugify(d.name || "");
+    var autoId = base ? gcSlugCandidate(base, gcFirstAvailableSuffix(base)) : "";
+    var idValue = d.campaignIdManuallyEdited ? d.campaignId : autoId;
+    return gcwField("Campaign name", '<input class="filter-input" id="gcw-name" style="width:100%;box-sizing:border-box;margin:0;" value="' +
+        esc(d.name) + '" placeholder="October Lucky Draw" />') +
+      gcwField("Description", '<textarea class="filter-input" id="gcw-description" style="width:100%;box-sizing:border-box;margin:0;min-height:70px;" placeholder="Optional">' +
+        esc(d.description) + '</textarea>') +
+      '<details style="margin-top:2px;max-width:480px;">' +
+      '<summary style="cursor:pointer;font-size:12px;font-weight:600;">Advanced / Technical Details</summary>' +
+      '<div style="margin-top:8px;">' +
+      '<label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Campaign ID</label>' +
+      '<input class="filter-input" id="gcw-id" style="width:100%;box-sizing:border-box;margin:0;" value="' + esc(idValue) + '" placeholder="auto-generated from name" />' +
+      '<div class="sub" style="margin-top:4px;">Auto-generated from the campaign name above. Only override this if you need a specific technical identifier — it is immutable once created and, once deleted, cannot be reused.</div>' +
+      '</div></details>' +
+      gcwFieldError("step2");
+  }
+
+  // ---- Step 3: schedule ----------------------------------------------------
+
+  function gcwStep3Html(d) {
+    return gcwField("Starts (Asia/Kuala_Lumpur)",
+        '<input class="filter-input" type="datetime-local" id="gcw-starts" style="width:100%;box-sizing:border-box;margin:0;" value="' + esc(d.starts_at) + '" />') +
+      '<label style="font-size:12px;display:flex;align-items:center;gap:6px;margin:-6px 0 14px;max-width:480px;">' +
+      '<input type="checkbox" id="gcw-no-end"' + (d.noEnd ? " checked" : "") + ' /> No end date</label>' +
+      '<div id="gcw-ends-wrap" style="' + (d.noEnd ? "display:none;" : "") + '">' +
+      gcwField("Ends (Asia/Kuala_Lumpur)",
+        '<input class="filter-input" type="datetime-local" id="gcw-ends" style="width:100%;box-sizing:border-box;margin:0;" value="' + esc(d.ends_at) + '" />') +
+      '</div>' +
+      gcwFieldError("step3");
+  }
+
+  // ---- Step 4: type-specific setup -----------------------------------------
+
+  function gcwStep4RegistrationHtml(d) {
+    var reg = d.registration;
+    var boxes = GCW_REGISTRATION_FIELD_ORDER.map(function (key) {
+      var checked = reg.requiredFields.indexOf(key) !== -1 ? " checked" : "";
+      return '<label style="font-size:13px;display:flex;align-items:center;gap:8px;margin-bottom:8px;">' +
+        '<input type="checkbox" class="gcw-reg-field" value="' + esc(key) + '"' + checked + ' /> ' + esc(GCW_REGISTRATION_FIELD_LABELS[key]) + '</label>';
+    }).join("");
+    return '<div class="sub" style="margin-bottom:8px;">Registration fields</div>' + boxes +
+      '<div class="sub" style="margin:10px 0;">Telegram identity is always collected automatically — it never needs a field here.</div>' +
+      gcwFieldError("step4") +
+      '<label style="font-size:13px;display:flex;align-items:center;gap:8px;margin:14px 0 8px;">' +
+      '<input type="checkbox" id="gcw-reg-channel"' + (reg.requireChannelSubscription ? " checked" : "") + ' /> Require official channel subscription</label>' +
+      '<div id="gcw-channel-wrap" style="' + (reg.requireChannelSubscription ? "" : "display:none;") + '">' +
+      gcwField("Channel username", '<input class="filter-input" id="gcw-channel-username" style="width:100%;box-sizing:border-box;margin:0;" value="' +
+        esc(reg.channelUsername) + '" placeholder="mychannel" />') +
+      '</div>';
+  }
+
+  function gcwStep4DestinationHtml(d) {
+    var providers = gcOptionsCache.providers || [];
+    var options = '<option value="">No provider (configure later)</option>' + providers.map(function (p) {
+      return '<option value="' + esc(p.provider_id) + '"' + (d.destination.providerId === p.provider_id ? " selected" : "") + '>' +
+        esc(gcProviderOptionLabel(p)) + '</option>';
+    }).join("");
+    var rewardsNote = d.wizardType === "tournament"
+      ? '<div class="sub" style="margin-top:4px;max-width:480px;">Rewards — set up after campaign creation.</div>'
+      : "";
+    return gcwField("Provider", '<select class="filter-input" id="gcw-provider" style="width:100%;box-sizing:border-box;margin:0;">' + options + '</select>',
+        "Not required to create the campaign — this can be set up later from Campaign Detail.") +
+      gcwField("Destination path", '<input class="filter-input" id="gcw-path" style="width:100%;box-sizing:border-box;margin:0;" value="' +
+        esc(d.destination.path) + '" placeholder="/campaign/october" />') +
+      rewardsNote +
+      gcwFieldError("step4");
+  }
+
+  function gcwStep4Html(d) {
+    if (!GCW_TYPES[d.wizardType]) return "";
+    return d.wizardType === "registration" ? gcwStep4RegistrationHtml(d) : gcwStep4DestinationHtml(d);
+  }
+
+  // ---- Step 5: review -------------------------------------------------------
+
+  function gcwStep5Html(d) {
+    var type = GCW_TYPES[d.wizardType];
+    var base = gcSlugify(d.name || "");
+    var autoId = base ? gcSlugCandidate(base, gcFirstAvailableSuffix(base)) : "";
+    var finalId = d.campaignIdManuallyEdited ? (d.campaignId || "").trim() : autoId;
+    var startsDisplay = d.starts_at ? ccUtcToKlDisplay(ccKlInputToUtcIso(d.starts_at)) : "Not set";
+    var endsDisplay = (!d.noEnd && d.ends_at) ? ccUtcToKlDisplay(ccKlInputToUtcIso(d.ends_at)) : "No end date";
+    var typeSummary = "";
+    if (d.wizardType === "registration") {
+      var fields = d.registration.requiredFields.map(function (f) { return GCW_REGISTRATION_FIELD_LABELS[f]; }).join(", ");
+      typeSummary = gcwSummaryRow("Registration", fields || "None selected") +
+        (d.registration.requireChannelSubscription ? gcwSummaryRow("Channel", "@" + (d.registration.channelUsername || "(not set)")) : "");
+    } else if (d.wizardType === "tournament") {
+      typeSummary = gcwSummaryRow("Provider", gcwSelectedProviderLabel(d.destination.providerId) || "Not set (configure later)") +
+        gcwSummaryRow("Destination", d.destination.path || "Not set") +
+        gcwSummaryRow("Rewards", "Set up after campaign creation");
+    } else if (d.wizardType === "external") {
+      typeSummary = gcwSummaryRow("Provider", gcwSelectedProviderLabel(d.destination.providerId) || "Not set (configure later)") +
+        gcwSummaryRow("Destination", d.destination.path || "Not set");
+    }
+    return '<div class="section" style="margin:0 0 12px;max-width:480px;">' +
+      '<div style="font-size:16px;font-weight:700;">' + esc(d.name || "(untitled campaign)") + '</div>' +
+      '<div class="sub" style="margin-top:2px;">' + esc(type ? type.label : "") + '</div>' +
+      '<div style="margin-top:10px;">' + gcwSummaryRow("Runs", startsDisplay + "  →  " + endsDisplay) + typeSummary + '</div>' +
+      '</div>' +
+      '<details style="max-width:480px;"><summary style="cursor:pointer;font-size:12px;font-weight:600;">Technical Details</summary>' +
+      '<div style="margin-top:8px;">' + gcwSummaryRow("Campaign ID", finalId || "(will be generated)") +
+      gcwSummaryRow("Backend type", type ? type.backendType : "") + '</div></details>' +
+      gcwFieldError("step5");
+  }
+
+  function gcwStepBodies() { return [gcwStep1Html, gcwStep2Html, gcwStep3Html, gcwStep4Html, gcwStep5Html]; }
+
+  function gcwStepper(step) {
+    return '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;">' +
+      GCW_STEP_LABELS.map(function (label, i) {
+        var cls = i === step ? "pill approved" : (i < step ? "pill neutral" : "pill pending");
+        return '<span class="' + cls + '">' + (i + 1) + ". " + esc(label) + '</span>';
+      }).join("") + '</div>';
+  }
+
+  function gcwRender() {
+    var d = gcw.draft;
+    var bodies = gcwStepBodies();
+    var lastStep = bodies.length - 1;
+    var showBack = gcw.step > 0;
+    var showContinue = gcw.step > 0 && gcw.step < lastStep;
+    var showCreate = gcw.step === lastStep;
+    var nav = '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:16px;">' +
+      (showBack ? '<button class="btn" data-gcw-action="back" type="button">Back</button>' : '') +
+      (showContinue ? '<button class="btn primary" data-gcw-action="next" type="button">Continue</button>' : '') +
+      (showCreate ? '<button class="btn primary" data-gcw-action="create" type="button">Create Campaign</button>' : '') +
+      '<button class="btn" data-gcw-action="cancel" type="button" style="margin-left:auto;">Cancel</button>' +
+      '</div>';
+    $("#gcw-body").innerHTML =
+      '<div class="section" style="max-width:640px;">' +
+      '<div class="sub" style="margin-bottom:4px;">Step ' + (gcw.step + 1) + ' of ' + GCW_STEP_LABELS.length + '</div>' +
+      gcwStepper(gcw.step) +
+      '<div id="gcw-step-body">' + bodies[gcw.step](d) + '</div>' +
+      nav +
+      '</div>';
+  }
+
+  // Fetches whatever this step needs before rendering it (currently: the
+  // provider cache for Tournament/External's Setup step) without blocking
+  // navigation — renders immediately with whatever is cached, then again
+  // once the fetch resolves if the admin is still on that step.
+  function gcwEnterStep(step) {
+    if (step === 3 && gcw.draft.wizardType !== "registration") {
+      fetchGcProviders().then(function () { if (gcw.step === step) gcwRender(); }).catch(function () {});
+    }
+    gcwRender();
+  }
+
+  // Reads whatever the admin typed/checked on the CURRENT step back into the
+  // draft before navigating away from it — mirrors mission-admin.js's
+  // captureCreateStep() pattern so Back/Continue never lose entered values.
+  function gcwCaptureStep() {
+    var d = gcw.draft;
+    if (gcw.step === 1) {
+      var nameEl = $("#gcw-name"); if (nameEl) d.name = nameEl.value;
+      var descEl = $("#gcw-description"); if (descEl) d.description = descEl.value;
+      var idEl = $("#gcw-id"); if (idEl) d.campaignId = idEl.value;
+    } else if (gcw.step === 2) {
+      var startsEl = $("#gcw-starts"); if (startsEl) d.starts_at = startsEl.value;
+      var noEndEl = $("#gcw-no-end"); if (noEndEl) d.noEnd = !!noEndEl.checked;
+      var endsEl = $("#gcw-ends"); if (endsEl) d.ends_at = endsEl.value;
+    } else if (gcw.step === 3) {
+      if (d.wizardType === "registration") {
+        var checked = [];
+        $all(".gcw-reg-field").forEach(function (cb) { if (cb.checked) checked.push(cb.value); });
+        d.registration.requiredFields = checked;
+        var chEl = $("#gcw-reg-channel"); if (chEl) d.registration.requireChannelSubscription = !!chEl.checked;
+        var chuEl = $("#gcw-channel-username"); if (chuEl) d.registration.channelUsername = chuEl.value;
+      } else {
+        var provEl = $("#gcw-provider"); if (provEl) d.destination.providerId = provEl.value;
+        var pathEl = $("#gcw-path"); if (pathEl) d.destination.path = pathEl.value;
+      }
+    }
+  }
+
+  // Plain-English validation per step (P0.6 §"Friendly errors") — never a
+  // raw backend code, mirrored against the exact same rules
+  // campaign_centre._validate_body enforces server-side (missing_starts_at,
+  // ends_at_before_starts_at, invalid_required_fields) so a step that passes
+  // here can never fail create for a reason the admin wasn't already told.
+  function gcwValidateStep(step) {
+    var d = gcw.draft;
+    if (step === 1) {
+      if (!d.name || !d.name.trim()) return "Enter a campaign name.";
+      if (d.campaignIdManuallyEdited) {
+        if (!(d.campaignId || "").trim()) return "Campaign ID cannot be empty.";
+      } else if (!gcSlugify(d.name)) {
+        return "Couldn't generate a campaign ID from that name — add letters or numbers, or set one manually under Technical Details.";
+      }
+      return null;
+    }
+    if (step === 2) {
+      if (!d.starts_at) return "Enter a start date and time.";
+      if (!d.noEnd && d.ends_at) {
+        var startIso = ccKlInputToUtcIso(d.starts_at);
+        var endIso = ccKlInputToUtcIso(d.ends_at);
+        if (startIso && endIso && new Date(endIso) <= new Date(startIso)) return "End time must be after start time.";
+      }
+      return null;
+    }
+    if (step === 3 && d.wizardType === "registration") {
+      if (!d.registration.requiredFields.length) return "Select at least one registration field.";
+      if (d.registration.requireChannelSubscription && !(d.registration.channelUsername || "").trim()) return "Enter the channel username.";
+    }
+    return null;
+  }
+
+  function gcwCancel() {
+    if (gcwHasMeaningfulInput() && !window.confirm("Discard this new campaign? Nothing has been created yet.")) return;
+    activateTab("growth", 0);
+  }
+
+  // Builds the exact existing gc-campaigns POST payload (see baseBody in
+  // bindGcCampaigns's create handler) and submits through
+  // gcCreateCampaignAttempt — same slug/collision-retry path the legacy
+  // form uses, never a second implementation of it.
+  function gcwSubmit(btnEl) {
+    var d = gcw.draft;
+    var type = GCW_TYPES[d.wizardType];
+    if (!type) return;
+    if (btnEl) { btnEl.disabled = true; btnEl.textContent = "Creating…"; }
+    gcwShowError("step5", null);
+
+    var startsIso = d.starts_at ? ccKlInputToUtcIso(d.starts_at) : null;
+    var endsIso = (!d.noEnd && d.ends_at) ? ccKlInputToUtcIso(d.ends_at) : null;
+    var baseBody = {
+      name: (d.name || "").trim(),
+      type: type.backendType,
+      schedule: { starts_at: startsIso, ends_at: endsIso },
+      telegram: (type.registration && d.registration.requireChannelSubscription)
+        ? { channel_username: (d.registration.channelUsername || "").trim() }
+        : {},
+      destination: {
+        provider_id: (d.destination.providerId || "").trim(),
+        path: (d.destination.path || "").trim(),
+        open_mode: "telegram_web_app",
+        ready: false,
+      },
+    };
+    if (type.registration) {
+      baseBody.registration = {
+        enabled: true,
+        required_fields: d.registration.requiredFields,
+        require_channel_subscription: d.registration.requireChannelSubscription,
+      };
+    }
+
+    var manualId = d.campaignIdManuallyEdited ? (d.campaignId || "").trim() : null;
+    var base = d.campaignIdManuallyEdited ? null : gcSlugify(d.name);
+    var startN = d.campaignIdManuallyEdited ? 1 : gcFirstAvailableSuffix(base);
+
+    return gcCreateCampaignAttempt(baseBody, base, startN, manualId, null, {
+      onSuccess: function (candidateId) {
+        toast("✅ Campaign created", "success");
+        gcInvalidateCampaignsCache();
+        renderCampaignDetail(candidateId);
+      },
+      onError: function (collision, manualIdUsed) {
+        if (btnEl) { btnEl.disabled = false; btnEl.textContent = "Create Campaign"; }
+        gcwShowError("step5", collision
+          ? (manualIdUsed != null
+              ? "That Campaign ID is already in use. Choose another one."
+              : "Couldn't find a free campaign ID for this name. Set one manually under Technical Details.")
+          : "Couldn't create campaign. Try again.");
+      },
+    });
+  }
+
+  window.gcOpenCampaignWizard = function () {
+    gcw.step = 0;
+    gcw.draft = gcwDefaultDraft();
+    switchView("gcCampaignWizard");
+    var bc = $("#breadcrumb");
+    if (bc) bc.textContent = "🕹 Player Campaigns  /  Campaigns  /  New Campaign";
+    fetchGcProviders(); // warm the cache for Step 4 without blocking navigation
+  };
+
+  function bindGcCampaignWizard() {
+    document.addEventListener("click", function (e) {
+      var typeBtn = e.target && e.target.closest && e.target.closest("[data-gcw-type]");
+      if (typeBtn) {
+        var key = typeBtn.dataset.gcwType;
+        // Mission has no safe "create a bare shell" path (see the block
+        // comment above) — hand off straight to Mission Admin's own create
+        // wizard instead of pretending to create anything here.
+        if (key === "mission") {
+          switchView("missionPool");
+          var mod = window.MissionAdmin;
+          if (mod) mod.dispatch("create");
+          return;
+        }
+        gcw.draft.wizardType = key;
+        // Changing type resets only the fields that are no longer
+        // compatible — registration/destination are type-specific and
+        // always start fresh; name/description/schedule survive.
+        gcw.draft.registration = gcwDefaultDraft().registration;
+        gcw.draft.destination = gcwDefaultDraft().destination;
+        gcw.step = 1;
+        gcwRender();
+        return;
+      }
+
+      var actionBtn = e.target && e.target.closest && e.target.closest("[data-gcw-action]");
+      if (!actionBtn) return;
+      var act = actionBtn.dataset.gcwAction;
+      if (act === "cancel") { gcwCancel(); return; }
+      if (act === "back") { gcwCaptureStep(); gcw.step = Math.max(0, gcw.step - 1); gcwRender(); return; }
+      if (act === "next") {
+        gcwCaptureStep();
+        var err = gcwValidateStep(gcw.step);
+        if (err) { gcwShowError("step" + (gcw.step + 1), err); return; }
+        gcw.step = gcw.step + 1;
+        gcwEnterStep(gcw.step);
+        return;
+      }
+      if (act === "create") { gcwCaptureStep(); gcwSubmit(actionBtn); return; }
+    });
+
+    document.addEventListener("change", function (e) {
+      if (!e.target) return;
+      if (e.target.id === "gcw-no-end") {
+        var wrap = $("#gcw-ends-wrap");
+        if (wrap) wrap.style.display = e.target.checked ? "none" : "";
+      } else if (e.target.id === "gcw-reg-channel") {
+        var wrap2 = $("#gcw-channel-wrap");
+        if (wrap2) wrap2.style.display = e.target.checked ? "" : "none";
+      }
+    });
+
+    // Live campaign-id preview as the admin types the name (Step 2), same
+    // auto-slug-unless-manually-edited behavior as the legacy form's
+    // gcUpdateAutoSlugPreview — reimplemented against the wizard's own DOM
+    // ids/state rather than sharing that function's hardcoded #gc-c-* ids,
+    // but built from the exact same P0.3 helpers (gcSlugify/gcSlugCandidate/
+    // gcFirstAvailableSuffix).
+    document.addEventListener("input", function (e) {
+      if (!e.target || gcw.step !== 1) return;
+      if (e.target.id === "gcw-id") { gcw.draft.campaignIdManuallyEdited = true; return; }
+      if (e.target.id !== "gcw-name") return;
+      gcw.draft.name = e.target.value;
+      var idField = $("#gcw-id");
+      if (idField && !gcw.draft.campaignIdManuallyEdited) {
+        var base = gcSlugify(gcw.draft.name);
+        idField.value = base ? gcSlugCandidate(base, gcFirstAvailableSuffix(base)) : "";
+      }
+    });
+  }
 
   // ---------- Registration Configuration (moved off Create Campaign form;
   // reads/writes the same gc_campaigns.registration block via the existing
@@ -9332,7 +9824,7 @@
     });
   }
 
-  var VIEWS =["summary", "moduleOverview", "funnel", "abuse", "campaignBuilder", "campaignPerformance", "campaignIntelligence", "activeCampaigns", "compiledDrops", "campaigns", "gcCampaigns", "campaignDetail", "campaignRegistrations", "deepLinks", "missionPool", "gcProviders", "gcResults", "gcRewards", "gcVerification", "gcActivity", "campaignDisplay", "eventBanners", "luckyGames", "vouchers", "drops", "referrals", "affiliate", "affiliatePools", "affiliateBatches", "affiliatePending", "reactivation", "audit", "segmentProbabilityConfig", "segmentRoi", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "voucherHunterFalsePositive", "voucherHunterRuleSimulator", "vhPriorityImpact", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "joinRequests", "xpAdjust", "settings", "referralShareContent", "referralShareEngagement", "ccComposer", "ccCalendar", "ccBoard", "ccPollResults"];
+  var VIEWS =["summary", "moduleOverview", "funnel", "abuse", "campaignBuilder", "campaignPerformance", "campaignIntelligence", "activeCampaigns", "compiledDrops", "campaigns", "gcCampaigns", "gcCampaignWizard", "campaignDetail", "campaignRegistrations", "deepLinks", "missionPool", "gcProviders", "gcResults", "gcRewards", "gcVerification", "gcActivity", "campaignDisplay", "eventBanners", "luckyGames", "vouchers", "drops", "referrals", "affiliate", "affiliatePools", "affiliateBatches", "affiliatePending", "reactivation", "audit", "segmentProbabilityConfig", "segmentRoi", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "voucherHunterFalsePositive", "voucherHunterRuleSimulator", "vhPriorityImpact", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "joinRequests", "xpAdjust", "settings", "referralShareContent", "referralShareEngagement", "ccComposer", "ccCalendar", "ccBoard", "ccPollResults"];
 
   // ---------------------------------------------------------------------
   // Information architecture: sidebar Business Modules, each with its own
@@ -9644,7 +10136,7 @@
       campaignIntelligence: "Campaign Intelligence (P5)", activeCampaigns: "Campaigns",
       compiledDrops: "Compiled Voucher Drops",
       campaigns: "Campaigns (Legacy Targeting)",
-      gcCampaigns: "Player Campaigns", campaignDetail: "Campaign Details", campaignRegistrations: "Campaign Registrations", deepLinks: "Deep Links", missionPool: "Mission Reward Pool", gcProviders: "Providers", gcResults: "Tournament Results",
+      gcCampaigns: "Player Campaigns", gcCampaignWizard: "New Campaign", campaignDetail: "Campaign Details", campaignRegistrations: "Campaign Registrations", deepLinks: "Deep Links", missionPool: "Mission Reward Pool", gcProviders: "Providers", gcResults: "Tournament Results",
       gcRewards: "Rewards", gcVerification: "Verification Integrations", gcActivity: "Activity Log",
       campaignDisplay: "Campaign Display Control",
       eventBanners: "Event Banner",
@@ -9686,6 +10178,7 @@
     else if (state.view === "compiledDrops") loadCompiledDrops(force);
     else if (state.view === "campaigns") loadCampaigns(force);
     else if (state.view === "gcCampaigns") loadGcCampaigns(force);
+    else if (state.view === "gcCampaignWizard") gcwRender();
     else if (state.view === "campaignDetail") loadCampaignDetail(force);
     else if (state.view === "campaignRegistrations") loadCampaignRegistrations(force);
     else if (state.view === "deepLinks") loadDeepLinks(force);
@@ -9785,6 +10278,7 @@
     bindAffiliateBatches();
     bindAffiliatePending();
     bindGcCampaigns();
+    bindGcCampaignWizard();
     bindCampaignDetail();
     bindCampaignRegistrationConfig();
     bindCampaignRegistrations();
