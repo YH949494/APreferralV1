@@ -3483,6 +3483,10 @@
     $("#ce-chk-min").value = t.checkin_count_min != null ? t.checkin_count_min : "";
     $("#ce-chk-max").value = t.checkin_count_max != null ? t.checkin_count_max : "";
     $("#ce-recency").value = t.activity_recency_days != null ? t.activity_recency_days : "";
+    var hasAdvancedTargeting = [t.referral_count_min, t.referral_count_max, t.checkin_count_min, t.checkin_count_max, t.activity_recency_days, c.voucher_value]
+      .some(function (v) { return v != null && v !== ""; });
+    var advDetails = $("#ce-advanced-targeting");
+    if (advDetails && hasAdvancedTargeting) advDetails.open = true;
   }
 
   function _ceResetForm() {
@@ -3494,6 +3498,8 @@
     [$('#ce-age-new'), $('#ce-age-old')].filter(Boolean).forEach(function (cb) { cb.checked = false; });
     $all(".ce-risk-cb").forEach(function (cb) { cb.checked = false; });
     ["ce-ref-min","ce-ref-max","ce-chk-min","ce-chk-max","ce-recency"].forEach(function (id) { var el = $("#" + id); if (el) el.value = ""; });
+    var advDetails = $("#ce-advanced-targeting");
+    if (advDetails) advDetails.open = false;
     $("#ce-preview-result").classList.add("hidden");
   }
 
