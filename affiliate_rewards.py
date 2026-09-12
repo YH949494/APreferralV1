@@ -576,34 +576,40 @@ def _claim_from_target_batch(
     return None, "target_batch_empty"
 
 
+def _legacy_pool_claim_filter(pool_id: str) -> dict:
+    """Shared eligibility filter for legacy_unbounded (no ``batch_id``) rows
+    — used identically by ``_claim_legacy_voucher`` and
+    ``_available_pool_count`` so a count can never call a row "claimable"
+    that the claim itself would reject.
+
+    Minimal cross-consumption guard (Campaign Centre voucher_pool_service
+    writes an explicit "allocation_scope" onto every row it inserts): a row
+    is claimable here only if it has no allocation_scope at all (every
+    pre-existing legacy affiliate row — untouched, still works exactly as
+    before) or is explicitly "affiliate_rewards"/"shared". Rows scoped
+    "campaign_rewards"/"welcome_rewards"/etc. are never matched, even if a
+    pool_id were ever accidentally shared.
+    """
+    return {
+        "pool_id": pool_id,
+        "status": "available",
+        "batch_id": {"$exists": False},
+        "distribution_disabled": {"$ne": True},
+        "$or": [
+            {"issued_for_ledger_id": {"$exists": False}},
+            {"issued_for_ledger_id": None},
+        ],
+        "allocation_scope": {"$nin": ["campaign_rewards", "welcome_rewards", "voucher_drops", "referral_rewards"]},
+    }
+
+
 def _claim_legacy_voucher(db, *, pool_id: str, ledger_id, user_id: int, now_utc: datetime):
     """Claim from legacy_unbounded rows only (no ``batch_id``) — the
     pre-existing always-claimable behaviour, untouched. Never considers any
     dated batch, even one that happens to be currently active; callers
     decide when legacy is policy-eligible before calling this.
     """
-    # Minimal cross-consumption guard (Campaign Centre voucher_pool_service
-    # writes an explicit "allocation_scope" onto every row it inserts): a
-    # row is claimable here only if it has no allocation_scope at all
-    # (every pre-existing legacy affiliate row — untouched, still works
-    # exactly as before) or is explicitly "affiliate_rewards"/"shared".
-    # Rows scoped "campaign_rewards"/"welcome_rewards"/etc. are never
-    # matched, even if a pool_id were ever accidentally shared.
-    candidates = list(
-        db.voucher_pools.find(
-            {
-                "pool_id": pool_id,
-                "status": "available",
-                "batch_id": {"$exists": False},
-                "distribution_disabled": {"$ne": True},
-                "$or": [
-                    {"issued_for_ledger_id": {"$exists": False}},
-                    {"issued_for_ledger_id": None},
-                ],
-                "allocation_scope": {"$nin": ["campaign_rewards", "welcome_rewards", "voucher_drops", "referral_rewards"]},
-            }
-        )
-    )
+    candidates = list(db.voucher_pools.find(_legacy_pool_claim_filter(pool_id)))
     candidates.sort(key=lambda row: row.get("_id"))
     for candidate in candidates:
         voucher = db.voucher_pools.find_one_and_update(
@@ -772,20 +778,7 @@ def _available_pool_count(db, *, pool_id: str, now_utc: datetime | None = None, 
             return _batch_claimable_available_count(db, active_batch)
         if _tier_entered_scheduled_mode(db, pool_id=pool_id, reference_utc=now_utc):
             return 0
-    return int(
-        db.voucher_pools.count_documents(
-            {
-                "pool_id": pool_id,
-                "status": "available",
-                "batch_id": {"$exists": False},
-                "distribution_disabled": {"$ne": True},
-                "$or": [
-                    {"issued_for_ledger_id": {"$exists": False}},
-                    {"issued_for_ledger_id": None},
-                ],
-            }
-        )
-    )
+    return int(db.voucher_pools.count_documents(_legacy_pool_claim_filter(pool_id)))
 
 
 def _pool_inventory_blocking_reason(db, *, pool_id: str, now_utc: datetime, legacy_only: bool = False) -> str | None:
