@@ -471,6 +471,31 @@
   function esc(v) { return host.esc(v); }
   function el() { return host.$("#mp-root"); }
 
+  // P0.17 §E — friendly text for a bare gc_campaigns backend error code, via
+  // the host's shared map (admin-dashboard.js's GC_ACTION_ERROR_MESSAGES,
+  // injected as host.errorMessage — see loadMissionPool's mod.init call) so
+  // this file never keeps a second error-code dictionary alongside
+  // SAVE_REFUSAL_COPY (which only covers this file's own local
+  // session-authorization codes, never a real backend response). Degrades
+  // to a plain fallback if an older/test host doesn't provide it.
+  function hostErrorMessage(code, fallback) {
+    var text = host.errorMessage ? host.errorMessage(code, fallback) : null;
+    return text || fallback || "Couldn't complete this action. Try again.";
+  }
+
+  // P0.17 §E3 — never show a raw pool_id in beginner-facing text; prefer a
+  // human name already carried on the object at hand (inventory_verdict and
+  // mission-pool/edit-state both return pool_name alongside pool_id), else
+  // fall back to the same poolsCache every picker reads, else a generic
+  // phrase (e.g. a pool created moments ago in this same request, not yet
+  // in either).
+  function poolLabel(poolId, poolName) {
+    if (poolName) return poolName;
+    var pools = (poolsCache && poolsCache.pools) || [];
+    var found = pools.filter(function (p) { return p.pool_id === poolId; })[0];
+    return (found && found.name) || "the selected reward pool";
+  }
+
   function num(v) {
     if (v === null || v === undefined) return "—";
     var n = Number(v);
@@ -1066,7 +1091,7 @@
    */
   function submitCreate(publish) {
     var auth = session.authorizeCreate();
-    if (!auth.ok) { host.toast("❌ " + (SAVE_REFUSAL_COPY[auth.code] || auth.code), "error"); return; }
+    if (!auth.ok) { host.toast("❌ " + (SAVE_REFUSAL_COPY[auth.code] || hostErrorMessage(auth.code)), "error"); return; }
     var d = session.draft();
 
     // Re-validate every step, not just the one on screen: the review step is
@@ -1110,11 +1135,12 @@
     }).then(function (ctx) {
       if (!ctx || !session.accepts(load)) return null;
       if (!ctx.verdict || ctx.verdict.status !== "ok" || !ctx.verdict.pool_exists) {
-        throw new Error("Reward pool " + ctx.poolId + " could not be verified.");
+        throw new Error(poolLabel(ctx.poolId, ctx.verdict && ctx.verdict.pool_name) + " could not be verified.");
       }
       if (publish && !ctx.verdict.sufficient) {
         throw new Error("Publishing blocked: winner target " + ctx.verdict.winner_count +
-          " exceeds the " + ctx.verdict.available + " available codes in " + ctx.poolId + ".");
+          " exceeds the " + ctx.verdict.available + " available codes in " +
+          poolLabel(ctx.poolId, ctx.verdict.pool_name) + ".");
       }
       var body = {
         campaign_id: d.campaign_id.trim(),
@@ -1136,7 +1162,7 @@
       };
       return host.apiPostJson("/api/admin/gc-campaigns", body).then(function (res) {
         if (!res.ok || (res.d && res.d.status !== "ok")) {
-          throw new Error((res.d && res.d.code) || "create_failed");
+          throw new Error(hostErrorMessage(res.d && res.d.code, "Couldn't create the mission. Try again."));
         }
         return body.campaign_id;
       });
@@ -1148,7 +1174,11 @@
         .catch(function (e) { return { status: "error", code: e.message }; })
         .then(function (r) {
           if (!r || r.status !== "ok") {
-            host.toast("⚠️ Mission created but publish failed: " + ((r && r.code) || "unknown"), "error");
+            // P0.17 §E3 — the mission is already created (as a draft) at
+            // this point; only the publish step failed, and this must say
+            // so with a friendly reason, never a raw backend code.
+            host.toast("⚠️ Mission created but publish failed: " +
+              hostErrorMessage(r && r.code, "Couldn't complete this action. Try again."), "error");
           } else {
             host.toast("✅ Mission published", "success");
           }
@@ -1601,7 +1631,7 @@
   function saveEdit(requestedId) {
     var auth = session.authorizeSave(requestedId);
     if (!auth.ok) {
-      host.toast("❌ " + (SAVE_REFUSAL_COPY[auth.code] || auth.code), "error");
+      host.toast("❌ " + (SAVE_REFUSAL_COPY[auth.code] || hostErrorMessage(auth.code)), "error");
       return;
     }
     var es = session.editState();
@@ -1616,7 +1646,12 @@
     var poolId = f.pool_id || es.storedPool.pool_id;
     var poolType = resolveEditPoolType(es, poolId);
     if (!poolType) {
-      host.toast("❌ Could not confirm the reward type of pool " + poolId +
+      // pool_name is only meaningful for the STORED pool (state.reward is
+      // this mission's currently-saved pool, not necessarily whatever the
+      // admin just picked in the dropdown) — omitted otherwise so poolLabel
+      // falls through to its own poolsCache lookup instead of mislabeling.
+      var poolNameHint = poolId === es.storedPool.pool_id ? (state.reward || {}).pool_name : null;
+      host.toast("❌ Could not confirm the reward type of " + poolLabel(poolId, poolNameHint) +
         " — reopen this mission and try again.", "error");
       return;
     }
@@ -1677,15 +1712,15 @@
     // check and here may have changed the mode or the target.
     var recheck = session.authorizeSave(campaignId);
     if (!recheck.ok) {
-      host.toast("❌ " + (SAVE_REFUSAL_COPY[recheck.code] || recheck.code), "error");
+      host.toast("❌ " + (SAVE_REFUSAL_COPY[recheck.code] || hostErrorMessage(recheck.code)), "error");
       return;
     }
     host.apiPutJson("/api/admin/gc-campaigns/" + encodeURIComponent(campaignId), body).then(function (res) {
       var d = res.d || res;
       if (d.status !== "ok") {
-        host.toast(d.code === "mission_config_locked"
-          ? "❌ Mission details are frozen — participants have already submitted entries."
-          : "❌ " + (d.code || "save_failed"), "error");
+        host.toast("❌ " + (d.code === "mission_config_locked"
+          ? "Mission details are frozen — participants have already submitted entries."
+          : hostErrorMessage(d.code, "Couldn't save mission changes. Try again.")), "error");
         return;
       }
       host.toast("✅ Mission saved", "success");
@@ -1766,15 +1801,15 @@
     return softGet("/api/admin/mission-pool/" + encodeURIComponent(campaignId) + "/edit-state")
       .then(function (state) {
         if (!state || state.status !== "ok") {
-          host.toast("❌ Could not confirm reward inventory before publishing (" +
-            ((state && state.code) || "unknown") + ")", "error");
+          host.toast("❌ Could not confirm reward inventory before publishing — " +
+            hostErrorMessage(state && state.code, "try again."), "error");
           return null;
         }
         var reward = state.reward || {};
         if (!reward.sufficient) {
           host.toast("❌ Publishing blocked: winner target " + num(reward.winner_count) +
             " exceeds the " + num(reward.available) + " available codes in " +
-            (reward.pool_id || "the configured pool") + ".", "error");
+            poolLabel(reward.pool_id, reward.pool_name) + ".", "error");
           openDetail(campaignId);
           return null;
         }

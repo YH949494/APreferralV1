@@ -285,6 +285,115 @@ def test_subscription_system_error_is_not_treated_as_unsubscribed(fake_db):
 
 
 # ---------------------------------------------------------------------------
+# P0.17 §F — end-to-end registration channel-gate verification.
+# ---------------------------------------------------------------------------
+
+def test_registration_allowed_without_channel_when_subscription_not_required(fake_db):
+    _insert_campaign(fake_db, registration={**cr.default_registration_config(), "enabled": True,
+                                             "require_channel_subscription": False},
+                      telegram={"require_identity": True, "require_subscription": False,
+                                "channel_id": None, "channel_username": ""})
+    with _app().test_client() as client, _verified(UID):
+        r = client.post(f"/api/campaign-registration/{CAMPAIGN_ID}/register?init_data=x", json=_valid_payload())
+        assert r.status_code == 201
+
+
+def test_registration_gated_rejection_returns_the_configured_channel_username(fake_db):
+    _insert_campaign(fake_db, registration={**cr.default_registration_config(), "enabled": True,
+                                             "require_channel_subscription": True},
+                      telegram={"require_identity": True, "require_subscription": True,
+                                "channel_id": None, "channel_username": "advantplayofficial"})
+    with _app().test_client() as client, _verified(UID), patch(
+        "subscription_gate.verify_campaign_subscription",
+        return_value={"subscribed": False, "reason": "left", "source": "live"},
+    ):
+        r = client.post(f"/api/campaign-registration/{CAMPAIGN_ID}/register?init_data=x", json=_valid_payload())
+        assert r.status_code == 403
+        assert r.get_json()["code"] == "channel_subscription_required"
+        assert r.get_json()["channel_username"] == "advantplayofficial"
+
+
+def test_admin_put_rejected_before_publish_when_channel_gate_unsatisfiable(fake_db):
+    """The invalid-config case belongs to campaign_centre's admin surface,
+    not the public registration API — verifies the two modules agree: this
+    config can never be saved through the admin PUT that would otherwise
+    let it reach `live`/Published."""
+    import campaign_centre as cc_mod
+
+    admin_app = Flask(__name__)
+    admin_app.register_blueprint(cc_mod.campaign_centre_bp)
+    with admin_app.test_client() as client, _admin_ok():
+        client.post("/api/admin/gc-campaigns", json={
+            "campaign_id": "gate-check", "name": "Gate Check", "type": "external_website",
+            "schedule": {"starts_at": datetime.now(timezone.utc).isoformat()},
+        })
+        resp = client.put("/api/admin/gc-campaigns/gate-check", json={
+            "registration": {"enabled": True, "require_channel_subscription": True},
+        })
+        assert resp.status_code == 400
+        assert resp.get_json()["code"] == "subscription_channel_required"
+
+
+def test_repair_legacy_invalid_stored_config_by_setting_a_channel(fake_db):
+    """Simulates a document already in this broken state (created before the
+    admin-PUT guard existed) — registration is impossible until an admin
+    repairs it, either by turning the gate off or by setting a channel.
+    Exercises the "set a channel" repair path end to end."""
+    import campaign_centre as cc_mod
+
+    _insert_campaign(fake_db, registration={**cr.default_registration_config(), "enabled": True,
+                                             "require_channel_subscription": True},
+                      telegram={"require_identity": True, "require_subscription": False,
+                                "channel_id": None, "channel_username": ""})
+
+    reg_app = _app()
+    with reg_app.test_client() as client, _verified(UID), patch(
+        "subscription_gate.verify_campaign_subscription",
+        return_value={"subscribed": False, "reason": "channel_not_configured", "source": "config"},
+    ):
+        stuck = client.post(f"/api/campaign-registration/{CAMPAIGN_ID}/register?init_data=x", json=_valid_payload())
+        assert stuck.status_code == 403  # impossible loop: no channel can ever satisfy this
+
+    admin_app = Flask(__name__)
+    admin_app.register_blueprint(cc_mod.campaign_centre_bp)
+    with admin_app.test_client() as client, _admin_ok():
+        repaired = client.put(f"/api/admin/gc-campaigns/{CAMPAIGN_ID}", json={
+            "telegram": {"require_subscription": False, "channel_username": "advantplayofficial"},
+        })
+        assert repaired.status_code == 200, repaired.get_json()
+
+    with reg_app.test_client() as client, _verified(UID), patch(
+        "subscription_gate.verify_campaign_subscription",
+        return_value={"subscribed": True, "reason": "member"},
+    ):
+        ok = client.post(f"/api/campaign-registration/{CAMPAIGN_ID}/register?init_data=x", json=_valid_payload())
+        assert ok.status_code == 201
+
+
+def test_repair_legacy_invalid_stored_config_by_turning_gate_off(fake_db):
+    """The other repair option: switch require_channel_subscription off
+    instead of adding a channel."""
+    import campaign_centre as cc_mod
+
+    _insert_campaign(fake_db, registration={**cr.default_registration_config(), "enabled": True,
+                                             "require_channel_subscription": True},
+                      telegram={"require_identity": True, "require_subscription": False,
+                                "channel_id": None, "channel_username": ""})
+
+    admin_app = Flask(__name__)
+    admin_app.register_blueprint(cc_mod.campaign_centre_bp)
+    with admin_app.test_client() as client, _admin_ok():
+        repaired = client.put(f"/api/admin/gc-campaigns/{CAMPAIGN_ID}", json={
+            "registration": {"enabled": True, "require_channel_subscription": False},
+        })
+        assert repaired.status_code == 200, repaired.get_json()
+
+    with _app().test_client() as client, _verified(UID):
+        ok = client.post(f"/api/campaign-registration/{CAMPAIGN_ID}/register?init_data=x", json=_valid_payload())
+        assert ok.status_code == 201
+
+
+# ---------------------------------------------------------------------------
 # 12/13 — admin export protected + CSV fields
 # ---------------------------------------------------------------------------
 

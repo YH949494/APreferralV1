@@ -78,6 +78,22 @@ def provider_is_usable_for_results(provider: dict | None) -> bool:
     return bool(provider) and provider.get("active") is True
 
 
+# Distinct from provider_is_usable_for_results on purpose: that check gates
+# server-to-server result crediting/HMAC verification (tournament_rewards.py,
+# tournament_integration.py) AND subscription_verification_api's
+# is_publicly_active check — none of which build a destination URL and so
+# have no base_url requirement at all. THIS check is the one shared rule for
+# "can this provider actually serve as a campaign's player-facing
+# destination" — active AND a base_url build_effective_url can use — reused
+# by campaign_centre's publish gate (_transition) and admin
+# visibility_explanation so a Published/Visible campaign can never mean
+# campaign_unavailable at player-open time (P0.17 §C).
+def provider_has_valid_destination(provider: dict | None) -> bool:
+    if not provider_is_usable_for_results(provider):
+        return False
+    return _valid_https_url((provider or {}).get("base_url") or "")
+
+
 def _valid_https_url(url: str) -> bool:
     if not url:
         return False
@@ -273,6 +289,15 @@ def activate_provider(provider_id: str):
         return jsonify({"status": "error", "code": "not_found"}), 404
     if doc.get("auth_mode") == "hmac_sha256" and not provider_secret(doc):
         return jsonify({"status": "error", "code": "secret_not_configured"}), 400
+    # A draft/inactive provider may exist without a base_url (the create/
+    # update endpoints allow it — some workflows stage a provider before its
+    # destination is known), but activation is the one gate that must never
+    # let a base_url-less provider start serving campaigns: an active
+    # provider with no base_url makes build_effective_url return None,
+    # 404-ing every player who opens a campaign that looks Published and
+    # Visible (P0.17 §C1).
+    if not _valid_https_url((doc.get("base_url") or "").strip()):
+        return jsonify({"status": "error", "code": "provider_base_url_required"}), 400
     database.db["gc_providers"].update_one(
         {"provider_id": provider_id},
         {"$set": {"active": True, "updated_at": datetime.now(timezone.utc)}},

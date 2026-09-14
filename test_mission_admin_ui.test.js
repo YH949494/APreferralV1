@@ -798,7 +798,11 @@ test("publishing an existing mission is blocked when inventory cannot cover it",
   await h.flush(); await h.flush();
 
   assert.equal(h.calls.some((c) => c.method === "POSTJ"), false, "no publish request is issued");
-  assert.ok(h.toasts.some((t) => /Publishing blocked/.test(t.msg) && /MISSION-5/.test(t.msg)));
+  // P0.17 §E3 — never a raw pool_id in beginner-facing text; the human pool
+  // name (edit-state's reward.pool_name, "September Mission $5" here) is
+  // used instead.
+  assert.ok(h.toasts.some((t) => /Publishing blocked/.test(t.msg) && /September Mission \$5/.test(t.msg)));
+  assert.equal(h.toasts.some((t) => /MISSION-5/.test(t.msg)), false, "raw pool_id must never appear in the toast");
 });
 
 test("resuming a paused mission obeys the same inventory gate as publishing", async () => {

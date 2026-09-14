@@ -31,7 +31,7 @@ from pymongo import ReturnDocument
 
 import database
 import reward_engine
-from campaign_providers import get_provider, provider_is_usable_for_results
+from campaign_providers import get_provider, provider_has_valid_destination, provider_is_usable_for_results
 
 logger = logging.getLogger(__name__)
 
@@ -270,6 +270,22 @@ def visibility_explanation(campaign: dict, provider: dict | None, now: datetime 
             reasons.append("linked provider does not exist")
         elif not provider_is_usable_for_results(provider):
             reasons.append("linked provider is inactive")
+        elif not provider_has_valid_destination(provider):
+            # Active, but build_effective_url can never produce a URL for
+            # it (no/invalid base_url) — without this an admin sees
+            # "Visible to players" for a campaign every player-open 404s on
+            # (P0.17 §C3).
+            reasons.append("The selected provider has no usable destination URL.")
+
+    registration_cfg = campaign.get("registration") or {}
+    if registration_cfg.get("enabled") and registration_cfg.get("require_channel_subscription"):
+        telegram_cfg = campaign.get("telegram") or {}
+        if not (telegram_cfg.get("channel_id") or (telegram_cfg.get("channel_username") or "").strip()):
+            # Mirrors _validate_body's save-time guard (P0.17 §A) — reported
+            # here too so a campaign saved before that guard existed (or
+            # otherwise already in this state) never shows "Visible to
+            # players" while registration can never actually pass the gate.
+            reasons.append("registration requires channel subscription but no channel is configured")
 
     return {
         "publicly_visible": len(reasons) == 0,
@@ -305,7 +321,15 @@ def _parse_dt(value) -> datetime | None:
         return None
 
 
-def _validate_body(body: dict, *, partial: bool = False) -> tuple[dict | None, str | None]:
+def _validate_body(
+    body: dict, *, partial: bool = False, existing: dict | None = None
+) -> tuple[dict | None, str | None]:
+    """``existing`` is the canonical stored document (None on create). A
+    partial update only carries the blocks the caller actually submitted —
+    see the ``not partial or "<field>" in body`` guards below — so a
+    cross-block check (like the registration/telegram one at the end of this
+    function) must fall back to ``existing`` for any block not present in
+    ``updates``, never treat an omitted block as empty."""
     updates: dict = {}
 
     if not partial or "name" in body:
@@ -444,6 +468,35 @@ def _validate_body(body: dict, *, partial: bool = False) -> tuple[dict | None, s
             "auto_allocate": bool(raw_reward.get("auto_allocate", False)),
             "rules": rules,
         }
+
+    # ---- Cross-block: registration's channel-subscription gate ----------
+    # registration.require_channel_subscription is enforced by
+    # campaign_registration._subscription_check against the SIBLING
+    # telegram block's channel_id/channel_username — registration has no
+    # channel storage of its own. Without this check a campaign could save
+    # (and publish/preview as visible) with the gate on and no channel ever
+    # configured, so every registration attempt fails closed with
+    # channel_subscription_required forever (P0.17 §A). Runs unconditionally
+    # (not just when "registration" is in body) because either half of this
+    # pair can be edited independently — e.g. Campaign Detail's destination
+    # editor can remove a channel_username while registration's own gate
+    # (saved earlier from the Registration Configuration screen) is still on.
+    # Falls back to `existing` for whichever block THIS request didn't touch,
+    # per the partial-update contract explained on the docstring above.
+    effective_registration = updates.get("registration")
+    if effective_registration is None and existing is not None:
+        effective_registration = existing.get("registration")
+    effective_registration = effective_registration or {}
+    if effective_registration.get("enabled") and effective_registration.get("require_channel_subscription"):
+        effective_telegram = updates.get("telegram")
+        if effective_telegram is None and existing is not None:
+            effective_telegram = existing.get("telegram")
+        effective_telegram = effective_telegram or {}
+        if not (effective_telegram.get("channel_id") or (effective_telegram.get("channel_username") or "").strip()):
+            # Reuses the exact code the telegram block's own equivalent
+            # check returns above — one error code for "subscription
+            # required with no channel", never a second overlapping one.
+            return None, "subscription_channel_required"
 
     return updates, None
 
@@ -673,7 +726,7 @@ def update_campaign(campaign_id: str):
     import mission_pool
 
     body["_existing_mechanic"] = mission_pool.resolve_mechanic(doc)
-    updates, code = _validate_body(body, partial=True)
+    updates, code = _validate_body(body, partial=True, existing=doc)
     if code:
         return jsonify({"status": "error", "code": code}), 400
     updates.pop("_existing_type", None)
@@ -762,6 +815,15 @@ def _transition(campaign_id: str, admin: dict, new_status: str, action: str):
                     return jsonify({"status": "error", "code": "destination_not_ready"}), 400
                 if not provider_is_usable_for_results(provider):
                     return jsonify({"status": "error", "code": "provider_inactive"}), 400
+                # Active but no usable base_url (e.g. an existing provider
+                # activated before campaign_providers.activate_provider
+                # started requiring one) — build_effective_url would return
+                # None for every player. Never let a campaign publish onto a
+                # destination that can never resolve (P0.17 §C1/§C3). Same
+                # code campaign_providers.activate_provider itself returns —
+                # one error code, not a second one for the same root cause.
+                if not provider_has_valid_destination(provider):
+                    return jsonify({"status": "error", "code": "provider_base_url_required"}), 400
     # status != "deleted" closes the same race as update_campaign's guard
     # above: delete_campaign never removes the document, it tombstones it in
     # place, so a blind {"campaign_id": campaign_id} filter here could land
@@ -1024,6 +1086,8 @@ def preview_campaign(campaign_id: str):
         badges.append("destination_not_ready")
     if provider and not provider_is_usable_for_results(provider):
         badges.append("provider_inactive")
+    elif provider and not provider_has_valid_destination(provider):
+        badges.append("provider_base_url_required")
 
     log_funnel_event("campaign_previewed", campaign_id=campaign_id, campaign_type=doc.get("type"), source="admin")
     return jsonify({

@@ -99,7 +99,9 @@ async function withRejectionGuard(fn) {
 // ---------------------------------------------------------------------
 // Fixtures — shaped like campaign_centre.py's gc_campaigns documents.
 // ---------------------------------------------------------------------
-const activeProvider = { provider_id: "prov-1", name: "MyWin", active: true, type: "casino" };
+// base_url included (P0.17 §C) — an active provider with no base_url is a
+// distinct, incomplete-destination case these fixtures don't intend to test.
+const activeProvider = { provider_id: "prov-1", name: "MyWin", active: true, type: "casino", base_url: "https://mywin.example.com" };
 
 function standardDropCampaign(overrides) {
   return Object.assign({
