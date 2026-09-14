@@ -432,13 +432,14 @@ def list_reward_pools():
         return err
     campaign_id = request.args.get("campaign_id")
     pools = voucher_pool_service.list_pools(campaign_id=campaign_id)
+    stock_by_pool = voucher_pool_service.pool_stock_bulk([p["pool_id"] for p in pools])
     out = []
     for p in pools:
         p.pop("_id", None)
         for k in ("created_at", "updated_at"):
             if isinstance(p.get(k), datetime):
                 p[k] = p[k].isoformat()
-        p["stock"] = voucher_pool_service.pool_stock(p["pool_id"])
+        p["stock"] = stock_by_pool.get(p["pool_id"], {"available": 0, "issued": 0})
         out.append(p)
     return jsonify({"status": "ok", "pools": out})
 

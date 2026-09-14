@@ -449,11 +449,17 @@ class FakeElement {
     this._html = "";
     this._listeners = {};
     this.focused = false;
+    this._attrs = {};
   }
   get textContent() { return this._text; }
   set textContent(v) { this._text = v == null ? "" : String(v); }
   get innerHTML() { return this._html; }
   set innerHTML(v) { this._html = v == null ? "" : String(v); }
+  // P0.16 §G — gcRenderPreviewModal now stamps role/aria-modal/aria-label
+  // onto the modal box via setAttribute.
+  setAttribute(name, value) { this._attrs[name] = String(value); }
+  getAttribute(name) { return Object.prototype.hasOwnProperty.call(this._attrs, name) ? this._attrs[name] : null; }
+  removeAttribute(name) { delete this._attrs[name]; }
   appendChild(node) { node.parent = this; this.children.push(node); return node; }
   remove() {
     if (this.parent) { this.parent.children = this.parent.children.filter((c) => c !== this); this.parent = null; }

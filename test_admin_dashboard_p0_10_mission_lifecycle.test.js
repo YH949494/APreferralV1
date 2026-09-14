@@ -128,7 +128,12 @@ const M = loadPure();
 function plain(v) { return JSON.parse(JSON.stringify(v)); }
 
 function loadDetail() {
-  return runInSandbox(SHARE_SAFE_ID_SRC + "\n" + DETAIL_SRC + "\nthis.__x = { gcCampaignDetailHtml, computeSetupChecklist };",
+  // P0.16 §B — Campaign Detail's own "•••" overflow reuses
+  // gcOverflowMenuHtml, which (like the Campaigns list) calls
+  // gcMissionActionsHtml — defined earlier in the file than DETAIL_SRC's
+  // own "GC_TYPE_LABELS" start marker (same prepend-by-name loadPure()
+  // above already needs it for).
+  return runInSandbox(SHARE_SAFE_ID_SRC + "\n" + MISSION_ACTIONS_SRC + "\n" + DETAIL_SRC + "\nthis.__x = { gcCampaignDetailHtml, computeSetupChecklist };",
     { esc, ccUtcToKlDisplay, gcPill }).__x;
 }
 const D = loadDetail();
