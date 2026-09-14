@@ -1187,19 +1187,15 @@ def call_bot_in_loop(coro, timeout=15):
     return fut.result(timeout=timeout)
 
 def _format_mention(u: dict) -> str:
-    """Return a HTML-safe mention for announcements."""
-    user_id = u.get("user_id")
+    """Return a HTML-safe, masked identity for public announcements (no clickable link)."""
     if u.get("username"):
-        label = f"@{u['username']}"
+        label = f"@{mask_username(u['username'])}"
     elif u.get("first_name"):
         label = u["first_name"]
     else:
         label = "player"
 
-    safe_label = html_escape(label)
-    if user_id:
-        return f'<a href="tg://user?id={int(user_id)}">{safe_label}</a>'
-    return safe_label
+    return html_escape(label)
 
 def _announce_text(u: dict, which: str, value: int) -> str:
     who = _format_mention(u)
