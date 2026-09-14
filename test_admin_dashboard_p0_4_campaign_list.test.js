@@ -149,7 +149,9 @@ function missionPoolCampaign(overrides) {
   }, overrides || {});
 }
 
-const activeProvider = { provider_id: "mywin", name: "MyWin Tournament Site", active: true };
+// base_url included (P0.17 §C) — an active provider with no base_url is a
+// distinct, incomplete-destination case these fixtures don't intend to test.
+const activeProvider = { provider_id: "mywin", name: "MyWin Tournament Site", active: true, base_url: "https://mywin.example.com" };
 
 // ---------------------------------------------------------------------
 // 1. Row content — name / human type / status / dates / setup / Manage,

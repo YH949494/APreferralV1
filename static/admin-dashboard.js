@@ -5747,6 +5747,24 @@
       '</div>';
   }
 
+  // P0.17 §B — a legacy (or otherwise telegram-block-less) campaign has
+  // runtime subscription enforcement default to ON (campaign_centre.
+  // play_campaign: `telegram_cfg.get("require_subscription", True)`), but a
+  // naive `campaign.telegram && campaign.telegram.require_subscription`
+  // read (`undefined` -> falsy) shows OFF — an admin sees the switch
+  // unchecked while every player is actually gated. This mirrors that exact
+  // runtime default so Campaign Detail can never disagree with it.
+  function cdEffectiveRequireSubscription(campaign) {
+    var telegram = (campaign || {}).telegram;
+    var raw = telegram ? telegram.require_subscription : undefined;
+    return raw === undefined || raw === null ? true : !!raw;
+  }
+
+  function cdHasConfiguredChannel(campaign) {
+    var telegram = (campaign || {}).telegram || {};
+    return !!(telegram.channel_id || (telegram.channel_username || "").trim());
+  }
+
   // ---- Pure checklist derivation --------------------------------------
   //
   // Returns an ordered array of { key, label, applicable, required,
@@ -5862,15 +5880,28 @@
     if (destinationApplicable) {
       var dest = campaign.destination || {};
       var provider = gcFindProvider(providers, dest.provider_id || "");
+      var providerUsable = !!(provider && provider.active && provider.base_url);
       var summary2;
       if (!dest.provider_id) summary2 = "No destination set";
       else if (!provider) summary2 = "Linked provider not found";
       else if (!provider.active) summary2 = provider.name + " (inactive)";
+      // P0.17 §C3 — an active provider with no base_url can never resolve a
+      // player-open URL (campaign_providers.build_effective_url returns
+      // None), so it must never read as a complete/usable destination just
+      // because it's active.
+      else if (!provider.base_url) summary2 = provider.name + " — no destination URL configured";
       else if (!dest.ready) summary2 = provider.name + " — not marked ready";
       else summary2 = provider.name;
       rows.push({
         key: "destination", label: "Where users go", applicable: true, required: true,
-        complete: !!(dest.ready && provider && provider.active), summary: summary2, actionTarget: "destination",
+        complete: !!(dest.ready && providerUsable), summary: summary2, actionTarget: "destination",
+        // P0.17 §B — legacy-telegram-less truth: warn here (not just inside
+        // the editor) whenever runtime's effective subscription default is
+        // ON and no channel is configured to satisfy it, so this shows even
+        // while the row is collapsed/read-only.
+        subscriptionWarning: (cdEffectiveRequireSubscription(campaign) && !cdHasConfiguredChannel(campaign))
+          ? "Players are currently blocked because channel subscription is required but no channel is configured."
+          : null,
       });
     }
 
@@ -6035,6 +6066,14 @@
     if (reason === "destination.ready is false") return "Destination setup is incomplete.";
     if (reason === "linked provider does not exist") return "The selected provider no longer exists.";
     if (reason === "linked provider is inactive") return "The selected provider is inactive.";
+    // P0.17 §C3/§G — active provider with no usable base_url.
+    if (reason === "The selected provider has no usable destination URL.") return "The selected provider has no destination URL configured.";
+    // P0.17 §G — registration's own channel-subscription gate has no
+    // channel to satisfy it (legacy data predating the save-time guard —
+    // see campaign_centre._validate_body).
+    if (reason === "registration requires channel subscription but no channel is configured") {
+      return "Registration requires channel subscription, but no channel is configured.";
+    }
     return "Campaign is not currently visible to players.";
   }
 
@@ -6048,7 +6087,17 @@
   // side on every canonical GET, so this catches a provider/destination
   // going stale (e.g. deactivated in another tab) between page loads even
   // when the locally-cached providers list and checklist still look green.
-  var GC_PUBLISH_BLOCKING_REASONS = ["destination.ready is false", "linked provider does not exist", "linked provider is inactive"];
+  // "registration requires channel subscription but no channel is
+  // configured" is deliberately NOT in this list: campaign_centre._transition
+  // never gates publish on it for a registration-only campaign (only
+  // _validate_body's save-time guard, P0.17 §A, prevents a FUTURE save from
+  // creating it) — adding it here would block a Publish click the backend
+  // would actually accept, the exact mismatch this list exists to prevent.
+  // It still surfaces in visibility_explanation/Preview (§G) since that
+  // answers a different question ("is this actually usable"), not "would
+  // Publish succeed".
+  var GC_PUBLISH_BLOCKING_REASONS = ["destination.ready is false", "linked provider does not exist",
+    "linked provider is inactive", "The selected provider has no usable destination URL."];
 
   function gcServerPublishBlockReason(campaign) {
     var reasons = ((campaign || {}).effective_visibility || {}).reasons || [];
@@ -6428,6 +6477,16 @@
     var dest = campaign.destination || {};
     var telegram = campaign.telegram || {};
     var hasProviders = !!(providers || []).length;
+    // P0.17 §B — the checkbox must reflect the same effective default the
+    // player-facing runtime actually applies (ON when the telegram block
+    // is missing/incomplete), never a raw `telegram.require_subscription`
+    // read that shows OFF for `undefined`. Saving always writes an explicit
+    // boolean either way (see cdSaveSection's destination case below), so
+    // opening and re-saving this form is itself part of the repair path.
+    var effectiveRequireSub = cdEffectiveRequireSubscription(campaign);
+    var legacyWarning = (effectiveRequireSub && !cdHasConfiguredChannel(campaign))
+      ? '<div class="sub" style="color:var(--bad);margin-bottom:8px;">Players are currently blocked because channel subscription is required but no channel is configured. Add a channel username below, or turn the switch off.</div>'
+      : "";
     return '<div style="margin-top:8px;display:grid;gap:10px;max-width:420px;">' +
       cdDestinationProviderBlockHtml(providers, dest) +
       (hasProviders ? (
@@ -6437,8 +6496,9 @@
         cdOpenModeOptionsHtml(campaign.type, dest.open_mode || "telegram_web_app") + '</select></label>'
       ) : "") +
       '<div style="border-top:1px solid var(--border);padding-top:10px;">' +
-      '<label style="font-size:12px;display:flex;align-items:center;gap:6px;"><input type="checkbox" id="cd-edit-tg-require-sub"' + (telegram.require_subscription ? " checked" : "") + ' /> Require channel subscription</label>' +
-      '<div id="cd-edit-tg-channel-wrap" style="margin-top:8px;' + (telegram.require_subscription ? "" : "display:none;") + '">' +
+      legacyWarning +
+      '<label style="font-size:12px;display:flex;align-items:center;gap:6px;"><input type="checkbox" id="cd-edit-tg-require-sub"' + (effectiveRequireSub ? " checked" : "") + ' /> Require channel subscription</label>' +
+      '<div id="cd-edit-tg-channel-wrap" style="margin-top:8px;' + (effectiveRequireSub ? "" : "display:none;") + '">' +
       '<label style="font-size:12px;">Channel username<br/><input class="filter-input" id="cd-edit-tg-channel-username" style="width:100%;margin-top:4px;box-sizing:border-box;" value="' + esc(telegram.channel_username || "") + '" placeholder="AdvantPlayOfficial" /></label>' +
       '</div></div>' +
       cdFieldError("destination") +
@@ -6680,7 +6740,10 @@
             ? '<div style="margin-left:20px;margin-top:6px;"><button class="btn" data-cd-goto="' + esc(row.actionTarget) + '">' + esc(gcChecklistActionLabel(row)) + '</button></div>'
             : "";
         }
-        body = '<div class="sub" style="margin-top:4px;margin-left:20px;">' + esc(row.summary || "") + '</div>' + actionBtn;
+        var warningHtml = row.subscriptionWarning
+          ? '<div class="sub" style="margin-top:4px;margin-left:20px;color:var(--bad);">' + esc(row.subscriptionWarning) + '</div>'
+          : "";
+        body = '<div class="sub" style="margin-top:4px;margin-left:20px;">' + esc(row.summary || "") + '</div>' + warningHtml + actionBtn;
       }
       return '<div class="section" style="margin-bottom:10px;padding:12px 14px;" data-cd-row="' + esc(row.key) + '">' +
         '<div style="display:flex;align-items:baseline;gap:8px;">' + icon + '<strong>' + esc(row.label) + '</strong></div>' +
@@ -7608,6 +7671,10 @@
       // Pause actions get the same guarantees without a second
       // GC_ACTION_ERROR_MESSAGES-style dictionary living in mission-admin.js.
       runAction: gcRunAction,
+      // P0.17 §E — same reasoning, for the raw-code leaks P0.15 didn't cover:
+      // Mission Admin's own create/save/edit paths call this directly with a
+      // bare backend code (not gcRunAction's {res} shape).
+      errorMessage: gcErrorMessageForCode,
     });
     mod.load();
   }
@@ -7770,6 +7837,18 @@
     return fallback || "Couldn't complete this action. Try again.";
   }
 
+  // P0.17 §E — same lookup as gcActionErrorMessage but keyed off a bare code
+  // string rather than a {res} wrapper, exposed to mission-admin.js as
+  // `host.errorMessage` (see loadMissionPool's mod.init call below) so its
+  // own save/edit/create-then-publish error paths can map a raw
+  // gc_campaigns backend code (missing_starts_at, mission_pool_disabled,
+  // not_found, ...) to the exact same friendly text Campaign Detail already
+  // shows, without a second GC_ACTION_ERROR_MESSAGES-style map living in
+  // mission-admin.js.
+  function gcErrorMessageForCode(code, fallback) {
+    return gcActionErrorMessage({ d: { code: code } }, fallback);
+  }
+
   // Refreshes whichever canonical view is currently showing this campaign
   // — never hardwired only to the Campaigns list DOM, so the same helper
   // stays correct if a future Campaign Detail action routes through it too.
@@ -7792,12 +7871,21 @@
   // (if given) is disabled for the duration; a rejected/non-"ok" response
   // always shows a friendly error and NEVER a success toast or repaint;
   // the returned promise never rejects (so this can never become an
-  // unhandled rejection no matter what `run()` does); and the campaign_id
-  // +action key can't run twice concurrently.
+  // unhandled rejection no matter what `run()` does); and the id+action key
+  // can't run twice concurrently. `id` is just an in-flight-guard key and
+  // gcDefaultRefresh input — it works for any admin entity id, not only a
+  // campaign_id (P0.17 §D reuses this same choke point for provider_id
+  // actions, with `refresh: false` since gcDefaultRefresh only knows about
+  // gc_campaigns views). `opts.errorMessage`, when given, replaces the
+  // default gcActionErrorMessage/GC_ACTION_ERROR_MESSAGES lookup — needed
+  // because a provider's own codes (e.g. "not_found") mean something
+  // different from a campaign's identically-named code, so they can never
+  // share one flat map.
   function gcRunAction(opts) {
     var key = opts.id + ":" + opts.action;
     if (gcActionsInFlight[key]) return Promise.resolve();
     gcActionsInFlight[key] = true;
+    var errorMessage = opts.errorMessage || gcActionErrorMessage;
 
     function finish() {
       delete gcActionsInFlight[key];
@@ -7813,7 +7901,7 @@
       if (opts.button) btnStart(opts.button, opts.loadingText || "Working...");
       return Promise.resolve().then(opts.run).then(function (res) {
         if (!res || !res.ok || !res.d || res.d.status !== "ok") {
-          toast("❌ " + gcActionErrorMessage(res, opts.fallbackError), "error");
+          toast("❌ " + errorMessage(res, opts.fallbackError), "error");
           return;
         }
         var msg = typeof opts.successMessage === "function" ? opts.successMessage(res.d) : opts.successMessage;
@@ -8795,7 +8883,12 @@
   // reads/writes the same gc_campaigns.registration block via the existing
   // Campaign Centre update path — no second config storage mechanism) ----------
 
-  var crCfgState = { campaignId: null, loaded: false, campaignName: null, formReady: false };
+  // telegramChannelId mirrors Campaign Detail's cd-edit-tg editor: preserved
+  // untouched (never exposed as a control here — see crCfgWriteForm), and
+  // consulted client-side so a channel_id already on file also satisfies
+  // "require official channel" without a channel_username, same rule
+  // campaign_centre._validate_body enforces server-side.
+  var crCfgState = { campaignId: null, loaded: false, campaignName: null, formReady: false, telegramChannelId: null };
 
   function crCfgReadForm() {
     var requiredFields = [];
@@ -8817,12 +8910,23 @@
 
   // reg is undefined/null for a campaign with no registration config yet —
   // renders the same disabled-by-default backend defaults in that case.
-  function crCfgWriteForm(reg) {
+  // `telegram` (campaign.telegram, also undefined/null for a legacy/new
+  // campaign) supplies the channel username — registration.
+  // require_channel_subscription can only ever be satisfied by a channel
+  // configured on the sibling telegram block, never a field of its own
+  // (campaign_registration.py has no channel storage), so this screen must
+  // read/write both, exactly like Campaign Detail's destination editor.
+  function crCfgWriteForm(reg, telegram) {
     reg = reg || {};
+    telegram = telegram || {};
+    crCfgState.telegramChannelId = telegram.channel_id != null ? telegram.channel_id : null;
     $("#cr-cfg-enabled").checked = !!reg.enabled;
     $("#cr-cfg-miniapp-visible").checked = reg.miniapp_visible !== false;
     $("#cr-cfg-modal-enabled").checked = reg.modal_enabled !== false;
     $("#cr-cfg-require-channel").checked = !!reg.require_channel_subscription;
+    $("#cr-cfg-channel-username").value = telegram.channel_username || "";
+    var channelWrap = $("#cr-cfg-channel-wrap");
+    if (channelWrap) channelWrap.classList.toggle("hidden", !reg.require_channel_subscription);
     $("#cr-cfg-reminder-hours").value = reg.reminder_hours || 24;
     $("#cr-cfg-base-entries").value = (reg.base_entries !== undefined && reg.base_entries !== null) ? reg.base_entries : 1;
     var required = reg.required_fields || ["full_name", "contact_number", "country_region", "delivery_address"];
@@ -8870,7 +8974,7 @@
     api("/api/admin/gc-campaigns/" + campaignId).then(function (r) {
       if (crCfgState.campaignId !== campaignId) return; // superseded by a later selection
       crCfgState.campaignName = (r.campaign || {}).name || campaignId;
-      crCfgWriteForm((r.campaign || {}).registration);
+      crCfgWriteForm((r.campaign || {}).registration, (r.campaign || {}).telegram);
       crCfgUpdateDeepLink(campaignId);
       crCfgState.formReady = true;
       if (empty) empty.classList.add("hidden");
@@ -8894,18 +8998,64 @@
     var select = $("#cr-cfg-campaign-select");
     if (select) select.addEventListener("change", function () { crCfgOnCampaignSelected(select.value); });
 
+    document.addEventListener("change", function (e) {
+      if (e.target && e.target.id === "cr-cfg-require-channel") {
+        var channelWrap = $("#cr-cfg-channel-wrap");
+        if (channelWrap) channelWrap.classList.toggle("hidden", !e.target.checked);
+      }
+    });
+
     var saveBtn = $("#cr-cfg-save-btn");
     if (saveBtn) saveBtn.addEventListener("click", function () {
       var campaignId = crCfgState.campaignId;
       if (!campaignId) return;
+      var registration = crCfgReadForm();
+      var channelUsername = (($("#cr-cfg-channel-username") || {}).value || "").trim();
+      // Client-side mirror of campaign_centre._validate_body's cross-block
+      // subscription_channel_required guard — a channel_id already on file
+      // (never exposed here, see crCfgWriteForm) also satisfies it, same as
+      // Campaign Detail's destination editor (P0.14) and the backend.
+      if (registration.require_channel_subscription && !channelUsername && !crCfgState.telegramChannelId) {
+        toast("❌ " + GC_ACTION_ERROR_MESSAGES.subscription_channel_required, "error");
+        return;
+      }
       gcRunAction({
         id: campaignId, action: "registration-save", button: saveBtn,
         loadingText: "Saving...",
-        run: function () { return apiPutJson("/api/admin/gc-campaigns/" + campaignId, { registration: crCfgReadForm() }); },
+        // Read-merge-PUT: re-fetch the canonical campaign right before
+        // saving (never trust the possibly-stale copy this form loaded
+        // with), copy its complete registration/telegram blocks, and
+        // override only the fields this screen actually edits —
+        // registration wholesale (this form is its one full editor) and
+        // telegram.channel_username, preserving channel_id/require_subscription
+        // untouched. Never a partial telegram fragment (P0.17 §A2).
+        run: function () {
+          return api("/api/admin/gc-campaigns/" + campaignId).then(function (latestResp) {
+            var latest = (latestResp || {}).campaign || {};
+            var latestTelegram = latest.telegram || {};
+            var telegram = {
+              require_identity: latestTelegram.require_identity !== false,
+              // Codex review (P0.17): `!!latestTelegram.require_subscription`
+              // coerces an absent/legacy field to `false`, but the player
+              // runtime's actual default is `true` (see
+              // cdEffectiveRequireSubscription, Part B) — a bare boolean
+              // coercion here would silently disable an existing legacy
+              // campaign's subscription gate on every unrelated Registration
+              // Configuration save.
+              require_subscription: cdEffectiveRequireSubscription(latest),
+              channel_id: latestTelegram.channel_id != null ? latestTelegram.channel_id : null,
+              channel_username: channelUsername,
+            };
+            return apiPutJson("/api/admin/gc-campaigns/" + campaignId, { registration: registration, telegram: telegram });
+          });
+        },
         successMessage: "Registration settings saved.",
         fallbackError: "Couldn't save registration settings. Try again.",
         refresh: false,
-        onSuccess: function () { loadCampaignRegistrationConfigOptions(); },
+        onSuccess: function () {
+          loadCampaignRegistrationConfigOptions();
+          crCfgOnCampaignSelected(campaignId);
+        },
       });
     });
 
@@ -9826,12 +9976,47 @@
     }).catch(function (e) { statePanel("gc-providers-body", "error", "Failed to load providers: " + e.message); });
   }
 
+  // P0.17 §D — Providers admin screen hardening. campaign_providers.py's own
+  // codes, some of which collide by name with a DIFFERENT gc_campaigns
+  // meaning in GC_ACTION_ERROR_MESSAGES (e.g. "not_found" there means "this
+  // campaign no longer exists") — a provider needs its own map, never a
+  // shared flat one keyed only by code string.
+  var GC_PROVIDER_ERROR_MESSAGES = {
+    missing_provider_id: "Enter a provider ID.",
+    missing_name: "Enter a provider name.",
+    invalid_type: "Choose a valid provider type.",
+    invalid_base_url: "Enter a valid HTTPS Base URL.",
+    duplicated_trailing_slash: "Remove the extra trailing slash from the Base URL.",
+    invalid_url_mode: "Choose a valid URL mode.",
+    invalid_auth_mode: "Choose a valid auth mode.",
+    invalid_allowed_campaign_types: "Check the allowed campaign types.",
+    duplicate_provider_id: "A provider with this ID already exists.",
+    provider_base_url_required: "Add a Base URL before activating this provider.",
+    secret_not_configured: "Configure the provider's secret before activating it.",
+    not_found: "This provider no longer exists.",
+  };
+
+  // Mirrors gcActionErrorMessage's exact contract (never a raw snake_case
+  // code, logs an unmapped-but-present one) — campaign_providers._validate_body's
+  // invalid_allowed_campaign_types:<types> suffix is stripped before lookup.
+  function gcProviderErrorMessage(res, fallback) {
+    var code = res && res.d && res.d.code;
+    if (code) {
+      var base = String(code).split(":")[0];
+      if (GC_PROVIDER_ERROR_MESSAGES[base]) return GC_PROVIDER_ERROR_MESSAGES[base];
+      try { console.error("[gc-provider] unmapped backend code:", code); } catch (e) {}
+    }
+    return fallback || "Couldn't save the provider. Try again.";
+  }
+
   function bindGcProviders() {
     var createBtn = $("#gc-create-provider-btn");
     if (createBtn) {
       createBtn.addEventListener("click", function () {
+        var providerId = ($("#gc-p-id").value || "").trim();
+        if (!providerId) { toast("❌ " + GC_PROVIDER_ERROR_MESSAGES.missing_provider_id, "error"); return; }
         var body = {
-          provider_id: ($("#gc-p-id").value || "").trim(),
+          provider_id: providerId,
           name: ($("#gc-p-name").value || "").trim(),
           type: $("#gc-p-type").value,
           base_url: ($("#gc-p-base-url").value || "").trim(),
@@ -9839,10 +10024,18 @@
           secret_env_var: ($("#gc-p-secret-env").value || "").trim(),
         };
         body.allowed_campaign_types = [body.type];
-        apiPostJson("/api/admin/providers", body).then(function (res) {
-          if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "create_failed"), "error"); return; }
-          toast("✅ Provider created (inactive)", "success");
-          loadGcProviders(true);
+        // Reuses gcRunAction — the same in-flight-guard/button-disable/
+        // no-unhandled-rejection choke point every gc_campaigns action
+        // already goes through — rather than the old bare apiPostJson call
+        // with a hand-rolled `res.d.code` toast and no double-submit guard.
+        gcRunAction({
+          id: providerId, action: "provider-create", button: createBtn,
+          loadingText: "Creating...",
+          refresh: false, invalidateCache: false,
+          errorMessage: gcProviderErrorMessage,
+          run: function () { return apiPostJson("/api/admin/providers", body); },
+          successMessage: "Provider created (inactive).",
+          onSuccess: function () { loadGcProviders(true); },
         });
       });
     }
@@ -9850,7 +10043,22 @@
       var btn = e.target && e.target.closest && e.target.closest("[data-gcp-action]");
       if (!btn) return;
       var action = btn.dataset.gcpAction, id = btn.dataset.id;
-      apiPost("/api/admin/providers/" + id + "/" + action).then(function (r) { if (r.status !== "ok") toast("❌ " + r.code, "error"); loadGcProviders(true); });
+      // P0.17 §D1 — this used to be a bare apiPost() call: non-2xx throws
+      // `new Error("HTTP 400")` and there was no .catch() at this call
+      // site, so activating/deactivating a provider that the backend
+      // rejected (e.g. provider_base_url_required) failed completely
+      // silently. gcRunAction fixes all three: friendly error, an
+      // in-flight guard so a double click can't fire the request twice,
+      // and the button disabled for the duration.
+      gcRunAction({
+        id: id, action: action, button: btn,
+        loadingText: "Working...",
+        refresh: false, invalidateCache: false,
+        errorMessage: gcProviderErrorMessage,
+        run: function () { return apiPostJson("/api/admin/providers/" + id + "/" + action); },
+        successMessage: action === "activate" ? "Provider activated." : "Provider deactivated.",
+        onSuccess: function () { loadGcProviders(true); },
+      });
     });
     document.addEventListener("click", function (e) {
       var backBtn = e.target && e.target.closest && e.target.closest("[data-gcp-back-to-campaign]");

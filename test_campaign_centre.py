@@ -29,7 +29,12 @@ def _campaign(**overrides):
 
 
 def _provider(**overrides):
-    base = {"provider_id": "mywin-tournament", "active": True, "type": "tournament"}
+    # base_url included by default (P0.17 §C) — an active provider with no
+    # base_url is exactly the broken configuration this PR closes, so tests
+    # that want THAT case pass base_url="" explicitly rather than relying on
+    # the default fixture to represent a usable provider.
+    base = {"provider_id": "mywin-tournament", "active": True, "type": "tournament",
+            "base_url": "https://tournament.example.com"}
     base.update(overrides)
     return base
 
@@ -91,6 +96,12 @@ def test_destination_not_ready_absent():
 def test_inactive_provider_absent():
     c = _campaign()
     assert cc.is_publicly_active(c, _provider(active=False)) is False
+
+
+def test_active_provider_with_no_base_url_absent():
+    """Codex review (P0.17 §C): active-only is not enough."""
+    c = _campaign()
+    assert cc.is_publicly_active(c, _provider(base_url="")) is False
 
 
 def test_missing_provider_absent():
@@ -388,6 +399,22 @@ def test_active_endpoint_hides_draft_and_returns_only_live(fake_db):
     body = resp.get_json()
     ids = [c["campaign_id"] for c in body["campaigns"]]
     assert ids == ["live-one"]
+
+
+def test_active_endpoint_hides_live_campaign_whose_active_provider_has_no_base_url(fake_db):
+    """Codex review (P0.17 §C): an active provider with no usable base_url
+    must never appear in /api/campaigns/active — build_effective_url would
+    return None and every player-open 404s with campaign_unavailable, even
+    though provider_is_usable_for_results (active-only) alone would have
+    let it through."""
+    fake_db["gc_providers"].insert_one(_provider(base_url=""))
+    fake_db["gc_campaigns"].insert_one(_campaign(campaign_id="no-url-live", status="live"))
+
+    client = _app().test_client()
+    resp = client.get("/api/campaigns/active")
+    body = resp.get_json()
+    ids = [c["campaign_id"] for c in body["campaigns"]]
+    assert ids == []
 
 
 def test_active_endpoint_empty_when_nothing_active(fake_db):
@@ -759,6 +786,200 @@ def test_update_route_rejects_invalid_subscription_config(fake_db):
     assert resp.get_json()["code"] == "subscription_channel_required"
     doc = fake_db["gc_campaigns"].find_one({"campaign_id": "c-tg3"})
     assert doc["telegram"]["require_subscription"] is False  # unchanged — rejected write never lands
+
+
+# ---------------------------------------------------------------------------
+# P0.17 §A — registration.require_channel_subscription can only ever be
+# satisfied by the SIBLING telegram block's channel — cross-block validation
+# in _validate_body, correct on create, on a partial update touching either
+# side alone, and reusing subscription_channel_required (never a second
+# overlapping code).
+# ---------------------------------------------------------------------------
+
+def test_registration_channel_gate_rejected_on_create_with_no_channel():
+    updates, code = cc._validate_body({
+        "name": "Lucky Draw", "type": "external_website",
+        "schedule": {"starts_at": datetime.now(timezone.utc).isoformat()},
+        "registration": {"enabled": True, "require_channel_subscription": True},
+    })
+    assert updates is None
+    assert code == "subscription_channel_required"
+
+
+def test_registration_channel_gate_accepted_with_channel_username():
+    updates, code = cc._validate_body({
+        "name": "Lucky Draw", "type": "external_website",
+        "schedule": {"starts_at": datetime.now(timezone.utc).isoformat()},
+        "telegram": {"channel_username": "AdvantPlayOfficial"},
+        "registration": {"enabled": True, "require_channel_subscription": True},
+    })
+    assert code is None
+    assert updates["registration"]["require_channel_subscription"] is True
+
+
+def test_registration_channel_gate_accepted_with_channel_id():
+    updates, code = cc._validate_body({
+        "name": "Lucky Draw", "type": "external_website",
+        "schedule": {"starts_at": datetime.now(timezone.utc).isoformat()},
+        "telegram": {"channel_id": -100123456, "require_subscription": True},
+        "registration": {"enabled": True, "require_channel_subscription": True},
+    })
+    assert code is None
+
+
+def test_registration_channel_gate_explicit_false_never_requires_a_channel():
+    updates, code = cc._validate_body({
+        "name": "Lucky Draw", "type": "external_website",
+        "schedule": {"starts_at": datetime.now(timezone.utc).isoformat()},
+        "registration": {"enabled": True, "require_channel_subscription": False},
+    })
+    assert code is None
+
+
+def test_registration_channel_gate_partial_update_uses_canonical_telegram_sibling(fake_db):
+    """PUT updates only `registration` — the validator must consult the
+    EXISTING telegram block from the canonical stored document, never
+    pretend it's empty just because this request didn't submit it."""
+    from unittest.mock import patch
+
+    fake_db["gc_campaigns"].insert_one(_campaign(
+        campaign_id="reg-partial", type="external_website",
+        telegram={"require_identity": True, "require_subscription": True,
+                  "channel_id": None, "channel_username": "advantplayofficial"},
+        registration={"enabled": False, "require_channel_subscription": False},
+    ))
+    admin_app = Flask(__name__)
+    admin_app.register_blueprint(cc.campaign_centre_bp)
+    client = admin_app.test_client()
+    with patch("vouchers.require_admin", return_value=({"id": 1}, None)):
+        # Only registration is submitted — telegram (with its channel) must
+        # still be read from the canonical doc, not treated as absent.
+        resp = client.put("/api/admin/gc-campaigns/reg-partial",
+                           json={"registration": {"enabled": True, "require_channel_subscription": True}})
+    assert resp.status_code == 200, resp.get_json()
+    doc = fake_db["gc_campaigns"].find_one({"campaign_id": "reg-partial"})
+    assert doc["registration"]["require_channel_subscription"] is True
+    assert doc["telegram"]["channel_username"] == "advantplayofficial"  # untouched sibling preserved
+
+
+def test_registration_channel_gate_partial_update_rejected_without_canonical_channel(fake_db):
+    """PUT updates only `registration`, but the canonical telegram block has
+    no channel — must be rejected before publish, never silently saved."""
+    from unittest.mock import patch
+
+    fake_db["gc_campaigns"].insert_one(_campaign(
+        campaign_id="reg-partial-bad", type="external_website",
+        telegram={"require_identity": True, "require_subscription": False,
+                  "channel_id": None, "channel_username": ""},
+        registration={"enabled": False, "require_channel_subscription": False},
+    ))
+    admin_app = Flask(__name__)
+    admin_app.register_blueprint(cc.campaign_centre_bp)
+    client = admin_app.test_client()
+    with patch("vouchers.require_admin", return_value=({"id": 1}, None)):
+        resp = client.put("/api/admin/gc-campaigns/reg-partial-bad",
+                           json={"registration": {"enabled": True, "require_channel_subscription": True}})
+    assert resp.status_code == 400
+    assert resp.get_json()["code"] == "subscription_channel_required"
+    doc = fake_db["gc_campaigns"].find_one({"campaign_id": "reg-partial-bad"})
+    assert doc["registration"]["enabled"] is False  # rejected write never lands
+
+
+def test_registration_channel_gate_partial_telegram_update_uses_canonical_registration(fake_db):
+    """The reverse direction: PUT updates only `telegram` (removing the
+    channel) while registration's own gate (saved earlier) is still on —
+    must also be rejected, using the canonical registration block."""
+    from unittest.mock import patch
+
+    fake_db["gc_campaigns"].insert_one(_campaign(
+        campaign_id="reg-partial-tg", type="external_website",
+        telegram={"require_identity": True, "require_subscription": True,
+                  "channel_id": None, "channel_username": "advantplayofficial"},
+        registration={"enabled": True, "require_channel_subscription": True},
+    ))
+    admin_app = Flask(__name__)
+    admin_app.register_blueprint(cc.campaign_centre_bp)
+    client = admin_app.test_client()
+    with patch("vouchers.require_admin", return_value=({"id": 1}, None)):
+        resp = client.put("/api/admin/gc-campaigns/reg-partial-tg",
+                           json={"telegram": {"require_subscription": False}})
+    assert resp.status_code == 400
+    assert resp.get_json()["code"] == "subscription_channel_required"
+
+
+def test_registration_disabled_never_requires_a_channel_even_if_flag_is_set():
+    """registration.enabled is false — the gate is dormant, so no channel is
+    required regardless of require_channel_subscription's stored value."""
+    updates, code = cc._validate_body({
+        "name": "Lucky Draw", "type": "external_website",
+        "schedule": {"starts_at": datetime.now(timezone.utc).isoformat()},
+        "registration": {"enabled": False, "require_channel_subscription": True},
+    })
+    assert code is None
+
+
+# ---------------------------------------------------------------------------
+# P0.17 §C — active provider with no usable base_url must never let a
+# campaign publish, and visibility_explanation must say so honestly.
+# ---------------------------------------------------------------------------
+
+def test_visibility_explanation_flags_active_provider_with_no_base_url():
+    c = _campaign()
+    explanation = cc.visibility_explanation(c, _provider(base_url=""))
+    assert explanation["publicly_visible"] is False
+    assert "The selected provider has no usable destination URL." in explanation["reasons"]
+
+
+def test_visibility_explanation_flags_registration_channel_gate_without_channel():
+    c = _campaign(registration={"enabled": True, "require_channel_subscription": True},
+                   telegram={"require_identity": True, "require_subscription": False,
+                             "channel_id": None, "channel_username": ""})
+    explanation = cc.visibility_explanation(c, _provider())
+    assert explanation["publicly_visible"] is False
+    assert "registration requires channel subscription but no channel is configured" in explanation["reasons"]
+
+
+def test_publish_blocked_when_active_provider_has_no_base_url(fake_db):
+    from unittest.mock import patch
+
+    fake_db["gc_providers"].insert_one({"provider_id": "p-nourl", "active": True, "type": "tournament", "base_url": ""})
+    admin_app = Flask(__name__)
+    admin_app.register_blueprint(cc.campaign_centre_bp)
+    client = admin_app.test_client()
+    with patch("vouchers.require_admin", return_value=({"id": 1}, None)):
+        client.post("/api/admin/gc-campaigns", json={
+            "campaign_id": "no-url-camp", "name": "No URL", "type": "tournament",
+            "schedule": {"starts_at": datetime.now(timezone.utc).isoformat()},
+            "destination": {"provider_id": "p-nourl", "open_mode": "telegram_web_app", "path": "/x", "ready": True},
+            "reward_config": {"rules": [{"rule_id": "r1", "condition_type": "rank",
+                                          "params": {"min_rank": 1, "max_rank": 1}, "pool_id": "gold"}]},
+        })
+        resp = client.post("/api/admin/gc-campaigns/no-url-camp/publish")
+    assert resp.status_code == 400
+    assert resp.get_json()["code"] == "provider_base_url_required"
+    doc = fake_db["gc_campaigns"].find_one({"campaign_id": "no-url-camp"})
+    assert doc["status"] == "draft"  # never actually went live
+
+
+def test_publish_succeeds_once_provider_has_a_valid_base_url(fake_db):
+    from unittest.mock import patch
+
+    fake_db["gc_providers"].insert_one({"provider_id": "p-url", "active": True, "type": "tournament",
+                                         "base_url": "https://tournament.example.com"})
+    admin_app = Flask(__name__)
+    admin_app.register_blueprint(cc.campaign_centre_bp)
+    client = admin_app.test_client()
+    with patch("vouchers.require_admin", return_value=({"id": 1}, None)):
+        client.post("/api/admin/gc-campaigns", json={
+            "campaign_id": "has-url-camp", "name": "Has URL", "type": "tournament",
+            "schedule": {"starts_at": datetime.now(timezone.utc).isoformat()},
+            "destination": {"provider_id": "p-url", "open_mode": "telegram_web_app", "path": "/x", "ready": True},
+            "reward_config": {"rules": [{"rule_id": "r1", "condition_type": "rank",
+                                          "params": {"min_rank": 1, "max_rank": 1}, "pool_id": "gold"}]},
+        })
+        resp = client.post("/api/admin/gc-campaigns/has-url-camp/publish")
+    assert resp.status_code == 200
+    assert resp.get_json()["campaign_status"] == "live"
 
 
 # ---------------------------------------------------------------------------

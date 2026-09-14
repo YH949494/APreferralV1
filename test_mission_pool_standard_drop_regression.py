@@ -114,7 +114,7 @@ def test_legacy_campaigns_without_mechanic_still_list_as_active(fake_db):
         "destination": {"provider_id": "p1", "open_mode": "telegram_web_app", "ready": True},
         "telegram": {"require_identity": True, "require_subscription": True, "channel_username": "c"},
     })
-    fake_db["gc_providers"].insert_one({"provider_id": "p1", "active": True, "type": "tournament"})
+    fake_db["gc_providers"].insert_one({"provider_id": "p1", "active": True, "type": "tournament", "base_url": "https://tournament.example.com"})
 
     with _cc_app().test_client() as client:
         body = client.get("/api/campaigns/active").get_json()
@@ -145,7 +145,7 @@ def test_mission_campaigns_never_appear_in_the_standard_active_listing(fake_db):
 # ---------------------------------------------------------------------------
 
 def test_existing_campaign_types_still_validate_and_publish(fake_db):
-    fake_db["gc_providers"].insert_one({"provider_id": "p1", "active": True, "type": "tournament"})
+    fake_db["gc_providers"].insert_one({"provider_id": "p1", "active": True, "type": "tournament", "base_url": "https://tournament.example.com"})
     now = datetime.now(timezone.utc)
     payload = {
         "campaign_id": "t-1", "name": "Tourney", "type": "tournament",
@@ -171,7 +171,7 @@ def test_existing_campaign_types_still_validate_and_publish(fake_db):
 
 
 def test_tournament_publish_gate_still_requires_reward_rules(fake_db):
-    fake_db["gc_providers"].insert_one({"provider_id": "p1", "active": True, "type": "tournament"})
+    fake_db["gc_providers"].insert_one({"provider_id": "p1", "active": True, "type": "tournament", "base_url": "https://tournament.example.com"})
     now = datetime.now(timezone.utc)
     with _cc_app().test_client() as client, _admin():
         client.post("/api/admin/gc-campaigns", json={
@@ -185,7 +185,7 @@ def test_tournament_publish_gate_still_requires_reward_rules(fake_db):
 
 
 def test_tournament_publish_gate_still_requires_a_ready_destination(fake_db):
-    fake_db["gc_providers"].insert_one({"provider_id": "p1", "active": True, "type": "tournament"})
+    fake_db["gc_providers"].insert_one({"provider_id": "p1", "active": True, "type": "tournament", "base_url": "https://tournament.example.com"})
     now = datetime.now(timezone.utc)
     with _cc_app().test_client() as client, _admin():
         client.post("/api/admin/gc-campaigns", json={
@@ -451,7 +451,7 @@ def test_duplicating_a_finished_mission_resets_all_processing_state(fake_db):
 def test_duplicating_a_tournament_campaign_is_unchanged(fake_db):
     """The reset is scoped to mission campaigns; tournament duplication keeps
     behaving exactly as before."""
-    fake_db["gc_providers"].insert_one({"provider_id": "p1", "active": True, "type": "tournament"})
+    fake_db["gc_providers"].insert_one({"provider_id": "p1", "active": True, "type": "tournament", "base_url": "https://tournament.example.com"})
     now = datetime.now(timezone.utc)
     with _cc_app().test_client() as client, _admin():
         client.post("/api/admin/gc-campaigns", json={

@@ -67,7 +67,10 @@ def _campaign(**overrides):
 
 
 def _provider(**overrides):
-    base = {"provider_id": "prov-1", "active": True, "type": "tournament"}
+    # base_url included by default (P0.17 §C) — these tests exercise the
+    # bulk-provider-lookup query shape, not provider destination usability.
+    base = {"provider_id": "prov-1", "active": True, "type": "tournament",
+            "base_url": "https://tournament.example.com"}
     base.update(overrides)
     return base
 

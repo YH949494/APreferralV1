@@ -43,7 +43,7 @@ def _campaign():
 
 def test_verify_emits_subscription_pass_event(fake_db):
     fake_db["gc_campaigns"].insert_one(_campaign())
-    fake_db["gc_providers"].insert_one({"provider_id": "ext-site", "active": True})
+    fake_db["gc_providers"].insert_one({"provider_id": "ext-site", "active": True, "base_url": "https://ext-site.example.com"})
 
     with patch("vouchers.verify_telegram_init_data", return_value=(True, {"user": '{"id": 111}'}, "ok")), \
          patch("subscription_gate.verify_campaign_subscription", return_value={"subscribed": True, "reason": "member"}):
@@ -61,7 +61,7 @@ def test_verify_emits_subscription_pass_event(fake_db):
 
 def test_verify_never_returns_voucher_code(fake_db):
     fake_db["gc_campaigns"].insert_one(_campaign())
-    fake_db["gc_providers"].insert_one({"provider_id": "ext-site", "active": True})
+    fake_db["gc_providers"].insert_one({"provider_id": "ext-site", "active": True, "base_url": "https://ext-site.example.com"})
     with patch("vouchers.verify_telegram_init_data", return_value=(True, {"user": '{"id": 111}'}, "ok")), \
          patch("subscription_gate.verify_campaign_subscription", return_value={"subscribed": False, "reason": "left"}):
         resp = _app().test_client().post("/api/integrations/subscription/verify", json={

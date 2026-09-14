@@ -1,7 +1,14 @@
 """Tests for campaign_providers.py: UID deep-link URL building and
 validation. No initData/signed-token logic is expected in Phase 1."""
 
+from unittest.mock import patch
+
+import pytest
+from flask import Flask
+
 import campaign_providers as cp
+import database
+from fake_mongo import FakeDb
 
 
 def _provider(**overrides):
@@ -81,3 +88,146 @@ def test_provider_secret_never_hardcoded_reads_from_env(monkeypatch):
 def test_provider_secret_missing_env_var_returns_empty():
     provider = {"secret_env_var": ""}
     assert cp.provider_secret(provider) == ""
+
+
+# ---------------------------------------------------------------------------
+# P0.17 §C — provider_has_valid_destination: the shared usability rule an
+# active provider must satisfy to ever serve a player-facing destination.
+# Distinct from provider_is_usable_for_results (active-only, used for
+# server-to-server result crediting/HMAC verification — see
+# tournament_rewards.py/tournament_integration.py, unaffected by base_url).
+# ---------------------------------------------------------------------------
+
+def test_provider_has_valid_destination_requires_base_url_even_when_active():
+    assert cp.provider_has_valid_destination({"active": True, "base_url": ""}) is False
+    assert cp.provider_has_valid_destination({"active": True}) is False
+
+
+def test_provider_has_valid_destination_true_for_active_with_https_base_url():
+    assert cp.provider_has_valid_destination({"active": True, "base_url": "https://tournament.example.com"}) is True
+
+
+def test_provider_has_valid_destination_false_when_inactive_even_with_base_url():
+    assert cp.provider_has_valid_destination({"active": False, "base_url": "https://tournament.example.com"}) is False
+
+
+def test_provider_has_valid_destination_false_for_none():
+    assert cp.provider_has_valid_destination(None) is False
+
+
+# ---------------------------------------------------------------------------
+# P0.17 §C1/§C2 — provider activation guard: an inactive/draft provider may
+# be saved without a base_url, but activation must reject one.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def fake_db(monkeypatch):
+    fdb = FakeDb(unique_keys_by_collection={"gc_providers": [("provider_id",)]})
+    monkeypatch.setattr(database, "db", fdb)
+    monkeypatch.setattr(cp, "database", database)
+    return fdb
+
+
+def _app():
+    app = Flask(__name__)
+    app.register_blueprint(cp.campaign_providers_bp)
+    return app
+
+
+def _admin():
+    return patch("vouchers.require_admin", return_value=({"id": 1}, None))
+
+
+def test_create_allows_blank_base_url_for_a_draft_inactive_provider(fake_db):
+    with _app().test_client() as client, _admin():
+        resp = client.post("/api/admin/providers", json={
+            "provider_id": "draft-1", "name": "Draft Provider", "type": "tournament",
+            "base_url": "", "auth_mode": "none",
+        })
+    assert resp.status_code == 201
+    doc = fake_db["gc_providers"].find_one({"provider_id": "draft-1"})
+    assert doc["active"] is False
+    assert doc["base_url"] == ""
+
+
+def test_activation_rejected_without_base_url(fake_db):
+    fake_db["gc_providers"].insert_one({
+        "provider_id": "draft-2", "name": "Draft", "type": "tournament",
+        "base_url": "", "auth_mode": "none", "active": False,
+    })
+    with _app().test_client() as client, _admin():
+        resp = client.post("/api/admin/providers/draft-2/activate")
+    assert resp.status_code == 400
+    assert resp.get_json()["code"] == "provider_base_url_required"
+    doc = fake_db["gc_providers"].find_one({"provider_id": "draft-2"})
+    assert doc["active"] is False  # never actually activated
+
+
+def test_activation_accepted_with_valid_https_base_url(fake_db):
+    fake_db["gc_providers"].insert_one({
+        "provider_id": "ready-1", "name": "Ready", "type": "tournament",
+        "base_url": "https://tournament.example.com", "auth_mode": "none", "active": False,
+    })
+    with _app().test_client() as client, _admin():
+        resp = client.post("/api/admin/providers/ready-1/activate")
+    assert resp.status_code == 200
+    doc = fake_db["gc_providers"].find_one({"provider_id": "ready-1"})
+    assert doc["active"] is True
+
+
+def test_update_rejects_blanking_base_url_on_an_already_active_provider(fake_db):
+    """Codex review (P0.17 §C): the activation guard alone doesn't cover
+    this — an already-active provider must not be updatable to a blank
+    base_url either, or every campaign it's linked to silently goes
+    unusable without the provider ever being deactivated."""
+    fake_db["gc_providers"].insert_one({
+        "provider_id": "live-1", "name": "Live", "type": "tournament",
+        "base_url": "https://tournament.example.com", "auth_mode": "none", "active": True,
+    })
+    with _app().test_client() as client, _admin():
+        resp = client.put("/api/admin/providers/live-1", json={"base_url": ""})
+    assert resp.status_code == 400
+    assert resp.get_json()["code"] == "provider_base_url_required"
+    doc = fake_db["gc_providers"].find_one({"provider_id": "live-1"})
+    assert doc["base_url"] == "https://tournament.example.com"  # rejected write never lands
+
+
+def test_update_allows_blanking_base_url_on_an_inactive_provider(fake_db):
+    """The guard is scoped to active providers only — a draft/inactive one
+    may still be freely edited, including back to a blank base_url."""
+    fake_db["gc_providers"].insert_one({
+        "provider_id": "draft-3", "name": "Draft", "type": "tournament",
+        "base_url": "https://tournament.example.com", "auth_mode": "none", "active": False,
+    })
+    with _app().test_client() as client, _admin():
+        resp = client.put("/api/admin/providers/draft-3", json={"base_url": ""})
+    assert resp.status_code == 200
+    doc = fake_db["gc_providers"].find_one({"provider_id": "draft-3"})
+    assert doc["base_url"] == ""
+
+
+def test_update_allows_other_fields_on_an_active_provider_without_touching_base_url(fake_db):
+    fake_db["gc_providers"].insert_one({
+        "provider_id": "live-2", "name": "Live", "type": "tournament",
+        "base_url": "https://tournament.example.com", "auth_mode": "none", "active": True,
+    })
+    with _app().test_client() as client, _admin():
+        resp = client.put("/api/admin/providers/live-2", json={"name": "Renamed"})
+    assert resp.status_code == 200
+    doc = fake_db["gc_providers"].find_one({"provider_id": "live-2"})
+    assert doc["name"] == "Renamed"
+    assert doc["base_url"] == "https://tournament.example.com"
+
+
+def test_activation_rejected_when_hmac_secret_missing_even_with_base_url(fake_db):
+    """Pre-existing secret_not_configured guard must keep working alongside
+    the new base_url guard — neither one silently supersedes the other."""
+    fake_db["gc_providers"].insert_one({
+        "provider_id": "no-secret", "name": "No Secret", "type": "tournament",
+        "base_url": "https://tournament.example.com", "auth_mode": "hmac_sha256",
+        "secret_env_var": "", "active": False,
+    })
+    with _app().test_client() as client, _admin():
+        resp = client.post("/api/admin/providers/no-secret/activate")
+    assert resp.status_code == 400
+    assert resp.get_json()["code"] == "secret_not_configured"
