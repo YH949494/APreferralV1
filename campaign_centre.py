@@ -224,7 +224,13 @@ def is_publicly_active(campaign: dict, provider: dict | None, now: datetime | No
     if not destination.get("ready"):
         return False
 
-    if not provider or not provider_is_usable_for_results(provider):
+    # Codex review (P0.17 §C): provider_is_usable_for_results only checks
+    # `active` — a live campaign linked to an active provider with no/invalid
+    # base_url would still pass this and appear in /api/campaigns/active,
+    # even though build_effective_url returns None and every player-open
+    # 404s with campaign_unavailable. provider_has_valid_destination is the
+    # one shared rule that actually answers "can this be opened".
+    if not provider or not provider_has_valid_destination(provider):
         return False
 
     return True

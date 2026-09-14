@@ -89,7 +89,11 @@ const ACTION_SRC = slice(
 // listener), loadGcProviders, GC_PROVIDER_ERROR_MESSAGES,
 // gcProviderErrorMessage, bindGcProviders.
 const PROVIDER_SRC = slice(JS, "  var gcProvidersBackCampaignId = null;", "\n  function loadGcResults(force) {");
-const ACTION_AND_PROVIDER_SRC = ACTION_SRC + "\n" + PROVIDER_SRC;
+// crCfg's save handler calls cdEffectiveRequireSubscription directly (Codex
+// review fix) — it's declared in the PURE_SRC range, well before
+// ACTION_SRC's own start marker, so it must be spliced in separately.
+const EFFECTIVE_SUB_SRC = slice(JS, "  function cdEffectiveRequireSubscription(campaign) {", "\n  // ---- Pure checklist derivation");
+const ACTION_AND_PROVIDER_SRC = EFFECTIVE_SUB_SRC + "\n" + ACTION_SRC + "\n" + PROVIDER_SRC;
 
 function loadPure() {
   return runInSandbox(PROVIDER_LABEL_SRC + "\n" + KL_SRC + "\n" + PURE_SRC + "\nthis.__x = { " +
@@ -463,6 +467,42 @@ test("Registration Configuration save: sends both registration and telegram, pre
   assert.equal(body.telegram.channel_username, "AdvantPlayOfficial");
   assert.equal(body.telegram.channel_id, -100999, "channel_id must be preserved untouched, never blanked");
   assert.equal(body.telegram.require_subscription, false, "the sibling require_subscription flag must be preserved untouched");
+});
+
+test("Registration Configuration save: a legacy campaign with require_subscription ABSENT preserves the effective ON default, never coerces to false", async () => {
+  // Codex review (P0.17): `!!latestTelegram.require_subscription` reads
+  // `undefined` as `false`, but the player runtime's actual default is
+  // `true` — this must never silently disable an existing legacy
+  // campaign's subscription gate via an unrelated Registration
+  // Configuration save.
+  const { sandbox, dom, calls, apiQueue, apiPostJsonQueue } = loadActionAndProviderSandbox();
+  sandbox.crCfgState.campaignId = "legacy-camp";
+  sandbox.bindCampaignRegistrationConfig();
+
+  dom.node("#cr-cfg-enabled").checked = true;
+  dom.node("#cr-cfg-require-channel").checked = false;
+  dom.node("#cr-cfg-channel-username").value = "";
+  dom.node("#cr-cfg-reminder-hours").value = "24";
+  dom.node("#cr-cfg-base-entries").value = "1";
+  dom.node("#cr-cfg-audience-scope").value = "all";
+  dom.node("#cr-cfg-audience-regions").value = "";
+  dom.node("#cr-cfg-shipping-scope").value = "all";
+  dom.node("#cr-cfg-shipping-regions").value = "";
+
+  apiQueue.push({
+    status: "ok",
+    // No `telegram` block at all — the legacy case.
+    campaign: { campaign_id: "legacy-camp" },
+  });
+  apiPostJsonQueue.push({ ok: true, status: 200, d: { status: "ok" } });
+
+  dom.fire("#cr-cfg-save-btn", "click");
+  await flush();
+
+  assert.equal(calls.apiPutJson.length, 1);
+  const body = plain(calls.apiPutJson[0].body);
+  assert.equal(body.telegram.require_subscription, true,
+    "must preserve the runtime's effective ON default, never coerce an absent field to false");
 });
 
 test("Registration Configuration save: blocked client-side when requiring a channel with none configured and no channel_id on file", async () => {

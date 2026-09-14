@@ -9035,7 +9035,14 @@
             var latestTelegram = latest.telegram || {};
             var telegram = {
               require_identity: latestTelegram.require_identity !== false,
-              require_subscription: !!latestTelegram.require_subscription,
+              // Codex review (P0.17): `!!latestTelegram.require_subscription`
+              // coerces an absent/legacy field to `false`, but the player
+              // runtime's actual default is `true` (see
+              // cdEffectiveRequireSubscription, Part B) — a bare boolean
+              // coercion here would silently disable an existing legacy
+              // campaign's subscription gate on every unrelated Registration
+              // Configuration save.
+              require_subscription: cdEffectiveRequireSubscription(latest),
               channel_id: latestTelegram.channel_id != null ? latestTelegram.channel_id : null,
               channel_username: channelUsername,
             };

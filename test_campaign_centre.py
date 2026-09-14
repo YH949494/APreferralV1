@@ -98,6 +98,12 @@ def test_inactive_provider_absent():
     assert cc.is_publicly_active(c, _provider(active=False)) is False
 
 
+def test_active_provider_with_no_base_url_absent():
+    """Codex review (P0.17 §C): active-only is not enough."""
+    c = _campaign()
+    assert cc.is_publicly_active(c, _provider(base_url="")) is False
+
+
 def test_missing_provider_absent():
     c = _campaign()
     assert cc.is_publicly_active(c, None) is False
@@ -393,6 +399,22 @@ def test_active_endpoint_hides_draft_and_returns_only_live(fake_db):
     body = resp.get_json()
     ids = [c["campaign_id"] for c in body["campaigns"]]
     assert ids == ["live-one"]
+
+
+def test_active_endpoint_hides_live_campaign_whose_active_provider_has_no_base_url(fake_db):
+    """Codex review (P0.17 §C): an active provider with no usable base_url
+    must never appear in /api/campaigns/active — build_effective_url would
+    return None and every player-open 404s with campaign_unavailable, even
+    though provider_is_usable_for_results (active-only) alone would have
+    let it through."""
+    fake_db["gc_providers"].insert_one(_provider(base_url=""))
+    fake_db["gc_campaigns"].insert_one(_campaign(campaign_id="no-url-live", status="live"))
+
+    client = _app().test_client()
+    resp = client.get("/api/campaigns/active")
+    body = resp.get_json()
+    ids = [c["campaign_id"] for c in body["campaigns"]]
+    assert ids == []
 
 
 def test_active_endpoint_empty_when_nothing_active(fake_db):

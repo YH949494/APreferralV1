@@ -79,15 +79,18 @@ def provider_is_usable_for_results(provider: dict | None) -> bool:
 
 
 # Distinct from provider_is_usable_for_results on purpose: that check gates
-# server-to-server result crediting/HMAC verification (tournament_rewards.py,
-# tournament_integration.py) AND subscription_verification_api's
-# is_publicly_active check — none of which build a destination URL and so
-# have no base_url requirement at all. THIS check is the one shared rule for
-# "can this provider actually serve as a campaign's player-facing
-# destination" — active AND a base_url build_effective_url can use — reused
-# by campaign_centre's publish gate (_transition) and admin
-# visibility_explanation so a Published/Visible campaign can never mean
-# campaign_unavailable at player-open time (P0.17 §C).
+# server-to-server result crediting/HMAC verification only
+# (tournament_rewards.py, tournament_integration.py), which never builds a
+# destination URL and so has no base_url requirement at all. THIS check is
+# the one shared rule for "can this provider actually serve as a campaign's
+# player-facing destination" — active AND a base_url build_effective_url can
+# use — reused by campaign_centre's publish gate (_transition), public
+# visibility (is_publicly_active — also relied on by
+# subscription_verification_api, since that campaign type still needs a
+# working "Play" destination even though its own verify endpoint doesn't
+# call build_effective_url itself), and admin visibility_explanation, so a
+# Published/Visible campaign can never mean campaign_unavailable at
+# player-open time (P0.17 §C).
 def provider_has_valid_destination(provider: dict | None) -> bool:
     if not provider_is_usable_for_results(provider):
         return False
@@ -270,6 +273,14 @@ def update_provider(provider_id: str):
     updates, code = _validate_body(body, partial=True)
     if code:
         return jsonify({"status": "error", "code": code}), 400
+    # Codex review (P0.17 §C): _validate_body accepts a blank base_url (a
+    # draft/inactive provider may legitimately have none yet), and this
+    # endpoint never touches `active` — so without this check, an ALREADY
+    # active provider could be PUT with base_url="" and keep serving live
+    # campaigns whose destination just silently went unusable. The
+    # activation guard alone doesn't cover this path.
+    if doc.get("active") and "base_url" in updates and not _valid_https_url((updates.get("base_url") or "").strip()):
+        return jsonify({"status": "error", "code": "provider_base_url_required"}), 400
     updates["updated_at"] = datetime.now(timezone.utc)
 
     database.db["gc_providers"].update_one({"provider_id": provider_id}, {"$set": updates})
