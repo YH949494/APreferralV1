@@ -562,6 +562,15 @@ def test_insufficient_inventory_produces_pending_inventory(fake_db):
     winners_before = {e["telegram_user_id"] for e in fake_db[mp.ENTRIES_COLLECTION].find(
         {"campaign_id": CAMPAIGN_ID, "status": mp.ENTRY_STATUS_WINNER})}
     seed = campaign["mission_pool"]["selection_seed"]
+    draw_id = campaign["mission_pool"]["draw_id"]
+    assert draw_id
+    # The preflight check catches the shortage before any per-entry
+    # allocation is even attempted, so no reward rows exist yet — this is
+    # the "pause the whole pass before drawing any code" behaviour, as
+    # opposed to the per-entry out_of_stock reconciliation path covered by
+    # test_voucher_claimed_but_ledger_not_finalized_is_reconciled_not_reclaimed.
+    assert fake_db["campaign_rewards"].count_documents(
+        {"campaign_id": CAMPAIGN_ID, "category": "mission_pool"}) == 0
 
     # Replenish inventory and resume: SAME draw, SAME winners.
     _seed_pool(fake_db, 5, pool_id=POOL_ID + "-EXTRA")  # unrelated pool: must not matter
@@ -579,10 +588,14 @@ def test_insufficient_inventory_produces_pending_inventory(fake_db):
     assert campaign["mission_pool"]["pending_inventory"] is False
     assert campaign["mission_pool"]["processing_stage"] == mp.STAGE_COMPLETED
     assert campaign["mission_pool"]["selection_seed"] == seed  # no re-draw
-    winners_after = {r["telegram_user_id"] for r in fake_db["campaign_rewards"].find(
-        {"campaign_id": CAMPAIGN_ID, "category": "mission_pool", "status": "assigned"})}
+    assert campaign["mission_pool"]["draw_id"] == draw_id  # same draw_id preserved
+    rewards_after = list(fake_db["campaign_rewards"].find(
+        {"campaign_id": CAMPAIGN_ID, "category": "mission_pool", "status": "assigned"}))
+    winners_after = {r["telegram_user_id"] for r in rewards_after}
     assert winners_after == winners_before
     assert len(winners_after) == 3
+    voucher_codes = [r["voucher_code"] for r in rewards_after]
+    assert len(voucher_codes) == len(set(voucher_codes))  # still unique
 
 
 # ---------------------------------------------------------------------------
@@ -887,3 +900,121 @@ def test_admin_pause_races_automatic_closure_intake_still_locks(fake_db):
     campaign = _campaign(fake_db)
     assert campaign["status"] == "ended"  # still locks at threshold
     assert campaign["mission_pool"]["close_trigger"] == mp.CLOSE_TRIGGER_ENTRY_THRESHOLD
+
+
+# ---------------------------------------------------------------------------
+# Final pre-merge verification round: the remaining required targeted tests
+# ---------------------------------------------------------------------------
+
+def test_repeated_catch_up_does_not_double_count_the_same_entry(fake_db):
+    """_catch_up_random_race must be idempotent: an entry it already graded
+    to QUALIFIED (or DISQUALIFIED) is never re-processed or re-counted by a
+    second call, because it only ever queries entries still at `submitted`."""
+    _seed_random(fake_db, winner_count=1, minimum=1, auto_close=5, armed=True, qualified_live_count=0)
+    fake_db["users"].insert_one({"user_id": 9500})
+    entry_id = _seed_qualified_entry(fake_db, 9500, status=mp.ENTRY_STATUS_SUBMITTED)
+
+    now = datetime.now(timezone.utc)
+    mpp._catch_up_random_race(CAMPAIGN_ID, mp.DEFAULT_ELIGIBILITY_POLICY, 5, now)
+    assert _block(fake_db)["qualified_live_count"] == 1
+    entry = fake_db[mp.ENTRIES_COLLECTION].find_one({"_id": entry_id})
+    assert entry["status"] == mp.ENTRY_STATUS_QUALIFIED
+
+    # Call it again (and again) — the counter must not move, and the entry
+    # must not be touched a second time.
+    mpp._catch_up_random_race(CAMPAIGN_ID, mp.DEFAULT_ELIGIBILITY_POLICY, 5, now)
+    mpp._catch_up_random_race(CAMPAIGN_ID, mp.DEFAULT_ELIGIBILITY_POLICY, 5, now)
+    assert _block(fake_db)["qualified_live_count"] == 1
+    entry_after = fake_db[mp.ENTRIES_COLLECTION].find_one({"_id": entry_id})
+    assert entry_after["status"] == mp.ENTRY_STATUS_QUALIFIED
+    assert entry_after["updated_at"] == entry["updated_at"]  # untouched by the repeats
+
+
+def test_repeated_arm_attempts_do_not_corrupt_the_counter(fake_db):
+    """Multiple concurrent arming workers: only one CAS can ever succeed, so
+    only one caller ever resets/initializes qualified_live_count — a loser
+    must be a clean no-op ('cas_lost'), never a second zero-out or a partial
+    write."""
+    _seed_random(fake_db, winner_count=1, minimum=1, auto_close=5, armed=False, qualified_live_count=0)
+    # Drop straight to an "unarmed but otherwise live" doc, as arm_random_campaign expects.
+    fake_db["gc_campaigns"].update_one(
+        {"campaign_id": CAMPAIGN_ID},
+        {"$set": {"mission_pool.random_armed": False, "mission_pool.random_armed_at": None}},
+    )
+
+    results = _run_concurrently(lambda idx: mpp.arm_random_campaign(CAMPAIGN_ID), 8)
+    armed_results = [r for r in results if r.get("armed")]
+    assert len(armed_results) == 1  # exactly one winner
+
+    campaign = _campaign(fake_db)
+    assert campaign["mission_pool"]["random_armed"] is True
+    assert campaign["mission_pool"]["qualified_live_count"] == 0  # initialized exactly once, never re-zeroed
+
+    # Submitting afterwards still counts normally — the counter was never
+    # left in a corrupted/partial state by the losing callers.
+    app = _app()
+    with app.test_client() as client:
+        resp = _submit(client, 9600)
+    assert resp.status_code == 200
+    assert _block(fake_db)["qualified_live_count"] == 1
+
+
+def test_full_scale_300_400_600_draw_selects_300_unique_winners_with_unique_vouchers(fake_db):
+    """The literal full-scale case: winner_count=300, minimum=400,
+    auto_close=600. The 600th qualified participant locks the mission
+    exactly once, and the draw produces exactly 300 unique winners each
+    with exactly one unique voucher."""
+    _seed_random(fake_db, winner_count=300, minimum=400, auto_close=600, qualified_live_count=0)
+    _seed_pool(fake_db, 300)
+    app = _app()
+
+    with app.test_client() as client:
+        for i in range(599):
+            resp = _submit(client, 20000 + i)
+            assert resp.status_code == 200
+        campaign = _campaign(fake_db)
+        assert campaign["status"] == "live"
+        assert campaign["mission_pool"]["qualified_live_count"] == 599
+
+        # The 600th locks it exactly once.
+        resp = _submit(client, 20000 + 599)
+        assert resp.status_code == 200
+
+    campaign = _campaign(fake_db)
+    assert campaign["status"] == "ended"
+    assert campaign["mission_pool"]["qualified_live_count"] == 600
+    assert campaign["mission_pool"]["close_trigger"] == mp.CLOSE_TRIGGER_ENTRY_THRESHOLD
+
+    # A further submission after lock is cleanly rejected and never counted.
+    with app.test_client() as client:
+        resp = _submit(client, 999999)
+    assert resp.status_code == 409
+    assert _block(fake_db)["qualified_live_count"] == 600
+
+    with _no_telegram():
+        mpp.process_campaign(CAMPAIGN_ID)
+
+    campaign = _campaign(fake_db)
+    assert campaign["mission_pool"]["processing_stage"] == mp.STAGE_COMPLETED
+    assert campaign["mission_pool"]["winner_count_actual"] == 300
+
+    winners = list(fake_db[mp.ENTRIES_COLLECTION].find(
+        {"campaign_id": CAMPAIGN_ID, "status": mp.ENTRY_STATUS_REWARD_ALLOCATED}))
+    non_winners = fake_db[mp.ENTRIES_COLLECTION].count_documents(
+        {"campaign_id": CAMPAIGN_ID, "status": mp.ENTRY_STATUS_NON_WINNER})
+    assert len(winners) == 300
+    assert len({w["telegram_user_id"] for w in winners}) == 300
+    assert non_winners == 300  # 600 qualified - 300 winners
+
+    rewards = list(fake_db["campaign_rewards"].find({"campaign_id": CAMPAIGN_ID, "category": "mission_pool"}))
+    assert len(rewards) == 300
+    voucher_codes = [r["voucher_code"] for r in rewards]
+    assert len(voucher_codes) == len(set(voucher_codes)) == 300
+    assert all(r["status"] == "assigned" for r in rewards)
+
+    summary = fake_db["mission_pool_draw_summaries"].find_one({"campaign_id": CAMPAIGN_ID})
+    assert summary is not None
+    assert summary["winner_count_actual"] == 300
+    assert summary["voucher_count_issued"] == 300
+    assert summary["eligible_participant_count"] == 600
+    assert summary["trigger_type"] == mp.CLOSE_TRIGGER_ENTRY_THRESHOLD
