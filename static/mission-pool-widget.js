@@ -303,6 +303,7 @@
     campaign_not_started: "This mission hasn't started yet.",
     campaign_not_live: "This mission isn't open right now.",
     mission_pool_disabled: "This mission isn't available right now.",
+    mission_full: "Mission full — processing rewards",
   };
 
   function submitErrorText(code) {
@@ -314,6 +315,7 @@
   var RETRY_MSG = "❌ Not quite. Try again.";
   var COOLDOWN_MSG = "❌ Not quite. Please wait a moment before trying again.";
   var EXHAUSTED_MSG = "❌ No more attempts available for this mission.";
+  var MISSION_FULL_MSG = "Mission full — processing rewards";
 
   // ---------------------------------------------------------------------
   // Rendering
@@ -507,6 +509,19 @@
           submitBtn.textContent = "No attempts remaining";
           msg.className = "mp-msg mp-msg-error";
           msg.textContent = EXHAUSTED_MSG;
+          msg.style.display = "block";
+          return;
+        }
+        // Live FCFS capacity mechanic: the mission's winner slots just ran
+        // out. Distinct from `campaign_closed` -- retrying is futile here
+        // (never re-enable the button), and the copy tells the player their
+        // submission arrived too late rather than implying something failed.
+        if (data.status === "error" && data.code === "mission_full") {
+          track("mission_submit_full", { campaign_id: view.campaign_id });
+          submitBtn.disabled = true;
+          submitBtn.textContent = "Mission full";
+          msg.className = "mp-msg mp-msg-error";
+          msg.textContent = MISSION_FULL_MSG;
           msg.style.display = "block";
           return;
         }

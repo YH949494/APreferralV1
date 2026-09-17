@@ -479,6 +479,10 @@ _WORKER_OWNED_MISSION_FIELDS = frozenset({
     "qualified_count", "winner_count_requested", "winner_count_actual",
     "allocation_count", "notification_sent_count", "failure_count",
     "completed_at", "cancelled", "cancelled_at", "closed_at", "updated_at",
+    # Live FCFS capacity mechanic (mission_pool_processor.arm_fcfs_campaign /
+    # try_consume_fcfs_slot). Runtime-owned so an admin PUT can never reset an
+    # armed mission's counters or capacity — see merge_mission_pool_config.
+    "fcfs_armed", "fcfs_capacity", "fcfs_claimed", "fcfs_armed_at",
 })
 
 
@@ -502,6 +506,16 @@ def fresh_mission_pool_processing_state() -> dict:
         "cancelled": False,
         "cancelled_at": None,
         "closed_at": None,
+        # Never armed by default (§ live FCFS capacity mechanic). A campaign
+        # starts (and a duplicate always restarts) with the mechanic
+        # dormant; only mission_pool_processor.arm_fcfs_campaign flips
+        # fcfs_armed to True, and only for a `first_qualified` campaign that
+        # has taken zero submissions so far (see its docstring for why that
+        # is the one safe moment to do so).
+        "fcfs_armed": False,
+        "fcfs_capacity": None,
+        "fcfs_claimed": 0,
+        "fcfs_armed_at": None,
     }
 
 
@@ -572,6 +586,7 @@ REASON_INVALID_SUBMISSION = "invalid_submission"
 REASON_CAMPAIGN_CANCELLED = "campaign_cancelled"
 REASON_SUBMITTED_AFTER_CLOSE = "submitted_after_close"
 REASON_OUT_OF_STOCK = "out_of_stock"
+REASON_MISSION_FULL = "mission_full"
 REASON_OTHER = "other"
 
 DISQUALIFICATION_REASONS = (
@@ -587,6 +602,7 @@ DISQUALIFICATION_REASONS = (
     REASON_CAMPAIGN_CANCELLED,
     REASON_SUBMITTED_AFTER_CLOSE,
     REASON_OUT_OF_STOCK,
+    REASON_MISSION_FULL,
     REASON_OTHER,
 )
 
@@ -682,12 +698,40 @@ def _as_utc(value):
     return None
 
 
+def is_fcfs_armed(campaign: dict | None) -> bool:
+    """True once ``arm_fcfs_campaign`` has activated the live FCFS capacity
+    mechanic on this campaign. Never true for an in-flight FCFS mission that
+    already had submissions before this mechanic existed (see that
+    function's docstring) — those keep the old scheduled-settlement
+    behaviour forever, exactly as ``resolve_mechanic`` keeps a pre-existing
+    campaign on ``standard_drop``."""
+    return bool((campaign or {}).get("mission_pool", {}).get("fcfs_armed"))
+
+
+def _fcfs_capacity_reached(block: dict) -> bool:
+    if not block.get("fcfs_armed"):
+        return False
+    capacity = block.get("fcfs_capacity")
+    if not capacity:
+        return False
+    return int(block.get("fcfs_claimed") or 0) >= int(capacity)
+
+
 def submission_state(campaign: dict | None, now: datetime | None = None) -> tuple[bool, str]:
     """Server-authoritative answer to "may this user submit right now?" (§31).
 
     Interval convention, stated explicitly: ``starts_at <= now < ends_at``.
     A submission that arrives exactly at ``ends_at`` is rejected. Client
-    clocks are never consulted."""
+    clocks are never consulted.
+
+    For an armed FCFS mission, "mission_full" is a distinct reason from
+    "campaign_closed": it is what the Mini App shows as "Mission full —
+    processing rewards" instead of the generic closed copy, and it fires
+    even in the narrow window where ``fcfs_claimed`` has already reached
+    ``fcfs_capacity`` but the guarded close (see
+    ``mission_pool_processor._close_fcfs_intake``) has not yet landed —
+    which is exactly why this is a cheap field comparison rather than a
+    second gate a submitter could slip through."""
     now = now or datetime.now(timezone.utc)
     if not campaign:
         return False, "campaign_not_found"
@@ -702,9 +746,14 @@ def submission_state(campaign: dict | None, now: datetime | None = None) -> tupl
     if status == "paused":
         return False, "campaign_paused"
     if status in ("ended", "archived"):
+        if _fcfs_capacity_reached(block):
+            return False, "mission_full"
         return False, "campaign_closed"
     if status != "live":
         return False, "campaign_not_live"
+
+    if _fcfs_capacity_reached(block):
+        return False, "mission_full"
 
     schedule = campaign.get("schedule") or {}
     starts_at = _as_utc(schedule.get("starts_at"))
@@ -1034,8 +1083,19 @@ def submit_mission(campaign_id: str):
     # inserted but can never be selected or rewarded.
     fresh = database.db["gc_campaigns"].find_one(
         {"campaign_id": campaign_id},
-        projection={"status": 1, "mechanic": 1, "schedule": 1,
-                    "mission_pool.cancelled": 1, "mission_pool.closed_at": 1},
+        projection={
+            "status": 1, "mechanic": 1, "schedule": 1,
+            "mission_pool.cancelled": 1, "mission_pool.closed_at": 1,
+            # The live FCFS capacity mechanic (§ Decision 2/3): these four
+            # fields are all that submission_state()/_fcfs_capacity_reached
+            # need to bounce a submission with "mission_full" the instant
+            # capacity is spent, without a second query. Every campaign that
+            # is not an armed `first_qualified` mission simply has
+            # fcfs_armed falsy and this projection is inert for it.
+            "mission_pool.allocation_method": 1, "mission_pool.fcfs_armed": 1,
+            "mission_pool.fcfs_capacity": 1, "mission_pool.fcfs_claimed": 1,
+            "mission_pool.eligibility_policy": 1,
+        },
     )
     now = datetime.now(timezone.utc)
     open_now, reason = submission_state(fresh, now)
@@ -1043,6 +1103,9 @@ def submit_mission(campaign_id: str):
         _emit("mission_submission_rejected", campaign_id=campaign_id, user_id=uid,
               status="fail", reason=reason, source="miniapp")
         return jsonify({"status": "error", "code": reason}), 409
+
+    fcfs_block = (fresh or {}).get("mission_pool") or {}
+    fcfs_armed = is_fcfs_armed(fresh)
 
     # 9. Retry gate for correct-answer missions (keyword / single_choice /
     # multiple_choice with a configured `correct_answer`). A wrong answer
@@ -1120,7 +1183,7 @@ def submit_mission(campaign_id: str):
 
     # 8. The unique index is the authority — never find_one()-then-insert (§32).
     try:
-        database.db[ENTRIES_COLLECTION].insert_one(doc)
+        insert_result = database.db[ENTRIES_COLLECTION].insert_one(doc)
     except DuplicateKeyError:
         _emit("mission_submission_duplicate", campaign_id=campaign_id, user_id=uid, source="miniapp")
         return jsonify({"status": "ok", "submitted": True, "state": "already_submitted"})
@@ -1132,6 +1195,32 @@ def submit_mission(campaign_id: str):
         logger.exception("[MISSION_POOL] submission_insert_failed campaign=%s uid=%s", campaign_id, uid)
         _emit("mission_submission_error", campaign_id=campaign_id, user_id=uid, status="fail", reason="db_error")
         return jsonify({"status": "error", "code": "internal_error"}), 500
+
+    # 10. Live FCFS capacity mechanic — ONLY for a campaign arm_fcfs_campaign
+    # has already activated (§ Decision: existing in-flight FCFS missions,
+    # and every non-FCFS campaign, never take this branch and are byte-for-
+    # byte unaffected). Bounded work only: one indexed `users` point lookup,
+    # `evaluate_quality_eligibility` (pure), 1-2 indexed identity-claim
+    # writes, and one single-document guarded `$inc` on the campaign. No
+    # voucher inventory is counted here — capacity was cached at arm time.
+    if fcfs_armed:
+        import mission_pool_processor
+
+        entry_for_fcfs = dict(doc)
+        entry_for_fcfs["_id"] = insert_result.inserted_id
+        try:
+            mission_pool_processor.try_consume_fcfs_slot(
+                campaign_id, fcfs_block.get("eligibility_policy") or DEFAULT_ELIGIBILITY_POLICY,
+                int(fcfs_block.get("fcfs_capacity") or 0), entry_for_fcfs, now,
+            )
+        except Exception:
+            # The entry is already durably `submitted`. Whatever failed here,
+            # the ordinary scheduled `_eligibility_pass` still owns deciding
+            # it later — see try_consume_fcfs_slot's docstring for the exact
+            # recovery path per failure point. The player still gets a plain
+            # "submitted" acknowledgement rather than a 500 for an outcome
+            # that will still be decided.
+            logger.exception("[MISSION_FCFS] slot_consumption_failed campaign=%s uid=%s", campaign_id, uid)
 
     _emit("mission_submitted", campaign_id=campaign_id, user_id=uid, source="miniapp")
     return jsonify({"status": "ok", "submitted": True, "state": "submitted"})

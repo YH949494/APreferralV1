@@ -466,6 +466,17 @@ test("a closed campaign rejection is shown without internal codes", async () => 
   assert.ok(findByText(w.root, "This mission has closed."));
 });
 
+test("a full FCFS mission shows dedicated copy and disables retry", async () => {
+  // Live FCFS capacity mechanic: distinct from campaign_closed -- retrying
+  // is futile once the winner slots are gone, so the button must stay
+  // disabled rather than inviting another (also futile) submission.
+  const { w, submit } = await submitWith(() => ({
+    httpOk: false, httpStatus: 409, body: { status: "error", code: "mission_full" },
+  }));
+  assert.ok(findByText(w.root, "Mission full — processing rewards"));
+  assert.equal(submit.disabled, true);
+});
+
 test("submitting nothing is blocked client-side without a request", async () => {
   const w = loadWidget({
     startParam: "mission_m1",
