@@ -846,6 +846,26 @@ def _transition(campaign_id: str, admin: dict, new_status: str, action: str):
         return jsonify({"status": "error", "code": "not_found"}), 404
     _log_audit(action, admin, campaign_id, {"new_status": new_status})
     log_funnel_event(action, campaign_id=campaign_id, campaign_type=doc.get("type"), source="admin")
+
+    # Best-effort activation of the live FCFS capacity mechanic for a
+    # `first_qualified` Mission Pool campaign going live. Never blocks or
+    # fails the publish itself: arm_fcfs_campaign fails closed on any
+    # uncertainty (an inventory read error, a lost CAS, an already in-flight
+    # mission) and simply leaves the campaign on the pre-existing scheduled-
+    # settlement path when it does. A campaign that was already `live`
+    # before it could be armed here is picked up by the scheduler's own
+    # recovery pass (mission_pool_processor._fcfs_maintenance) instead.
+    if new_status == "live" and doc.get("type") in _SELF_REWARDING_TYPES:
+        try:
+            import mission_pool
+            import mission_pool_processor
+
+            if mission_pool.is_mission_pool(doc) and \
+                    (doc.get("mission_pool") or {}).get("allocation_method") == mission_pool.ALLOCATION_FIRST_QUALIFIED:
+                mission_pool_processor.arm_fcfs_campaign(campaign_id)
+        except Exception:
+            logger.warning("[MISSION_FCFS] publish_time_arm_failed campaign=%s", campaign_id, exc_info=True)
+
     return jsonify({"status": "ok", "campaign_status": new_status})
 
 

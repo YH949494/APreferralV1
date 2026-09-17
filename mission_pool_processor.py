@@ -282,6 +282,15 @@ def _log(event: str, **fields) -> None:
     logger.info("[MISSION_POOL][%s] %s", event, parts)
 
 
+def _fcfs_log(event: str, **fields) -> None:
+    """Dedicated log line prefix for the live FCFS capacity mechanic, so an
+    operator can `grep '[MISSION_FCFS]'` for the whole lifecycle of a single
+    armed mission independently of the general Mission Pool log stream.
+    Voucher codes are never logged here — this mechanic never touches one."""
+    parts = " ".join(f"{k}={v}" for k, v in fields.items() if v is not None)
+    logger.info("[MISSION_FCFS] %s %s", event, parts)
+
+
 def _emit(event: str, **kwargs) -> None:
     try:
         from campaign_events import emit_campaign_event
@@ -466,6 +475,347 @@ def evaluate_quality_eligibility(entry: dict, user_doc: dict | None, policy: dic
         return mp.REASON_MISSING_GAMING_ACCOUNT
 
     return None
+
+
+# ---------------------------------------------------------------------------
+# Live FCFS capacity mechanic
+# ---------------------------------------------------------------------------
+#
+# Everything above (identity resolution, the anti-abuse eligibility gate) was
+# built to run only on the worker, well after a mission closes. This section
+# reuses those exact functions — never a re-implementation — to let a
+# `first_qualified` (FCFS) mission close itself the instant its winner slots
+# are gone, instead of only at its scheduled `ends_at`, WITHOUT moving
+# settlement itself onto the request path: the only thing a player request
+# ever does is claim one bounded slot; `process_campaign` still owns every
+# later stage (selection/allocation/notification) untouched.
+#
+# Eligible only once, and only going forward (Decision 1): a FCFS campaign
+# that already has ANY `mission_entries` before this mechanic ever ran on it
+# — i.e. every campaign that was already accepting FCFS submissions before
+# this code shipped — is never armed and keeps using the pre-existing
+# scheduled-settlement path for its entire life. Only a `first_qualified`
+# campaign with zero entries so far (brand new, or live-but-untouched at
+# deploy time) can ever become armed. See `arm_fcfs_campaign`.
+
+def _fcfs_capacity_reached(block: dict) -> bool:
+    if not block.get("fcfs_armed"):
+        return False
+    capacity = block.get("fcfs_capacity")
+    if not capacity:
+        return False
+    return int(block.get("fcfs_claimed") or 0) >= int(capacity)
+
+
+def _close_fcfs_intake(campaign_id: str, now: datetime) -> bool:
+    """Guarded compare-and-set close: only a caller that observes
+    ``status == "live"`` AND ``closed_at`` still unset can flip the
+    transition, so two racing callers (the winning request and a scheduler
+    recovery pass) can never both "win" the close — exactly one `update_one`
+    call actually modifies the document. Once closed, `close_cutoff` /
+    `is_closed_for_processing` (mission_pool.py) make the campaign
+    immediately eligible for the existing processor — no new settlement
+    engine, no change to `find_due_campaigns`."""
+    res = _campaigns().update_one(
+        {"campaign_id": campaign_id, "status": "live", "mission_pool.closed_at": None},
+        {"$set": {"status": "ended", "mission_pool.closed_at": now, "updated_at": now}},
+    )
+    closed = res.modified_count == 1
+    if closed:
+        _fcfs_log("INTAKE_CLOSED", campaign_id=campaign_id)
+    return closed
+
+
+def arm_fcfs_campaign(campaign_id: str, *, now: datetime | None = None) -> dict:
+    """One-time, idempotent activation of the live FCFS capacity mechanic.
+
+    Deliberately never called from the player-facing submission request
+    (Decision: minimize hot-path regression — no `count_documents` of
+    voucher inventory may ever run on `/submit`). Its only two callers are
+    off the request path: `campaign_centre._transition` when an admin
+    publishes a `first_qualified` Mission campaign to `live`, and this
+    module's own scheduler pass (`_fcfs_maintenance`), which backfills any
+    campaign that was already `live` before this mechanic could arm it.
+
+    Guards, in order, and why each is fail-safe (leaves the campaign
+    unarmed and thus on the pre-existing scheduled path — never blocks a
+    submission, never over-allocates):
+
+      * not a Mission Pool / not `first_qualified` / already armed / cancelled
+        / not live / schedule already elapsed -> obviously not eligible.
+      * ANY existing `mission_entries` row for this campaign -> this is an
+        in-flight FCFS mission from before the mechanic existed (Decision 1).
+        `fcfs_claimed` is deliberately never reconstructed from those rows:
+        they have not passed settlement-time quality eligibility, so seeding
+        a counter from them could either under- or over-count real winners.
+      * inventory snapshot raises -> "uncertain inventory state" is failed
+        closed: the campaign is left unarmed rather than armed with a guess.
+      * capacity computes to 0 -> nothing to arm; the scheduled path still
+        settles the mission normally (0 winners is a legitimate outcome
+        `_select_winners` already handles).
+      * the final `update_one` CAS itself only matches while `fcfs_armed` is
+        still not True, so two concurrent callers (a publish action racing
+        this same scheduler tick) can never both arm the same campaign.
+
+    Capacity is `min(winner_count, safe allocatable inventory snapshot)`,
+    computed exactly once here and then treated as immutable: nothing in
+    this codebase ever lowers an armed campaign's `fcfs_capacity`, and
+    `merge_mission_pool_config` (mission_pool.py) refuses to let an admin
+    PUT touch it at all.
+    """
+    now = now or datetime.now(timezone.utc)
+    campaign = _campaign_doc(campaign_id)
+    if not campaign or not mp.is_mission_pool(campaign):
+        return {"armed": False, "reason": "not_a_mission_campaign"}
+
+    block = campaign.get("mission_pool") or {}
+    if block.get("allocation_method") != mp.ALLOCATION_FIRST_QUALIFIED:
+        return {"armed": False, "reason": "not_fcfs"}
+    if block.get("fcfs_armed"):
+        return {"armed": False, "reason": "already_armed"}
+    if block.get("cancelled"):
+        return {"armed": False, "reason": "cancelled"}
+    if campaign.get("status") != "live":
+        return {"armed": False, "reason": "not_live"}
+
+    ends_at = mp._as_utc((campaign.get("schedule") or {}).get("ends_at"))
+    if ends_at is not None and ends_at <= now:
+        return {"armed": False, "reason": "already_elapsed"}
+
+    existing_entries = _entries().count_documents({"campaign_id": campaign_id})
+    if existing_entries:
+        _fcfs_log("ARM_SKIPPED_EXISTING_ENTRIES", campaign_id=campaign_id, entries=existing_entries)
+        return {"armed": False, "reason": "existing_entries"}
+
+    winner_count = int(block.get("winner_count") or 0)
+    pool_id = block.get("pool_id")
+    try:
+        import voucher_pool_service
+
+        available = int(voucher_pool_service.pool_stock(pool_id)["available"]) if pool_id else 0
+    except Exception:
+        logger.warning("[MISSION_FCFS] inventory_snapshot_failed campaign=%s", campaign_id, exc_info=True)
+        return {"armed": False, "reason": "inventory_snapshot_failed"}
+
+    capacity = max(0, min(winner_count, available))
+    if capacity <= 0:
+        _fcfs_log("ARM_SKIPPED_ZERO_CAPACITY", campaign_id=campaign_id,
+                  winner_count=winner_count, available=available)
+        return {"armed": False, "reason": "zero_capacity"}
+
+    res = _campaigns().update_one(
+        {
+            "campaign_id": campaign_id,
+            "status": "live",
+            "mission_pool.allocation_method": mp.ALLOCATION_FIRST_QUALIFIED,
+            "mission_pool.fcfs_armed": {"$ne": True},
+        },
+        {"$set": {
+            "mission_pool.fcfs_armed": True,
+            "mission_pool.fcfs_capacity": capacity,
+            "mission_pool.fcfs_claimed": 0,
+            "mission_pool.fcfs_armed_at": now,
+            "mission_pool.updated_at": now,
+        }},
+    )
+    if res.matched_count != 1:
+        return {"armed": False, "reason": "cas_lost"}
+
+    _fcfs_log("ARMED", campaign_id=campaign_id, capacity=capacity,
+              winner_count=winner_count, available=available)
+    return {"armed": True, "capacity": capacity}
+
+
+def _fcfs_maintenance(now: datetime) -> None:
+    """Cheap, bounded scheduler pass — the authoritative recovery mechanism
+    for the live FCFS mechanic, run once per tick from
+    `run_mission_pool_processor`. Never spawned from a player request.
+
+    Two jobs, both idempotent:
+
+      1. Arm any live `first_qualified` campaign that is not armed yet.
+         Covers both a campaign published before this mechanic existed and
+         one whose publish-time `arm_fcfs_campaign` call failed (e.g. a
+         transient inventory read) — `arm_fcfs_campaign`'s own
+         zero-entries guard is what keeps this from ever touching an
+         in-flight FCFS mission (Decision 1).
+      2. Close intake for any armed campaign whose `fcfs_claimed` already
+         reached `fcfs_capacity` but whose guarded close never landed —
+         the recovery for a worker crashing between the winning `$inc` and
+         its own close attempt (see `try_consume_fcfs_slot`'s docstring).
+         Without this, such a campaign would sit `live` until its
+         (possibly far-off) scheduled `ends_at` instead of settling
+         promptly.
+    """
+    candidates = list(_campaigns().find(
+        {
+            "mechanic": mp.MECHANIC_MISSION_POOL,
+            "mission_pool.allocation_method": mp.ALLOCATION_FIRST_QUALIFIED,
+            "status": "live",
+            "mission_pool.cancelled": {"$ne": True},
+        },
+        limit=200,
+    ))
+    for campaign in candidates:
+        campaign_id = campaign["campaign_id"]
+        block = campaign.get("mission_pool") or {}
+        if not block.get("fcfs_armed"):
+            try:
+                arm_fcfs_campaign(campaign_id, now=now)
+            except Exception:
+                logger.warning("[MISSION_FCFS] arm_recovery_failed campaign=%s", campaign_id, exc_info=True)
+            continue
+
+        if _fcfs_capacity_reached(block) and not block.get("closed_at"):
+            _close_fcfs_intake(campaign_id, now)
+
+
+def try_consume_fcfs_slot(campaign_id: str, policy: dict, capacity: int, entry: dict, now: datetime) -> dict:
+    """Bounded, indexed reduced-eligibility check + atomic slot claim for one
+    freshly-inserted `mission_entries` row on an ARMED `first_qualified`
+    campaign. Called synchronously from the submission hot path
+    (`mission_pool.submit_mission`) — the only work here is a single indexed
+    `users` point lookup, `evaluate_quality_eligibility` (pure, in-process),
+    1-2 indexed identity-claim writes on the existing unique index, and one
+    single-document, filter-guarded `$inc` on `gc_campaigns`. No
+    `count_documents` of voucher inventory, no aggregation: capacity is
+    already a cached int stamped once at arm time.
+
+    Required invariant this enforces: correct + reward-eligible + valid
+    identity may consume exactly one slot; a wrong answer (never reaches
+    here — see submit_mission's retry gate), a quality exclusion, a
+    duplicate identity, or arriving after capacity is exhausted all consume
+    zero.
+
+    FAILURE SEQUENCE and what a crash at each point leaves recoverable —
+    entry -> eligibility -> identity claim -> FCFS slot -> qualified state:
+
+      * crash before this function runs at all -> the entry is durably
+        `submitted` and nothing has been decided; the client's retry (or the
+        existing `already_submitted` duplicate-key branch) is the recovery,
+        and the ordinary scheduled `_eligibility_pass` will still decide it
+        if this call is simply never retried.
+      * crash after the quality gate, before the identity claim -> entry is
+        still `submitted` (its status update happens after, not before);
+        `_eligibility_pass` re-evaluates it from scratch with the identical
+        policy.
+      * crash after a WINNING identity claim, before the `$inc` -> entry
+        stays `submitted` + the identity keys are already claimed for THIS
+        entry_id (the claim insert is idempotent for its owning entry_id —
+        see `_claim_identity`); `_eligibility_pass` finds it `submitted`,
+        re-resolves the same identity and it flows into the normal
+        selection/allocation pipeline. In the narrow window where the
+        campaign has already been capacity-closed by a different racer, this
+        entry can still be picked up by `_select_winners` up to
+        `winner_count` (not `fcfs_capacity`) — an under- rather than
+        over-allocation risk, and `_allocate_for_entry`'s atomic voucher
+        claim is still the final backstop against ever handing out more
+        vouchers than exist.
+      * crash after the `$inc` succeeds, before the entry is marked `winner`
+        -> compensated inline: the `$inc` is undone (`$inc -1`) before the
+        exception propagates, so a slot is never left permanently consumed
+        with no recoverable participant except for an actual process kill
+        between those two statements — the same residual risk any
+        single-document, no-transaction system carries, and it can only
+        ever under-count (capacity_reached simply arrives one submission
+        later), never over-allocate.
+      * crash after marking `winner`, before the guarded close -> self-
+        healing: `_fcfs_maintenance` closes any armed campaign whose
+        `fcfs_claimed >= fcfs_capacity` but whose `closed_at` is still unset,
+        every scheduler tick — the existing scheduler remains the
+        authoritative recovery mechanism, never a request-spawned thread.
+    """
+    entry_id = entry["_id"]
+    uid = int(entry["telegram_user_id"])
+    policy = policy or mp.DEFAULT_ELIGIBILITY_POLICY
+
+    user_doc = _load_users([uid]).get(uid)
+    reason = evaluate_quality_eligibility(entry, user_doc, policy)
+    if reason is not None:
+        _entries().update_one(
+            {"_id": entry_id, "status": mp.ENTRY_STATUS_SUBMITTED},
+            {"$set": {
+                "status": mp.ENTRY_STATUS_DISQUALIFIED,
+                "disqualification_reason": reason,
+                "updated_at": now,
+            }},
+        )
+        _fcfs_log("EXCLUDED", campaign_id=campaign_id, reason=reason)
+        return {"state": "excluded", "reason": reason}
+
+    identity = resolve_identity(user_doc, uid)
+    ok, dup_reason = _claim_identity(campaign_id, entry_id, identity, now)
+    if not ok:
+        _entries().update_one(
+            {"_id": entry_id, "status": mp.ENTRY_STATUS_SUBMITTED},
+            {"$set": {
+                "status": mp.ENTRY_STATUS_DISQUALIFIED,
+                "disqualification_reason": dup_reason,
+                "identity_key": identity["identity_key"],
+                "identity_type": identity["identity_type"],
+                "updated_at": now,
+            }},
+        )
+        _fcfs_log("EXCLUDED", campaign_id=campaign_id, reason=dup_reason)
+        return {"state": "excluded", "reason": dup_reason}
+
+    # The single-document atomic bounded update (Mongo concurrency
+    # invariant): status live, not yet closed, fcfs_claimed < capacity, all
+    # in the filter, with the $inc as the only write. No count -> compare ->
+    # update race is possible — exactly one concurrent caller can ever
+    # observe fcfs_claimed go from capacity-1 to capacity.
+    claim = _campaigns().find_one_and_update(
+        {
+            "campaign_id": campaign_id,
+            "status": "live",
+            "mission_pool.closed_at": None,
+            "mission_pool.fcfs_claimed": {"$lt": capacity},
+        },
+        {"$inc": {"mission_pool.fcfs_claimed": 1}, "$set": {"mission_pool.updated_at": now}},
+        return_document=True,
+    )
+    if not claim:
+        _entries().update_one(
+            {"_id": entry_id, "status": mp.ENTRY_STATUS_SUBMITTED},
+            {"$set": {
+                "status": mp.ENTRY_STATUS_DISQUALIFIED,
+                "disqualification_reason": mp.REASON_MISSION_FULL,
+                "identity_key": identity["identity_key"],
+                "identity_type": identity["identity_type"],
+                "updated_at": now,
+            }},
+        )
+        _fcfs_log("REJECTED_FULL", campaign_id=campaign_id)
+        return {"state": "full"}
+
+    claimed_count = int((claim.get("mission_pool") or {}).get("fcfs_claimed") or 0)
+    try:
+        _entries().update_one(
+            {"_id": entry_id, "status": mp.ENTRY_STATUS_SUBMITTED},
+            {"$set": {
+                "status": mp.ENTRY_STATUS_WINNER,
+                "identity_key": identity["identity_key"],
+                "identity_type": identity["identity_type"],
+                "updated_at": now,
+            }},
+        )
+    except Exception:
+        # Compensate the reservation immediately rather than leave a slot
+        # permanently consumed with no recoverable winner (see docstring).
+        _campaigns().update_one(
+            {"campaign_id": campaign_id},
+            {"$inc": {"mission_pool.fcfs_claimed": -1}, "$set": {"mission_pool.updated_at": now}},
+        )
+        logger.exception("[MISSION_FCFS] winner_mark_failed campaign=%s entry=%s", campaign_id, entry_id)
+        raise
+
+    _fcfs_log("ELIGIBLE_ACCEPTED", campaign_id=campaign_id, claimed=claimed_count, capacity=capacity)
+
+    if claimed_count >= capacity:
+        _fcfs_log("CAPACITY_REACHED", campaign_id=campaign_id, capacity=capacity)
+        _close_fcfs_intake(campaign_id, now)
+
+    return {"state": "winner", "claimed": claimed_count, "capacity": capacity}
 
 
 # ---------------------------------------------------------------------------
@@ -1279,6 +1629,10 @@ def run_mission_pool_processor() -> dict:
         return {"skipped": "disabled"}
 
     started = time.monotonic()
+    try:
+        _fcfs_maintenance(datetime.now(timezone.utc))
+    except Exception:
+        logger.exception("[MISSION_FCFS] maintenance_pass_failed")
     campaign_ids = find_due_campaigns()
     results = []
     for campaign_id in campaign_ids:
