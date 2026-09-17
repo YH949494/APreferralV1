@@ -804,6 +804,37 @@ def _transition(campaign_id: str, admin: dict, new_status: str, action: str):
                 return jsonify({"status": "error", "code": "mission_config_required"}), 400
             if not (doc.get("mission_pool") or {}).get("pool_id"):
                 return jsonify({"status": "error", "code": "mission_pool_config_required"}), 400
+            # Random Pool FULL AUTOMATION (auto_close_qualified_entries
+            # configured): never publish a mission whose configured voucher
+            # inventory is already known to be short of its winner_count (§
+            # Prevent publishing/arming). Scoped to full-auto missions only
+            # — a Random mission that never configured this feature (every
+            # pre-existing one) "remains manual" exactly as the
+            # compatibility constraints require, and keeps publishing
+            # exactly as it always has. FCFS is intentionally unaffected
+            # either way — arm_fcfs_campaign already fails closed on the
+            # identical shortfall without blocking publish, since an FCFS
+            # mission can still legitimately go live and simply never arm
+            # until stock arrives.
+            mp_block = doc.get("mission_pool") or {}
+            import mission_pool
+
+            if (mp_block.get("allocation_method") == mission_pool.ALLOCATION_RANDOM_QUALIFIED
+                    and mp_block.get("auto_close_qualified_entries") is not None):
+                try:
+                    import voucher_pool_service
+
+                    available = int(voucher_pool_service.pool_stock(mp_block.get("pool_id"))["available"])
+                except Exception:
+                    logger.warning("[MISSION_POOL] publish_inventory_check_failed campaign=%s",
+                                    campaign_id, exc_info=True)
+                    available = 0
+                winner_count = int(mp_block.get("winner_count") or 0)
+                if available < winner_count:
+                    return jsonify({
+                        "status": "error", "code": "insufficient_voucher_inventory",
+                        "available": available, "winner_count": winner_count,
+                    }), 400
         else:
             if doc.get("type") in _REWARD_DRIVEN_TYPES and not (doc.get("reward_config") or {}).get("rules"):
                 return jsonify({"status": "error", "code": "reward_rules_required"}), 400
@@ -860,11 +891,18 @@ def _transition(campaign_id: str, admin: dict, new_status: str, action: str):
             import mission_pool
             import mission_pool_processor
 
-            if mission_pool.is_mission_pool(doc) and \
-                    (doc.get("mission_pool") or {}).get("allocation_method") == mission_pool.ALLOCATION_FIRST_QUALIFIED:
-                mission_pool_processor.arm_fcfs_campaign(campaign_id)
+            if mission_pool.is_mission_pool(doc):
+                method = (doc.get("mission_pool") or {}).get("allocation_method")
+                if method == mission_pool.ALLOCATION_FIRST_QUALIFIED:
+                    mission_pool_processor.arm_fcfs_campaign(campaign_id)
+                elif method == mission_pool.ALLOCATION_RANDOM_QUALIFIED:
+                    # Same best-effort, fail-closed contract as FCFS above:
+                    # arm_random_campaign never blocks or fails the publish
+                    # itself, and is a no-op when `auto_close_qualified_entries`
+                    # was never configured (every legacy Random mission).
+                    mission_pool_processor.arm_random_campaign(campaign_id)
         except Exception:
-            logger.warning("[MISSION_FCFS] publish_time_arm_failed campaign=%s", campaign_id, exc_info=True)
+            logger.warning("[MISSION_POOL] publish_time_arm_failed campaign=%s", campaign_id, exc_info=True)
 
     return jsonify({"status": "ok", "campaign_status": new_status})
 

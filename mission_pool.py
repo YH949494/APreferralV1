@@ -400,6 +400,15 @@ ALLOCATION_RANDOM_QUALIFIED = "random_qualified"
 ALLOCATION_FIRST_QUALIFIED = "first_qualified"
 ALLOCATION_METHODS = (ALLOCATION_RANDOM_QUALIFIED, ALLOCATION_FIRST_QUALIFIED)
 
+# Random Pool auto-close/scheduled-close trigger types (§ Completion record).
+# Recorded on `mission_pool.close_trigger` and copied into the draw summary
+# (mission_pool_processor._record_draw_summary) — never inferred after the
+# fact from other fields, so an audit never has to guess why intake closed.
+CLOSE_TRIGGER_ENTRY_THRESHOLD = "ENTRY_THRESHOLD"
+CLOSE_TRIGGER_SCHEDULED_CLOSE = "SCHEDULED_CLOSE"
+CLOSE_TRIGGER_ADMIN_OVERRIDE = "ADMIN_OVERRIDE"
+CLOSE_TRIGGERS = (CLOSE_TRIGGER_ENTRY_THRESHOLD, CLOSE_TRIGGER_SCHEDULED_CLOSE, CLOSE_TRIGGER_ADMIN_OVERRIDE)
+
 # Worker-owned processing stages (§18). Stored under gc_campaigns.mission_pool
 # so the *shared* campaign_centre `status` field keeps its exact existing
 # meaning and a tournament campaign can never transition into one of these.
@@ -459,13 +468,67 @@ def validate_mission_pool_config(raw: dict | None) -> tuple[dict | None, str | N
         return None, "invalid_eligibility_policy"
     policy = {k: bool(policy_raw.get(k, v)) for k, v in DEFAULT_ELIGIBILITY_POLICY.items()}
 
-    return {
+    config: dict = {
         "pool_id": pool_id,
         "pool_type": (raw.get("pool_type") or "voucher_drop").strip(),
         "winner_count": winner_count,
         "allocation_method": allocation_method,
         "eligibility_policy": policy,
-    }, None
+    }
+
+    # --- Random Pool automation (auto-close threshold / scheduled-close
+    # fallback / auto-draw / auto-issue) -----------------------------------
+    # Every field here is OPTIONAL and additive: a campaign that never sets
+    # any of them (every pre-existing Random mission, and every FCFS
+    # mission) gets no key for it in `config` at all, so
+    # merge_mission_pool_config's plain dict.update() leaves the running
+    # mission byte-for-byte on today's schedule-only behaviour — see
+    # mission_pool_processor.arm_random_campaign / _is_full_auto_random.
+    random_fields = ("minimum_qualified_entries", "auto_close_qualified_entries",
+                      "auto_draw", "auto_issue", "entries_per_user")
+    if any(key in raw for key in random_fields) and allocation_method != ALLOCATION_RANDOM_QUALIFIED:
+        return None, "random_pool_fields_require_random_mode"
+
+    if "entries_per_user" in raw:
+        try:
+            entries_per_user = int(raw.get("entries_per_user"))
+        except (TypeError, ValueError):
+            return None, "invalid_entries_per_user"
+        # The one-entry-per-Telegram-user invariant is the DB-level
+        # `ux_mission_entries_campaign_user` unique index (§ Do not
+        # redesign the Mission Pool system) — it cannot be safely raised
+        # without a data-model change, so this is validated, never silently
+        # coerced.
+        if entries_per_user != 1:
+            return None, "entries_per_user_not_supported"
+        config["entries_per_user"] = 1
+
+    minimum = None
+    if raw.get("minimum_qualified_entries") is not None:
+        try:
+            minimum = int(raw.get("minimum_qualified_entries"))
+        except (TypeError, ValueError):
+            return None, "invalid_minimum_qualified_entries"
+        if minimum <= winner_count:
+            return None, "minimum_qualified_entries_must_exceed_winner_count"
+        config["minimum_qualified_entries"] = minimum
+
+    if raw.get("auto_close_qualified_entries") is not None:
+        try:
+            auto_close = int(raw.get("auto_close_qualified_entries"))
+        except (TypeError, ValueError):
+            return None, "invalid_auto_close_qualified_entries"
+        floor = minimum if minimum is not None else winner_count
+        if auto_close < floor:
+            return None, "auto_close_qualified_entries_below_minimum"
+        config["auto_close_qualified_entries"] = auto_close
+
+    if "auto_draw" in raw:
+        config["auto_draw"] = bool(raw.get("auto_draw"))
+    if "auto_issue" in raw:
+        config["auto_issue"] = bool(raw.get("auto_issue"))
+
+    return config, None
 
 
 # Fields inside gc_campaigns.mission_pool that belong to the WORKER, not the
@@ -475,14 +538,25 @@ def validate_mission_pool_config(raw: dict | None) -> tuple[dict | None, str | N
 _WORKER_OWNED_MISSION_FIELDS = frozenset({
     "processing_stage", "processing_generation", "processing_owner",
     "processing_lease_expires_at", "processing_claimed_at",
-    "selection_seed", "selection_started_at", "selection_completed_at",
+    "selection_seed", "selection_seed_commitment", "draw_id",
+    "selection_started_at", "selection_completed_at",
     "qualified_count", "winner_count_requested", "winner_count_actual",
     "allocation_count", "notification_sent_count", "failure_count",
     "completed_at", "cancelled", "cancelled_at", "closed_at", "updated_at",
+    "close_trigger",
     # Live FCFS capacity mechanic (mission_pool_processor.arm_fcfs_campaign /
     # try_consume_fcfs_slot). Runtime-owned so an admin PUT can never reset an
     # armed mission's counters or capacity — see merge_mission_pool_config.
     "fcfs_armed", "fcfs_capacity", "fcfs_claimed", "fcfs_armed_at",
+    # Live Random Pool auto-close mechanic (arm_random_campaign /
+    # try_consume_random_qualifying_slot) plus the scheduled-close-fallback
+    # and resumable-issuance bookkeeping it and process_campaign own. An
+    # admin PUT can edit the operator-settable `minimum_qualified_entries` /
+    # `auto_close_qualified_entries` / `auto_draw` / `auto_issue` fields
+    # themselves (they are NOT in this set) but can never reset the live
+    # counters or flags below — exactly the same split FCFS already uses.
+    "random_armed", "random_armed_at", "qualified_live_count",
+    "waiting_for_minimum", "pending_inventory", "inventory_shortage_count",
 })
 
 
@@ -495,6 +569,8 @@ def fresh_mission_pool_processing_state() -> dict:
         "processing_owner": None,
         "processing_lease_expires_at": None,
         "selection_seed": None,
+        "selection_seed_commitment": None,
+        "draw_id": None,
         "selection_started_at": None,
         "selection_completed_at": None,
         "qualified_count": None,
@@ -506,6 +582,7 @@ def fresh_mission_pool_processing_state() -> dict:
         "cancelled": False,
         "cancelled_at": None,
         "closed_at": None,
+        "close_trigger": None,
         # Never armed by default (§ live FCFS capacity mechanic). A campaign
         # starts (and a duplicate always restarts) with the mechanic
         # dormant; only mission_pool_processor.arm_fcfs_campaign flips
@@ -516,6 +593,15 @@ def fresh_mission_pool_processing_state() -> dict:
         "fcfs_capacity": None,
         "fcfs_claimed": 0,
         "fcfs_armed_at": None,
+        # Live Random Pool auto-close mechanic — same "never armed by
+        # default, dormant until arm_random_campaign activates it" contract
+        # as FCFS above. See mission_pool_processor.arm_random_campaign.
+        "random_armed": False,
+        "random_armed_at": None,
+        "qualified_live_count": 0,
+        "waiting_for_minimum": False,
+        "pending_inventory": False,
+        "inventory_shortage_count": 0,
     }
 
 
@@ -715,6 +801,48 @@ def _fcfs_capacity_reached(block: dict) -> bool:
     if not capacity:
         return False
     return int(block.get("fcfs_claimed") or 0) >= int(capacity)
+
+
+def random_pool_lifecycle_status(campaign: dict | None) -> str | None:
+    """Admin-facing lifecycle label for a `random_qualified` mission, DERIVED
+    from existing fields rather than stored as a separate source of truth
+    (so it can never drift from the actual `processing_stage`/`status`/
+    `closed_at` it reads). Returns ``None`` for anything else (FCFS, a
+    standard drop, or a Random mission with no `mission_pool` block).
+
+    Maps onto the spec's OPEN/LOCKED/DRAWING/WINNERS_SELECTED/ISSUING/
+    COMPLETED/WAITING_FOR_MINIMUM/PENDING_INVENTORY/PAUSED/CANCELLED —
+    reusing the existing 8-stage processing pipeline for everything it
+    already covers and adding only the two states genuinely missing from it
+    (``waiting_for_minimum`` / ``pending_inventory``, both worker-owned
+    booleans set by mission_pool_processor)."""
+    if not is_mission_pool(campaign):
+        return None
+    block = (campaign or {}).get("mission_pool") or {}
+    if block.get("allocation_method") != ALLOCATION_RANDOM_QUALIFIED:
+        return None
+    if block.get("cancelled"):
+        return "CANCELLED"
+    if campaign.get("status") == "paused":
+        return "PAUSED"
+    if block.get("pending_inventory"):
+        return "PENDING_INVENTORY"
+    if block.get("waiting_for_minimum"):
+        return "WAITING_FOR_MINIMUM"
+    stage = block.get("processing_stage") or STAGE_PENDING
+    if stage in (STAGE_PENDING,) and not block.get("closed_at"):
+        return "OPEN"
+    if stage in (STAGE_PENDING, STAGE_PROCESSING_ELIGIBILITY, STAGE_QUALIFIED_SNAPSHOT_READY):
+        return "LOCKED"
+    if stage == STAGE_SELECTING_WINNERS:
+        return "DRAWING"
+    if stage == STAGE_WINNERS_SELECTED:
+        return "WINNERS_SELECTED"
+    if stage in (STAGE_ALLOCATING_REWARDS, STAGE_NOTIFYING):
+        return "ISSUING"
+    if stage == STAGE_COMPLETED:
+        return "COMPLETED"
+    return stage.upper()
 
 
 def submission_state(campaign: dict | None, now: datetime | None = None) -> tuple[bool, str]:
@@ -1095,6 +1223,11 @@ def submit_mission(campaign_id: str):
             "mission_pool.allocation_method": 1, "mission_pool.fcfs_armed": 1,
             "mission_pool.fcfs_capacity": 1, "mission_pool.fcfs_claimed": 1,
             "mission_pool.eligibility_policy": 1,
+            # Live Random Pool auto-close mechanic (mirrors the FCFS
+            # projection above): three cheap fields that are inert for
+            # every campaign this mechanic has not armed.
+            "mission_pool.random_armed": 1, "mission_pool.auto_close_qualified_entries": 1,
+            "mission_pool.qualified_live_count": 1,
         },
     )
     now = datetime.now(timezone.utc)
@@ -1106,6 +1239,7 @@ def submit_mission(campaign_id: str):
 
     fcfs_block = (fresh or {}).get("mission_pool") or {}
     fcfs_armed = is_fcfs_armed(fresh)
+    random_armed = bool(fcfs_block.get("random_armed"))
 
     # 9. Retry gate for correct-answer missions (keyword / single_choice /
     # multiple_choice with a configured `correct_answer`). A wrong answer
@@ -1222,6 +1356,27 @@ def submit_mission(campaign_id: str):
             # that will still be decided.
             logger.exception("[MISSION_FCFS] slot_consumption_failed campaign=%s uid=%s", campaign_id, uid)
 
+    # 11. Live Random Pool auto-close mechanic — ONLY for a `random_qualified`
+    # campaign arm_random_campaign has already activated. Mirrors the FCFS
+    # branch above exactly, except the winner is never picked here: the
+    # entry is graded to `qualified` (not `winner`) and only a live COUNT is
+    # incremented, so this never has to select a draw on the request path.
+    if random_armed:
+        import mission_pool_processor
+
+        entry_for_random = dict(doc)
+        entry_for_random["_id"] = insert_result.inserted_id
+        try:
+            mission_pool_processor.try_consume_random_qualifying_slot(
+                campaign_id, fcfs_block.get("eligibility_policy") or DEFAULT_ELIGIBILITY_POLICY,
+                int(fcfs_block.get("auto_close_qualified_entries") or 0), entry_for_random, now,
+            )
+        except Exception:
+            # Same recovery contract as the FCFS branch above: the entry is
+            # already durably `submitted`, and the ordinary scheduled
+            # `_eligibility_pass` still owns deciding it later.
+            logger.exception("[MISSION_RANDOM] slot_consumption_failed campaign=%s uid=%s", campaign_id, uid)
+
     _emit("mission_submitted", campaign_id=campaign_id, user_id=uid, source="miniapp")
     return jsonify({"status": "ok", "submitted": True, "state": "submitted"})
 
@@ -1300,7 +1455,7 @@ def admin_close_mission(campaign_id: str):
     # close never moves the cutoff later and re-admits entries.
     database.db["gc_campaigns"].update_one(
         {"campaign_id": campaign_id, "mission_pool.closed_at": None},
-        {"$set": {"mission_pool.closed_at": now}},
+        {"$set": {"mission_pool.closed_at": now, "mission_pool.close_trigger": CLOSE_TRIGGER_ADMIN_OVERRIDE}},
     )
     database.db["gc_campaigns"].update_one(
         {"campaign_id": campaign_id},
@@ -1377,7 +1532,12 @@ def admin_process_mission(campaign_id: str):
 
     import mission_pool_processor
 
-    result = mission_pool_processor.process_campaign(campaign_id, source="admin")
+    # admin_triggered=True forces past the operator auto_draw/auto_issue
+    # pause gates (§ Pause Auto Draw only ever blocks the SCHEDULER's own
+    # tick) — this is also the "Retry Unresolved Rewards" action. It never
+    # bypasses the minimum_qualified_entries safety gate; only the dedicated
+    # confirmed Draw Now action (admin_draw_now) can do that.
+    result = mission_pool_processor.process_campaign(campaign_id, source="admin", admin_triggered=True)
     _audit("mission_campaign_processed", admin, campaign_id, {"result": result})
     return jsonify({"status": "ok", "result": result})
 
@@ -1456,12 +1616,72 @@ def admin_mission_summary(campaign_id: str):
         "selection": {
             "allocation_method": block.get("allocation_method"),
             "selection_seed_present": bool(block.get("selection_seed")),
+            "draw_id": block.get("draw_id"),
             "selection_started_at": (block.get("selection_started_at").isoformat()
                                       if isinstance(block.get("selection_started_at"), datetime) else None),
             "selection_completed_at": (block.get("selection_completed_at").isoformat()
                                         if isinstance(block.get("selection_completed_at"), datetime) else None),
         },
+        "random_pool": _random_pool_summary(campaign, block),
     })
+
+
+def _random_pool_summary(campaign: dict, block: dict) -> dict | None:
+    """Random Pool admin panel fields (§ Admin UI). ``None`` for anything
+    that is not a `random_qualified` Mission — the admin UI only renders
+    this block when it is present."""
+    if block.get("allocation_method") != ALLOCATION_RANDOM_QUALIFIED:
+        return None
+
+    if block.get("random_armed"):
+        qualified_current = int(block.get("qualified_live_count") or 0)
+    else:
+        qualified_current = database.db[ENTRIES_COLLECTION].count_documents({
+            "campaign_id": campaign["campaign_id"],
+            "status": {"$in": [
+                ENTRY_STATUS_QUALIFIED, ENTRY_STATUS_WINNER, ENTRY_STATUS_NON_WINNER,
+                ENTRY_STATUS_REWARD_ALLOCATING, ENTRY_STATUS_REWARD_ALLOCATED,
+            ]},
+        })
+
+    winner_count = block.get("winner_count")
+    available = issued = None
+    try:
+        import voucher_pool_service
+
+        stock = voucher_pool_service.pool_stock(block.get("pool_id"))
+        available, issued = stock.get("available"), stock.get("issued")
+    except Exception:
+        logger.warning("[MISSION_POOL] inventory_read_failed_for_summary campaign=%s",
+                        campaign.get("campaign_id"), exc_info=True)
+
+    # Only ever computed from the authoritative live qualified count — never
+    # a client-suppliable or precomputed figure (§ Do not expose an exact
+    # probability unless calculated from the authoritative qualified-entry
+    # count).
+    estimated_probability = None
+    if qualified_current and winner_count:
+        estimated_probability = round(min(1.0, int(winner_count) / qualified_current), 4)
+
+    ends_at = (campaign.get("schedule") or {}).get("ends_at")
+    return {
+        "qualified_current": qualified_current,
+        "auto_close_qualified_entries": block.get("auto_close_qualified_entries"),
+        "minimum_qualified_entries": block.get("minimum_qualified_entries"),
+        "winner_count": winner_count,
+        "available_inventory": available,
+        "issued_inventory": issued,
+        "estimated_winning_probability": estimated_probability,
+        "scheduled_close_at": ends_at.isoformat() if isinstance(ends_at, datetime) else None,
+        "lifecycle_status": random_pool_lifecycle_status(campaign),
+        "auto_draw": block.get("auto_draw", True),
+        "auto_issue": block.get("auto_issue", True),
+        "pending_inventory": bool(block.get("pending_inventory")),
+        "inventory_shortage_count": block.get("inventory_shortage_count") or 0,
+        "waiting_for_minimum": bool(block.get("waiting_for_minimum")),
+        "close_trigger": block.get("close_trigger"),
+        "eligible_participant_count": block.get("qualified_count"),
+    }
 
 
 @mission_pool_admin_bp.post("/api/admin/mission-pool/<campaign_id>/end-rewards")
@@ -1527,3 +1747,165 @@ def admin_end_mission_rewards(campaign_id: str):
     _audit("mission_rewards_ended", admin, campaign_id, {"count_affected": affected})
     _emit("mission_rewards_ended", campaign_id=campaign_id, source="admin", count_affected=affected)
     return jsonify({"status": "ok", "ended": True, "count_affected": affected})
+
+
+# ---------------------------------------------------------------------------
+# Random Pool admin actions
+# ---------------------------------------------------------------------------
+
+def _require_random_pool_mission(campaign_id: str):
+    campaign, err = _load_mission_campaign(campaign_id)
+    if err:
+        return None, err
+    if (campaign.get("mission_pool") or {}).get("allocation_method") != ALLOCATION_RANDOM_QUALIFIED:
+        return None, (jsonify({"status": "error", "code": "not_a_random_pool_mission"}), 400)
+    return campaign, None
+
+
+@mission_pool_admin_bp.post("/api/admin/mission-pool/<campaign_id>/pause-auto-draw")
+def admin_pause_auto_draw(campaign_id: str):
+    """Stops the SCHEDULER from automatically advancing this mission past
+    whichever gate (draw / issuance) it has not yet reached. Never touches
+    an already-frozen winner set or an already-issued voucher, and never
+    stops the entry-counting/auto-close intake mechanic itself — pausing
+    means "hold what's already decided", not "stop counting"."""
+    admin, err = _require_admin()
+    if err:
+        return err
+    campaign, err = _require_random_pool_mission(campaign_id)
+    if err:
+        return err
+
+    now = datetime.now(timezone.utc)
+    database.db["gc_campaigns"].update_one(
+        {"campaign_id": campaign_id},
+        {"$set": {
+            "mission_pool.auto_draw": False, "mission_pool.auto_issue": False,
+            "mission_pool.updated_at": now, "updated_at": now,
+        }},
+    )
+    _audit("mission_auto_draw_paused", admin, campaign_id)
+    return jsonify({"status": "ok", "auto_draw": False, "auto_issue": False})
+
+
+@mission_pool_admin_bp.post("/api/admin/mission-pool/<campaign_id>/resume-auto-draw")
+def admin_resume_auto_draw(campaign_id: str):
+    admin, err = _require_admin()
+    if err:
+        return err
+    campaign, err = _require_random_pool_mission(campaign_id)
+    if err:
+        return err
+
+    now = datetime.now(timezone.utc)
+    database.db["gc_campaigns"].update_one(
+        {"campaign_id": campaign_id},
+        {"$set": {
+            "mission_pool.auto_draw": True, "mission_pool.auto_issue": True,
+            "mission_pool.updated_at": now, "updated_at": now,
+        }},
+    )
+    _audit("mission_auto_draw_resumed", admin, campaign_id)
+    return jsonify({"status": "ok", "auto_draw": True, "auto_issue": True})
+
+
+@mission_pool_admin_bp.post("/api/admin/mission-pool/<campaign_id>/extend-deadline")
+def admin_extend_deadline(campaign_id: str):
+    """Moves ``schedule.ends_at`` later for a mission that has not locked
+    yet. Reopens submissions immediately (``submission_state`` compares
+    against the new deadline on the very next request) and clears any stale
+    ``waiting_for_minimum`` display flag — the authoritative decision is
+    always re-derived by ``process_campaign`` the next time this campaign is
+    actually due, never stored as a one-shot verdict."""
+    admin, err = _require_admin()
+    if err:
+        return err
+    campaign, err = _require_random_pool_mission(campaign_id)
+    if err:
+        return err
+
+    block = campaign.get("mission_pool") or {}
+    if block.get("closed_at"):
+        return jsonify({"status": "error", "code": "already_locked"}), 409
+
+    body = request.get_json(silent=True) or {}
+    raw = str(body.get("scheduled_close_at") or body.get("new_ends_at") or "").strip()
+    try:
+        new_ends_at = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return jsonify({"status": "error", "code": "invalid_datetime"}), 400
+    new_ends_at = _as_utc(new_ends_at) or new_ends_at.replace(tzinfo=timezone.utc)
+
+    now = datetime.now(timezone.utc)
+    if new_ends_at <= now:
+        return jsonify({"status": "error", "code": "deadline_must_be_future"}), 400
+
+    database.db["gc_campaigns"].update_one(
+        {"campaign_id": campaign_id},
+        {"$set": {
+            "schedule.ends_at": new_ends_at,
+            "mission_pool.waiting_for_minimum": False,
+            "mission_pool.updated_at": now, "updated_at": now,
+        }},
+    )
+    _audit("mission_deadline_extended", admin, campaign_id, {"new_ends_at": new_ends_at.isoformat()})
+    _emit("mission_deadline_extended", campaign_id=campaign_id, source="admin")
+    return jsonify({"status": "ok", "scheduled_close_at": new_ends_at.isoformat()})
+
+
+@mission_pool_admin_bp.post("/api/admin/mission-pool/<campaign_id>/draw-now")
+def admin_draw_now(campaign_id: str):
+    """The one guarded manual-draw entry point (§ Admin UI — do not add an
+    ordinary "redraw" button). Never re-runs selection for a draw that
+    already has a seed: ``process_campaign``/``_select_winners`` already
+    make that impossible, so calling this twice after winners are selected
+    just retries allocation/notification, exactly like Retry Unresolved
+    Rewards would.
+
+    Requires an explicit ``confirm: true`` in the body. If the mission's
+    authoritative qualified count is below its configured
+    ``minimum_qualified_entries``, also requires ``override_minimum: true``
+    plus a non-empty ``override_reason`` — both are written to the audit
+    log with the admin's identity."""
+    admin, err = _require_admin()
+    if err:
+        return err
+    campaign, err = _require_random_pool_mission(campaign_id)
+    if err:
+        return err
+    if not mission_pool_enabled():
+        return jsonify({"status": "error", "code": "mission_pool_disabled"}), 503
+
+    body = request.get_json(silent=True) or {}
+    if not body.get("confirm"):
+        return jsonify({"status": "error", "code": "confirmation_required"}), 400
+
+    override_minimum = bool(body.get("override_minimum"))
+    override_reason = str(body.get("override_reason") or "").strip()
+    if override_minimum and not override_reason:
+        return jsonify({"status": "error", "code": "override_reason_required"}), 400
+
+    import mission_pool_processor as mpp
+
+    now = datetime.now(timezone.utc)
+    block = campaign.get("mission_pool") or {}
+    locked_now = False
+    if not block.get("closed_at") and campaign.get("status") == "live":
+        locked_now = mpp.close_random_intake(campaign_id, now, CLOSE_TRIGGER_ADMIN_OVERRIDE)
+
+    result = mpp.process_campaign(campaign_id, source="admin", admin_triggered=True,
+                                   override_minimum=override_minimum)
+
+    if result.get("skipped") == "waiting_for_minimum":
+        _audit("mission_draw_now_blocked_minimum", admin, campaign_id, {"result": result})
+        return jsonify({"status": "error", "code": "minimum_not_met", "result": result}), 409
+
+    _audit("mission_draw_now", admin, campaign_id, {
+        "locked_by_this_call": locked_now,
+        "override_minimum": override_minimum,
+        "override_reason": override_reason or None,
+        "result": result,
+    })
+    _emit("mission_draw_now", campaign_id=campaign_id, source="admin",
+          override_minimum=override_minimum)
+    return jsonify({"status": "ok", "result": result})

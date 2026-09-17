@@ -216,25 +216,51 @@
    * offering to "run again" invites an operator to expect a different
    * winner set.
    */
-  function actionsFor(state) {
+  /**
+   * randomPool (summary.random_pool, or falsy for FCFS / non-Random
+   * missions) adds the automation controls on top of the ordinary lifecycle
+   * actions above — it never replaces them. There is deliberately no
+   * ordinary "redraw" action here: `draw_now` is the one guarded manual-draw
+   * entry point, and calling it again after winners are selected just
+   * retries allocation/notification (process_campaign never re-selects a
+   * winner once a seed exists).
+   */
+  function actionsFor(state, randomPool) {
     state = state || {};
     var s = state.state;
-    if (s === "cancelled") return [["resume", "Resume (undo cancel)", false]];
-    if (s === "draft" || s === "scheduled") return [["publish", "Publish", true], ["edit", "Edit", false]];
-    if (s === "live") {
-      return [["edit", "Edit", false], ["pause", "Pause", false],
+    var base;
+    if (s === "cancelled") base = [["resume", "Resume (undo cancel)", false]];
+    else if (s === "draft" || s === "scheduled") base = [["publish", "Publish", true], ["edit", "Edit", false]];
+    else if (s === "live") {
+      base = [["edit", "Edit", false], ["pause", "Pause", false],
               ["close", "Close Mission", true], ["cancel", "Cancel", true]];
+    } else if (s === "paused") {
+      base = [["edit", "Edit", false], ["publish", "Resume", false], ["cancel", "Cancel", true]];
+    } else if (s === "closed") {
+      base = [["process", randomPool ? "Retry Unresolved Rewards" : "Process Campaign", true]];
+    } else if (s === "processing") {
+      // Resume Processing / Retry Unresolved Rewards — the backend's process
+      // endpoint IS the resume: it re-enters the same resumable state
+      // machine and never re-selects winners once selection_seed is set.
+      base = [["process", randomPool ? "Retry Unresolved Rewards" : "Resume Processing", true]];
+    } else if (s === "completed") {
+      base = [["results", "View Results", false]];
+    } else {
+      base = [];
     }
-    if (s === "paused") return [["edit", "Edit", false], ["publish", "Resume", false], ["cancel", "Cancel", true]];
-    if (s === "closed") return [["process", "Process Campaign", true]];
-    if (s === "processing") {
-      // Resume Processing only — the backend's process endpoint IS the
-      // resume: it re-enters the same resumable state machine and never
-      // re-selects winners once selection_seed is set.
-      return [["process", "Resume Processing", true]];
+
+    if (randomPool && (s === "live" || s === "closed" || s === "processing")) {
+      base = base.concat(
+        (randomPool.auto_draw === false || randomPool.auto_issue === false)
+          ? [["resume_auto_draw", "Resume Auto Draw", false]]
+          : [["pause_auto_draw", "Pause Auto Draw", false]]
+      );
+      base = base.concat([["draw_now", "Draw Now", true]]);
+      if (s === "live" && (randomPool.lifecycle_status === "OPEN" || randomPool.lifecycle_status === "WAITING_FOR_MINIMUM")) {
+        base = base.concat([["extend_deadline", "Extend Deadline", false]]);
+      }
     }
-    if (s === "completed") return [["results", "View Results", false]];
-    return [];
+    return base;
   }
 
   /**
@@ -430,6 +456,10 @@
     end_rewards: "End Mission Rewards for this campaign?\n\n" +
       "This will hide all currently active Mission rewards for this campaign immediately.\n\n" +
       "Allocated rewards will remain recorded and will not be returned to inventory.",
+    pause_auto_draw: "Pause Auto Draw for this Random Pool mission?\n\n" +
+      "Winner selection and voucher issuance will only advance via an explicit admin action. " +
+      "Entry counting and the auto-close threshold are not affected.",
+    resume_auto_draw: "Resume Auto Draw for this Random Pool mission?",
   };
 
   var CORE = {
@@ -670,6 +700,13 @@
       new_pool_codes_text: "",
       winner_count: 10,
       allocation_method: "random_qualified",
+      // Random Pool automation (optional — blank means "not configured",
+      // which validate_mission_pool_config treats as the mission staying on
+      // today's schedule-only behaviour; see mission_pool.py).
+      minimum_qualified_entries: "",
+      auto_close_qualified_entries: "",
+      auto_draw: true,
+      auto_issue: true,
       starts_at: "",
       ends_at: "",
       eligibility: {
@@ -880,13 +917,25 @@
   }
 
   function createStep3(d) {
-    return field("Start", textInput("mp-c-starts", d.starts_at, "", "datetime-local", ' step="1"'),
+    var body = field("Start", textInput("mp-c-starts", d.starts_at, "", "datetime-local", ' step="1"'),
         "Times are entered and shown in this browser's local time (admin operations run on Kuala Lumpur time, GMT+8). Seconds are preserved.") +
       field("End", textInput("mp-c-ends", d.ends_at, "", "datetime-local", ' step="1"'),
         "The end time is one of the mission's eligibility cutoffs.") +
       field("Winner Selection", select("mp-c-allocation", d.allocation_method, [
         ["random_qualified", "Random Qualified"], ["first_qualified", "First Qualified"],
       ]));
+    if (d.allocation_method === "random_qualified") {
+      body += '<div class="sub" style="margin-top:12px;">Random Pool automation (optional)</div>' +
+        field("Minimum Qualified Entries", textInput("mp-c-minimum", d.minimum_qualified_entries,
+          "e.g. 400", "number", ' min="1"'),
+          "Must exceed Winner Count. Leave blank to keep today's schedule-only behaviour.") +
+        field("Auto-Close Qualified Entries", textInput("mp-c-autoclose", d.auto_close_qualified_entries,
+          "e.g. 600", "number", ' min="1"'),
+          "The mission locks the instant it reaches this many qualified entries, before the scheduled End time.") +
+        checkbox("mp-c-auto-draw", d.auto_draw, "auto_draw — select winners automatically once locked") +
+        checkbox("mp-c-auto-issue", d.auto_issue, "auto_issue — issue vouchers automatically once winners are selected");
+    }
+    return body;
   }
 
   function createStep4(d) {
@@ -985,6 +1034,12 @@
       set("starts_at", v("mp-c-starts"));
       set("ends_at", v("mp-c-ends"));
       set("allocation_method", v("mp-c-allocation"));
+      if (d.allocation_method === "random_qualified") {
+        set("minimum_qualified_entries", v("mp-c-minimum"));
+        set("auto_close_qualified_entries", v("mp-c-autoclose"));
+        set("auto_draw", c("mp-c-auto-draw"));
+        set("auto_issue", c("mp-c-auto-issue"));
+      }
     }
   }
 
@@ -1023,7 +1078,38 @@
       if (d.ends_at && localInputToIso(d.ends_at) <= localInputToIso(d.starts_at)) {
         return "The end time must be after the start time.";
       }
-      return null;
+      return validateRandomPoolFields(d);
+    }
+    return null;
+  }
+
+  /**
+   * Mirrors mission_pool.validate_mission_pool_config's Random Pool rules
+   * exactly (winner_count > 0 is already enforced in step 1):
+   *   minimum_qualified_entries > winner_count
+   *   auto_close_qualified_entries >= minimum_qualified_entries (or, with no
+   *   minimum configured, > winner_count)
+   * Both fields are optional — blank means "not configured" and is always
+   * valid, per the compatibility requirement that a mission may remain on
+   * manual/schedule-only behaviour.
+   */
+  function validateRandomPoolFields(d) {
+    if (d.allocation_method !== "random_qualified") return null;
+    var winnerCount = parseInt(d.winner_count, 10) || 0;
+    var minimum = d.minimum_qualified_entries === "" || d.minimum_qualified_entries == null
+      ? null : parseInt(d.minimum_qualified_entries, 10);
+    var autoClose = d.auto_close_qualified_entries === "" || d.auto_close_qualified_entries == null
+      ? null : parseInt(d.auto_close_qualified_entries, 10);
+    if (minimum !== null && !(minimum > winnerCount)) {
+      return "Minimum Qualified Entries must be greater than Winner Count.";
+    }
+    if (autoClose !== null) {
+      var floor = minimum !== null ? minimum : winnerCount;
+      if (!(autoClose >= floor)) {
+        return minimum !== null
+          ? "Auto-Close Qualified Entries must be at least the Minimum Qualified Entries."
+          : "Auto-Close Qualified Entries must be greater than Winner Count.";
+      }
     }
     return null;
   }
@@ -1050,6 +1136,21 @@
       cfg.max_chars = parseInt(d.max_chars, 10) || 500;
     }
     return cfg;
+  }
+
+  /** Only ever sends the Random Pool automation keys when configured, and
+   * only for allocation_method === "random_qualified" — the backend rejects
+   * them otherwise (random_pool_fields_require_random_mode). */
+  function randomPoolFieldsFromDraft(d) {
+    if (d.allocation_method !== "random_qualified") return {};
+    var out = { auto_draw: !!d.auto_draw, auto_issue: !!d.auto_issue };
+    if (d.minimum_qualified_entries !== "" && d.minimum_qualified_entries != null) {
+      out.minimum_qualified_entries = parseInt(d.minimum_qualified_entries, 10);
+    }
+    if (d.auto_close_qualified_entries !== "" && d.auto_close_qualified_entries != null) {
+      out.auto_close_qualified_entries = parseInt(d.auto_close_qualified_entries, 10);
+    }
+    return out;
   }
 
   /**
@@ -1152,13 +1253,13 @@
         // allows telegram_web_app for this type and it has no provider path.
         destination: { open_mode: "telegram_web_app", ready: false },
         mission_config: missionConfigFromDraft(d),
-        mission_pool: {
+        mission_pool: Object.assign({
           pool_id: ctx.poolId,
           pool_type: ctx.verdict.pool_type,
           winner_count: parseInt(d.winner_count, 10) || 0,
           allocation_method: d.allocation_method,
           eligibility_policy: d.eligibility,
-        },
+        }, randomPoolFieldsFromDraft(d)),
       };
       return host.apiPostJson("/api/admin/gc-campaigns", body).then(function (res) {
         if (!res.ok || (res.d && res.d.status !== "ok")) {
@@ -1260,6 +1361,43 @@
         : "");
   }
 
+  /**
+   * Random Pool admin panel (§ Admin UI): qualified current/target, minimum,
+   * winner count, inventory, estimated probability (only ever computed from
+   * the authoritative qualified count the backend just sent — never
+   * re-derived or guessed here), scheduled close and processing state.
+   */
+  function detailRandomPoolBlock(rp) {
+    var probability = rp.estimated_winning_probability;
+    var rows = [
+      ["Qualified entries", num(rp.qualified_current) +
+        (rp.auto_close_qualified_entries != null ? " / " + num(rp.auto_close_qualified_entries) : "")],
+      ["Minimum required entries", rp.minimum_qualified_entries != null ? num(rp.minimum_qualified_entries) : "—"],
+      ["Winner count", num(rp.winner_count)],
+      ["Available inventory", num(rp.available_inventory)],
+      ["Estimated winning probability", probability != null ? (Math.round(probability * 1000) / 10) + "%" : "—"],
+      ["Scheduled close (browser local time)", dt(rp.scheduled_close_at)],
+      ["Processing state", rp.lifecycle_status || "—"],
+    ].map(function (r) {
+      return "<tr><td>" + esc(r[0]) + "</td><td>" + r[1] + "</td></tr>";
+    }).join("");
+
+    var flags = [];
+    if (rp.pending_inventory) {
+      flags.push('<div class="sub" style="color:#f5b63f;">Pending inventory — short ' +
+        esc(num(rp.inventory_shortage_count)) + " code(s). Upload more codes to the pool to resume.</div>");
+    }
+    if (rp.waiting_for_minimum) {
+      flags.push('<div class="sub" style="color:#f5b63f;">Waiting for minimum qualified entries — ' +
+        "extend the deadline or use Draw Now with an override to proceed.</div>");
+    }
+    if (rp.auto_draw === false || rp.auto_issue === false) {
+      flags.push('<div class="sub" style="color:#f5b63f;">Auto Draw is paused — winners/vouchers only advance via an explicit admin action.</div>');
+    }
+
+    return '<table class="data-table"><tbody>' + rows + "</tbody></table>" + flags.join("");
+  }
+
   function detailResultsBlock(summary) {
     var g = summary.grains || {};
     var REASON_LABELS = {
@@ -1321,7 +1459,8 @@
     var g = summary.grains || {};
     var r = state.reward || {};
     var schedule = campaign.schedule || {};
-    var actions = actionsFor(state).map(function (a) {
+    var randomPool = summary.random_pool;
+    var actions = actionsFor(state, randomPool).map(function (a) {
       return btn(a[0], a[1], { id: state.campaign_id, primary: a[0] === "publish" });
     }).join(" ");
 
@@ -1352,6 +1491,8 @@
           : "")) +
 
       section("Reward", detailRewardBlock(state)) +
+
+      (randomPool ? section("Random Pool", detailRandomPoolBlock(randomPool)) : "") +
 
       detailRewardsLifecycleSection(state, g) +
 
@@ -1437,6 +1578,10 @@
           pool_id: block.pool_id || "",
           winner_count: block.winner_count == null ? "" : block.winner_count,
           allocation_method: block.allocation_method || "random_qualified",
+          minimum_qualified_entries: block.minimum_qualified_entries == null ? "" : block.minimum_qualified_entries,
+          auto_close_qualified_entries: block.auto_close_qualified_entries == null ? "" : block.auto_close_qualified_entries,
+          auto_draw: block.auto_draw !== false,
+          auto_issue: block.auto_issue !== false,
           eligibility: {
             require_correct_answer: policy.require_correct_answer !== false,
             exclude_voucher_hunter: policy.exclude_voucher_hunter !== false,
@@ -1532,6 +1677,16 @@
         ["random_qualified", "Random Qualified"], ["first_qualified", "First Qualified"],
       ]));
 
+    if (f.allocation_method === "random_qualified") {
+      rewardBody += '<div class="sub" style="margin-top:8px;">Random Pool automation (optional)</div>' +
+        field("Minimum Qualified Entries", textInput("mp-e-minimum", f.minimum_qualified_entries,
+          "e.g. 400", "number", ' min="1"')) +
+        field("Auto-Close Qualified Entries", textInput("mp-e-autoclose", f.auto_close_qualified_entries,
+          "e.g. 600", "number", ' min="1"')) +
+        checkbox("mp-e-auto-draw", f.auto_draw, "auto_draw — select winners automatically once locked") +
+        checkbox("mp-e-auto-issue", f.auto_issue, "auto_issue — issue vouchers automatically once winners are selected");
+    }
+
     // Live inventory feedback against whichever pool is currently selected —
     // the same winner_count <= available rule the publish gate enforces.
     var chosen = pools.filter(function (p) { return p.pool_id === f.pool_id; })[0];
@@ -1599,6 +1754,12 @@
     set("pool_id", v("mp-e-pool"));
     set("winner_count", v("mp-e-winners"));
     set("allocation_method", v("mp-e-allocation"));
+    if (f.allocation_method === "random_qualified") {
+      set("minimum_qualified_entries", v("mp-e-minimum"));
+      set("auto_close_qualified_entries", v("mp-e-autoclose"));
+      set("auto_draw", c("mp-e-auto-draw"));
+      set("auto_issue", c("mp-e-auto-issue"));
+    }
     set("starts_display", v("mp-e-starts"));
     set("ends_display", v("mp-e-ends"));
     ["require_correct_answer:mp-e-el-correct", "exclude_voucher_hunter:mp-e-el-hunter",
@@ -1656,9 +1817,12 @@
       return;
     }
 
+    var randomPoolProblem = validateRandomPoolFields(f);
+    if (randomPoolProblem) { host.toast("❌ " + randomPoolProblem, "error"); return; }
+
     var body = {
       name: (f.name || es.campaign.name || "").trim(),
-      mission_pool: {
+      mission_pool: Object.assign({
         pool_id: poolId,
         pool_type: poolType,
         winner_count: parseInt(f.winner_count, 10) || 0,
@@ -1670,7 +1834,7 @@
           exclude_blocked: !!f.eligibility.exclude_blocked,
           require_gaming_account: !!f.eligibility.require_gaming_account,
         },
-      },
+      }, randomPoolFieldsFromDraft(f)),
     };
 
     // A frozen mission_config is simply not sent, so an unchanged PUT can
@@ -1743,6 +1907,10 @@
     cancel: "Mission cancelled.",
     resume: "Mission resumed.",
     process: "Mission processing started.",
+    pause_auto_draw: "Auto Draw paused.",
+    resume_auto_draw: "Auto Draw resumed.",
+    draw_now: "Draw started.",
+    extend_deadline: "Deadline extended.",
   };
 
   function missionActionSuccessMessage(action, d) {
@@ -1760,18 +1928,20 @@
   // host.runAction (== admin-dashboard.js's gcRunAction, the same choke
   // point every gc_campaigns lifecycle action already uses) instead of a
   // second GC_ACTION_ERROR_MESSAGES-style dictionary living in this module.
-  function postAction(action, campaignId, button) {
-    // publish/pause are the shared Campaign Centre lifecycle; close, cancel,
-    // resume, process and end-rewards are the official Phase 1/2 Mission
-    // endpoints. The UI never writes campaign status or reward rows itself.
-    var endpointAction = action === "end_rewards" ? "end-rewards" : action;
+  function postAction(action, campaignId, button, body) {
+    // publish/pause are the shared Campaign Centre lifecycle; every other
+    // action (close, cancel, resume, process, end-rewards, and the Random
+    // Pool automation actions below) is a Mission Pool endpoint, always
+    // hyphenated from its underscore action name. The UI never writes
+    // campaign status or reward rows itself.
+    var endpointAction = action.replace(/_/g, "-");
     var path = (action === "publish" || action === "pause")
       ? "/api/admin/gc-campaigns/" + encodeURIComponent(campaignId) + "/" + action
       : "/api/admin/mission-pool/" + encodeURIComponent(campaignId) + "/" + endpointAction;
     return host.runAction({
       id: campaignId, action: action, button: button,
       loadingText: "Working...",
-      run: function () { return host.apiPostJson(path, {}); },
+      run: function () { return host.apiPostJson(path, body || {}); },
       successMessage: function (d) { return missionActionSuccessMessage(action, d); },
       fallbackError: "Couldn't complete this Mission action. Try again.",
       // gcRunAction's own gcDefaultRefresh only knows about the gc_campaigns
@@ -1784,7 +1954,56 @@
     });
   }
 
+  /**
+   * Draw Now (§ Admin UI — the one guarded manual-draw entry point, never an
+   * ordinary "redraw" button): shows eligible participants / winner count /
+   * available inventory from the authoritative summary before confirming,
+   * and requires an explicit override reason when qualified entries are
+   * below the configured minimum. process_campaign never re-selects a
+   * winner once a draw seed exists, so repeating this action after winners
+   * are chosen just retries allocation/notification.
+   */
+  function runDrawNow(campaignId, button) {
+    return softGet("/api/admin/mission-pool/" + encodeURIComponent(campaignId) + "/summary").then(function (summary) {
+      var rp = (summary && summary.random_pool) || {};
+      var msg = "Draw Now?\n\n" +
+        "Eligible participants: " + num(rp.qualified_current) + "\n" +
+        "Winners to select: " + num(rp.winner_count) + "\n" +
+        "Available inventory: " + num(rp.available_inventory);
+
+      var belowMinimum = rp.minimum_qualified_entries != null && rp.qualified_current != null &&
+        rp.qualified_current < rp.minimum_qualified_entries;
+      if (!belowMinimum) {
+        if (!host.confirm(msg)) return null;
+        return postAction("draw_now", campaignId, button, { confirm: true });
+      }
+
+      msg += "\n\nQualified entries are below the configured minimum (" + num(rp.minimum_qualified_entries) + ").";
+      if (!host.confirm(msg + "\n\nOverride the minimum and draw anyway?")) return null;
+      var reason = (typeof window !== "undefined" && window.prompt)
+        ? (window.prompt("Reason for overriding the minimum (required):") || "").trim() : "";
+      if (!reason) {
+        host.toast("❌ An override reason is required to draw below the configured minimum.", "error");
+        return null;
+      }
+      return postAction("draw_now", campaignId, button,
+        { confirm: true, override_minimum: true, override_reason: reason });
+    });
+  }
+
+  /** Moves schedule.ends_at later for a mission that has not locked yet. */
+  function runExtendDeadline(campaignId, button) {
+    var raw = (typeof window !== "undefined" && window.prompt)
+      ? window.prompt("New scheduled close time (this browser's local time, e.g. 2026-01-31T18:00):") : null;
+    if (!raw) return Promise.resolve();
+    var iso = localInputToIso(raw);
+    if (!iso) { host.toast("❌ Could not parse that date/time.", "error"); return Promise.resolve(); }
+    return postAction("extend_deadline", campaignId, button, { scheduled_close_at: iso });
+  }
+
   function runAction(action, campaignId, button) {
+    if (action === "draw_now") return runDrawNow(campaignId, button);
+    if (action === "extend_deadline") return runExtendDeadline(campaignId, button);
     if (CONFIRM_COPY[action] && !host.confirm(CONFIRM_COPY[action])) return Promise.resolve();
     if (action !== "publish") return postAction(action, campaignId, button);
 

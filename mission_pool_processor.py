@@ -41,9 +41,9 @@ model: the flags read below are the ones Databot/UIM already writes onto
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
-import random
 import secrets
 import time
 from datetime import datetime, timedelta, timezone
@@ -892,6 +892,329 @@ def try_consume_fcfs_slot(campaign_id: str, policy: dict, capacity: int, entry: 
 
 
 # ---------------------------------------------------------------------------
+# Live Random Pool auto-close mechanic
+# ---------------------------------------------------------------------------
+#
+# One-for-one mirror of the live FCFS capacity mechanic above, reusing the
+# exact same identity-resolution and anti-abuse eligibility functions, with
+# one deliberate difference: FCFS picks a WINNER inline (the mechanic IS the
+# reward gate for that allocation method), but a Random Pool mission must
+# never select a winner before its intake actually closes — the draw is a
+# separate, later, one-time event (see _select_winners). So this mechanic
+# only ever grades an entry to `qualified` and increments a live COUNT; it
+# never touches `campaign_rewards`, never marks a `winner`, and never draws.
+#
+# Arming is OPT-IN and additive: a Random mission that never configures
+# `auto_close_qualified_entries` is never armed and behaves exactly as it
+# always has (settled only at its scheduled `ends_at` or an explicit admin
+# close) — see arm_random_campaign's guards.
+
+def _random_capacity_reached(block: dict) -> bool:
+    if not block.get("random_armed"):
+        return False
+    threshold = block.get("auto_close_qualified_entries")
+    if not threshold:
+        return False
+    return int(block.get("qualified_live_count") or 0) >= int(threshold)
+
+
+def _random_log(event: str, **fields) -> None:
+    parts = " ".join(f"{k}={v}" for k, v in fields.items() if v is not None)
+    logger.info("[MISSION_RANDOM] %s %s", event, parts)
+
+
+def close_random_intake(campaign_id: str, now: datetime, trigger: str) -> bool:
+    """Guarded compare-and-set close — identical shape to
+    ``_close_fcfs_intake``: only a caller observing ``status == "live"`` AND
+    ``closed_at`` still unset can flip the transition, so two racing callers
+    (a winning submission, the scheduler's recovery pass, and an admin
+    override) can never all "win" the close — exactly one ``update_one``
+    call actually modifies the document. ``trigger`` is stamped for the
+    completion record's audit trail (§ Completion) and is one of
+    mission_pool.CLOSE_TRIGGERS."""
+    res = _campaigns().update_one(
+        {"campaign_id": campaign_id, "status": "live", "mission_pool.closed_at": None},
+        {"$set": {
+            "status": "ended", "mission_pool.closed_at": now,
+            "mission_pool.close_trigger": trigger, "updated_at": now,
+        }},
+    )
+    closed = res.modified_count == 1
+    if closed:
+        _random_log("INTAKE_CLOSED", campaign_id=campaign_id, trigger=trigger)
+    return closed
+
+
+def arm_random_campaign(campaign_id: str, *, now: datetime | None = None) -> dict:
+    """One-time, idempotent activation of the live Random Pool auto-close
+    mechanic. Called from ``campaign_centre._transition`` when an admin
+    publishes a `random_qualified` Mission campaign with
+    ``auto_close_qualified_entries`` configured, and from this module's own
+    ``_random_maintenance`` recovery pass for a campaign that was already
+    `live` before it could be armed (a publish-time failure, or one
+    configured with the field after it was already live).
+
+    Guards mirror ``arm_fcfs_campaign`` exactly, for the same reasons:
+
+      * not Mission Pool / not `random_qualified` / no
+        `auto_close_qualified_entries` configured / already armed /
+        cancelled / not live / schedule already elapsed -> not eligible.
+      * ANY existing `mission_entries` row -> an in-flight mission from
+        before this mechanic existed (or before it was configured); never
+        armed, so its live counter can never start from a false zero while
+        real qualified entries already exist uncounted. It keeps using the
+        pre-existing scheduled-settlement path for its entire life.
+      * the final CAS only matches while `random_armed` is still not True,
+        so two concurrent callers can never both arm the same campaign.
+
+    Unlike FCFS, arming never depends on voucher inventory — no winner is
+    ever chosen by this mechanic, only counted, so there is nothing to
+    reserve at arm time.
+    """
+    now = now or datetime.now(timezone.utc)
+    campaign = _campaign_doc(campaign_id)
+    if not campaign or not mp.is_mission_pool(campaign):
+        return {"armed": False, "reason": "not_a_mission_campaign"}
+
+    block = campaign.get("mission_pool") or {}
+    if block.get("allocation_method") != mp.ALLOCATION_RANDOM_QUALIFIED:
+        return {"armed": False, "reason": "not_random"}
+    if not block.get("auto_close_qualified_entries"):
+        return {"armed": False, "reason": "auto_close_not_configured"}
+    if block.get("random_armed"):
+        return {"armed": False, "reason": "already_armed"}
+    if block.get("cancelled"):
+        return {"armed": False, "reason": "cancelled"}
+    if campaign.get("status") != "live":
+        return {"armed": False, "reason": "not_live"}
+
+    ends_at = mp._as_utc((campaign.get("schedule") or {}).get("ends_at"))
+    if ends_at is not None and ends_at <= now:
+        return {"armed": False, "reason": "already_elapsed"}
+
+    existing_entries = _entries().count_documents({"campaign_id": campaign_id})
+    if existing_entries:
+        _random_log("ARM_SKIPPED_EXISTING_ENTRIES", campaign_id=campaign_id, entries=existing_entries)
+        return {"armed": False, "reason": "existing_entries"}
+
+    res = _campaigns().update_one(
+        {
+            "campaign_id": campaign_id,
+            "status": "live",
+            "mission_pool.allocation_method": mp.ALLOCATION_RANDOM_QUALIFIED,
+            "mission_pool.random_armed": {"$ne": True},
+        },
+        {"$set": {
+            "mission_pool.random_armed": True,
+            "mission_pool.qualified_live_count": 0,
+            "mission_pool.random_armed_at": now,
+            "mission_pool.updated_at": now,
+        }},
+    )
+    if res.matched_count != 1:
+        return {"armed": False, "reason": "cas_lost"}
+
+    _random_log("ARMED", campaign_id=campaign_id,
+                 threshold=block.get("auto_close_qualified_entries"))
+    return {"armed": True, "threshold": block.get("auto_close_qualified_entries")}
+
+
+def _random_maintenance(now: datetime) -> None:
+    """Cheap, bounded scheduler pass — the authoritative recovery mechanism
+    for the live Random Pool mechanic, run once per tick from
+    `run_mission_pool_processor`, mirroring `_fcfs_maintenance`:
+
+      1. Arm any live `random_qualified` campaign configured for auto-close
+         that is not armed yet (publish-time arm failure, or configured
+         after going live).
+      2. Close intake for any armed campaign whose `qualified_live_count`
+         already reached `auto_close_qualified_entries` but whose guarded
+         close never landed — recovery for a worker crashing between the
+         winning `$inc` and its own close attempt.
+      3. Scheduled-close fallback (§ Scheduled-close fallback): once a live
+         campaign's own `schedule.ends_at` has elapsed without ever hitting
+         the auto-close threshold, close intake immediately (trigger
+         SCHEDULED_CLOSE) when the authoritative qualified count already
+         meets `minimum_qualified_entries` — or, when it does not, stamp
+         `waiting_for_minimum` for the admin UI rather than closing at all.
+         `process_campaign`'s own `_minimum_not_met` gate (reused here, the
+         one source of truth for the rule) still re-checks this
+         independently against the frozen post-eligibility count before any
+         draw — this pass only makes the WAITING_FOR_MINIMUM state visible
+         promptly and closes intake promptly once it is not, matching the
+         live-armed and legacy/unarmed cases the same way.
+    """
+    candidates = list(_campaigns().find(
+        {
+            "mechanic": mp.MECHANIC_MISSION_POOL,
+            "mission_pool.allocation_method": mp.ALLOCATION_RANDOM_QUALIFIED,
+            "status": "live",
+            "mission_pool.cancelled": {"$ne": True},
+        },
+        limit=200,
+    ))
+    for campaign in candidates:
+        campaign_id = campaign["campaign_id"]
+        block = campaign.get("mission_pool") or {}
+        if not block.get("random_armed") and block.get("auto_close_qualified_entries"):
+            try:
+                arm_random_campaign(campaign_id, now=now)
+            except Exception:
+                logger.warning("[MISSION_RANDOM] arm_recovery_failed campaign=%s", campaign_id, exc_info=True)
+
+        if block.get("random_armed") and _random_capacity_reached(block) and not block.get("closed_at"):
+            close_random_intake(campaign_id, now, mp.CLOSE_TRIGGER_ENTRY_THRESHOLD)
+            continue
+
+        ends_at = mp._as_utc((campaign.get("schedule") or {}).get("ends_at"))
+        if ends_at is None or ends_at > now or block.get("closed_at"):
+            continue
+        if _minimum_not_met(block, campaign_id):
+            if not block.get("waiting_for_minimum"):
+                _campaigns().update_one({"campaign_id": campaign_id}, {"$set": {
+                    "mission_pool.waiting_for_minimum": True, "mission_pool.updated_at": now,
+                }})
+                _random_log("WAITING_FOR_MINIMUM", campaign_id=campaign_id)
+        else:
+            close_random_intake(campaign_id, now, mp.CLOSE_TRIGGER_SCHEDULED_CLOSE)
+
+
+def try_consume_random_qualifying_slot(campaign_id: str, policy: dict, threshold: int, entry: dict, now: datetime) -> dict:
+    """Bounded, indexed eligibility check + atomic qualified-count increment
+    for one freshly-inserted `mission_entries` row on an ARMED
+    `random_qualified` campaign. Called synchronously from the submission
+    hot path (`mission_pool.submit_mission`) — same bounded cost as
+    `try_consume_fcfs_slot`: one indexed `users` point lookup,
+    `evaluate_quality_eligibility` (pure), 1-2 indexed identity-claim writes,
+    and one single-document, filter-guarded `$inc` on `gc_campaigns`.
+
+    Unlike FCFS, a qualifying entry here becomes `qualified`, never `winner`
+    — no voucher is ever implicated by this function. The response that
+    created this entry has already been durably persisted (the caller only
+    reaches this function after its own insert succeeded), so the count
+    incremented below is always evaluated against an already-committed row
+    (§ "the response that creates the final qualifying entry must be
+    persisted before evaluating the auto-close threshold").
+
+    FAILURE SEQUENCE, mirroring `try_consume_fcfs_slot`:
+
+      * crash before this runs at all -> entry stays `submitted`; the
+        ordinary `_eligibility_pass` decides it once the mission closes.
+      * crash after the quality gate, before the identity claim -> entry
+        still `submitted`; `_eligibility_pass` re-evaluates from scratch.
+      * crash after a WINNING identity claim, before the `$inc` -> entry
+        stays `submitted` (claim insert is idempotent for its own entry_id);
+        `_eligibility_pass` re-resolves the same identity later. In the
+        narrow window where intake has already locked, this entry is still
+        picked up by `_select_winners`'s draw population (accepted before
+        the lock boundary), never silently dropped.
+      * the guarded `$inc` itself can only fail for genuine lock (or a
+        transient pause) — never a partial state, since it is the ONLY
+        write in that call. On failure the entry is left `submitted` rather
+        than force-disqualified, so a lock landing milliseconds early never
+        costs a legitimately-qualifying entry: the ordinary
+        `_eligibility_pass` still grades it once processing resumes.
+      * crash after the `$inc` succeeds, before the entry is marked
+        `qualified` -> compensated inline (the `$inc` is undone before the
+        exception propagates), the same residual single-process-kill risk
+        any no-transaction system carries, and it can only ever
+        under-count, never over-count.
+      * crash after marking `qualified`, before the guarded close ->
+        self-healing: `_random_maintenance` closes any armed campaign whose
+        `qualified_live_count >= auto_close_qualified_entries` but whose
+        `closed_at` is still unset, every scheduler tick.
+    """
+    entry_id = entry["_id"]
+    uid = int(entry["telegram_user_id"])
+    policy = policy or mp.DEFAULT_ELIGIBILITY_POLICY
+
+    user_doc = _load_users([uid]).get(uid)
+    reason = evaluate_quality_eligibility(entry, user_doc, policy)
+    if reason is not None:
+        _entries().update_one(
+            {"_id": entry_id, "status": mp.ENTRY_STATUS_SUBMITTED},
+            {"$set": {
+                "status": mp.ENTRY_STATUS_DISQUALIFIED,
+                "disqualification_reason": reason,
+                "updated_at": now,
+            }},
+        )
+        _random_log("EXCLUDED", campaign_id=campaign_id, reason=reason)
+        return {"state": "excluded", "reason": reason}
+
+    identity = resolve_identity(user_doc, uid)
+    ok, dup_reason = _claim_identity(campaign_id, entry_id, identity, now)
+    if not ok:
+        _entries().update_one(
+            {"_id": entry_id, "status": mp.ENTRY_STATUS_SUBMITTED},
+            {"$set": {
+                "status": mp.ENTRY_STATUS_DISQUALIFIED,
+                "disqualification_reason": dup_reason,
+                "identity_key": identity["identity_key"],
+                "identity_type": identity["identity_type"],
+                "updated_at": now,
+            }},
+        )
+        _random_log("EXCLUDED", campaign_id=campaign_id, reason=dup_reason)
+        return {"state": "excluded", "reason": dup_reason}
+
+    # The single-document atomic bounded update — same Mongo concurrency
+    # invariant as the FCFS `$inc`: no count -> compare -> update race is
+    # possible. Guarded on `status: "live"` + `closed_at: None` so a
+    # submission that loses the race against the lock boundary can never
+    # still increment the count of a mission that has already locked.
+    claim = _campaigns().find_one_and_update(
+        {"campaign_id": campaign_id, "status": "live", "mission_pool.closed_at": None},
+        {"$inc": {"mission_pool.qualified_live_count": 1}, "$set": {"mission_pool.updated_at": now}},
+        return_document=True,
+    )
+    if not claim:
+        # Not truly a failure: the entry is already durably `submitted` with
+        # its identity claim already owned by this entry_id (re-claimed
+        # idempotently above). Whether the mission is genuinely locked or
+        # only transiently paused, the ordinary `_eligibility_pass` decides
+        # this entry once processing resumes — never force-disqualified for
+        # a lock boundary it may have arrived microseconds after.
+        _entries().update_one(
+            {"_id": entry_id, "status": mp.ENTRY_STATUS_SUBMITTED},
+            {"$set": {
+                "identity_key": identity["identity_key"],
+                "identity_type": identity["identity_type"],
+                "updated_at": now,
+            }},
+        )
+        _random_log("SLOT_DEFERRED", campaign_id=campaign_id)
+        return {"state": "deferred"}
+
+    count = int((claim.get("mission_pool") or {}).get("qualified_live_count") or 0)
+    try:
+        _entries().update_one(
+            {"_id": entry_id, "status": mp.ENTRY_STATUS_SUBMITTED},
+            {"$set": {
+                "status": mp.ENTRY_STATUS_QUALIFIED,
+                "identity_key": identity["identity_key"],
+                "identity_type": identity["identity_type"],
+                "updated_at": now,
+            }},
+        )
+    except Exception:
+        _campaigns().update_one(
+            {"campaign_id": campaign_id},
+            {"$inc": {"mission_pool.qualified_live_count": -1}, "$set": {"mission_pool.updated_at": now}},
+        )
+        logger.exception("[MISSION_RANDOM] qualify_mark_failed campaign=%s entry=%s", campaign_id, entry_id)
+        raise
+
+    _random_log("QUALIFIED_ACCEPTED", campaign_id=campaign_id, count=count, threshold=threshold)
+
+    if threshold and count >= int(threshold):
+        _random_log("THRESHOLD_REACHED", campaign_id=campaign_id, threshold=threshold)
+        close_random_intake(campaign_id, now, mp.CLOSE_TRIGGER_ENTRY_THRESHOLD)
+
+    return {"state": "qualified", "qualified_live_count": count}
+
+
+# ---------------------------------------------------------------------------
 # Stage 1 — eligibility (§17)
 # ---------------------------------------------------------------------------
 
@@ -1001,8 +1324,16 @@ def _select_winners(fence: _Fence, campaign: dict, now: datetime) -> dict:
     method = block.get("allocation_method") or mp.ALLOCATION_RANDOM_QUALIFIED
 
     seed = block.get("selection_seed")
+    draw_id = block.get("draw_id")
     if not seed:
-        seed = secrets.token_hex(16)
+        # secrets, never `random` — this is the one piece of material the
+        # entire draw's unpredictability rests on (§ Use a secure random
+        # mechanism). draw_id is a permanent, one-time identifier for THIS
+        # draw, generated in the same guarded write so the two can never
+        # exist independently of each other.
+        seed = secrets.token_hex(32)
+        draw_id = f"draw_{secrets.token_hex(8)}"
+        seed_commitment = hashlib.sha256(seed.encode()).hexdigest()
         res = _campaigns().update_one(
             {**_fenced_filter(fence), "$or": [
                 {"mission_pool.selection_seed": {"$exists": False}},
@@ -1011,13 +1342,17 @@ def _select_winners(fence: _Fence, campaign: dict, now: datetime) -> dict:
             ]},
             {"$set": {
                 "mission_pool.selection_seed": seed,
+                "mission_pool.selection_seed_commitment": seed_commitment,
+                "mission_pool.draw_id": draw_id,
                 "mission_pool.selection_started_at": now,
                 "mission_pool.updated_at": now,
             }},
         )
         if res.matched_count != 1:
             refreshed = _campaign_doc(campaign_id) or {}
-            seed = (refreshed.get("mission_pool") or {}).get("selection_seed")
+            refreshed_block = refreshed.get("mission_pool") or {}
+            seed = refreshed_block.get("selection_seed")
+            draw_id = refreshed_block.get("draw_id")
             if not seed:
                 _log("selection_seed_write_failed", campaign_id=campaign_id, generation=fence.generation)
                 return {"ok": False, "reason": "seed_write_failed"}
@@ -1044,9 +1379,21 @@ def _select_winners(fence: _Fence, campaign: dict, now: datetime) -> dict:
     if method == mp.ALLOCATION_FIRST_QUALIFIED:
         winner_ids = ordered_ids[:requested]
     else:
-        shuffled = list(ordered_ids)
-        random.Random(seed).shuffle(shuffled)
-        winner_ids = shuffled[:requested]
+        # Deterministic, auditable ranking (§ Use a secure random mechanism):
+        # every eligible entry gets one score, a pure function of the secret
+        # seed plus (campaign_id, draw_id, entry_id), so nothing about who
+        # wins can be predicted before the seed is drawn, and everything
+        # about the outcome can be reproduced and audited afterwards from
+        # the stored seed + draw_id + the qualified id list itself. The
+        # entry_id itself is the tie-breaker (a sha256 collision between two
+        # distinct entries is not a practical concern, but the tuple sort
+        # key still makes the order total and independent of dict/set
+        # iteration order either way).
+        def _rank_score(entry_id) -> str:
+            return hashlib.sha256(f"{seed}:{campaign_id}:{draw_id}:{entry_id}".encode()).hexdigest()
+
+        ranked = sorted(ordered_ids, key=lambda eid: (_rank_score(eid), str(eid)))
+        winner_ids = ranked[:requested]
 
     # qualified_count < winner_count -> award all qualified (§20).
     winner_set = set(winner_ids)
@@ -1225,6 +1572,7 @@ def _allocate_for_entry(campaign: dict, entry: dict, now: datetime, generation: 
             "identity_type": entry.get("identity_type"),
             "telegram_user_id": uid,
             "idempotency_key": mp.reward_idempotency_key(campaign_id, entry_id),
+            "draw_id": block.get("draw_id"),
             "reward_label": block.get("reward_label") or campaign.get("name", ""),
             "pool_id": pool_id,
             "pool_type": pool_type,
@@ -1330,6 +1678,39 @@ def _allocate_for_entry(campaign: dict, entry: dict, now: datetime, generation: 
     return {"state": "allocated", "reward_id": reward_id}
 
 
+def _is_full_auto_random(block: dict) -> bool:
+    """True only for a Random Pool mission that opted into the FULL
+    automation config (`auto_close_qualified_entries` configured). Gates the
+    resumable PENDING_INVENTORY behaviour below so a pre-existing/legacy
+    Random mission (and every FCFS mission) keeps its exact original
+    out-of-stock-disqualifies-the-entry behaviour, byte for byte (§ Do not
+    alter FCFS behavior / Compatibility constraints)."""
+    return (block.get("allocation_method") == mp.ALLOCATION_RANDOM_QUALIFIED
+            and block.get("auto_close_qualified_entries") is not None)
+
+
+def _inventory_shortfall(block: dict, needed: int) -> int | None:
+    """``None`` when inventory is sufficient (or unknown/unreadable — fails
+    OPEN here deliberately: an inventory read failure must never permanently
+    block a mission that actually has enough stock; the per-entry atomic
+    claim in ``_allocate_for_entry`` is still the real backstop), otherwise
+    the number of codes still missing."""
+    if needed <= 0:
+        return None
+    pool_id = block.get("pool_id")
+    if not pool_id:
+        return None
+    try:
+        import voucher_pool_service
+
+        available = int(voucher_pool_service.pool_stock(pool_id)["available"])
+    except Exception:
+        logger.warning("[MISSION_POOL] inventory_preflight_read_failed pool=%s", pool_id, exc_info=True)
+        return None
+    shortfall = needed - available
+    return shortfall if shortfall > 0 else None
+
+
 def _allocation_pass(fence: _Fence, campaign: dict, deadline: float) -> dict:
     campaign_id = fence.campaign_id
     batch = allocation_batch_size()
@@ -1347,9 +1728,37 @@ def _allocation_pass(fence: _Fence, campaign: dict, deadline: float) -> dict:
         # A cancel landing mid-run stops new allocations immediately; codes
         # already assigned stay assigned.
         fresh = _campaign_doc(campaign_id) or {}
-        if (fresh.get("mission_pool") or {}).get("cancelled"):
+        fresh_block = fresh.get("mission_pool") or {}
+        if fresh_block.get("cancelled"):
             _log("allocation_halted_cancelled", campaign_id=campaign_id, allocated=allocated)
             return {"done": False, "cancelled": True, "allocated": allocated, "out_of_stock": out_of_stock}
+
+        # Preflight inventory (§ Voucher issuance): a full-auto Random Pool
+        # mission never disqualifies a winner for a temporary shortage — it
+        # pauses the WHOLE pass here, before drawing any code, and resumes
+        # automatically (same draw, same winners) once the next tick's
+        # preflight finds enough stock again.
+        if _is_full_auto_random(fresh_block):
+            remaining = _entries().count_documents(
+                {"campaign_id": campaign_id, "status": mp.ENTRY_STATUS_WINNER}
+            )
+            shortfall = _inventory_shortfall(fresh_block, remaining)
+            if shortfall is not None:
+                _campaigns().update_one(_fenced_filter(fence), {"$set": {
+                    "mission_pool.pending_inventory": True,
+                    "mission_pool.inventory_shortage_count": shortfall,
+                    "mission_pool.updated_at": now,
+                }})
+                _log("pending_inventory", campaign_id=campaign_id, needed=remaining, shortfall=shortfall)
+                return {"done": False, "pending_inventory": True, "shortage": shortfall,
+                        "allocated": allocated, "out_of_stock": out_of_stock}
+            if fresh_block.get("pending_inventory"):
+                _campaigns().update_one(_fenced_filter(fence), {"$set": {
+                    "mission_pool.pending_inventory": False,
+                    "mission_pool.inventory_shortage_count": 0,
+                    "mission_pool.updated_at": now,
+                }})
+                _log("pending_inventory_resolved", campaign_id=campaign_id)
 
         rows = list(_entries().find(
             {"campaign_id": campaign_id, "status": mp.ENTRY_STATUS_WINNER},
@@ -1407,6 +1816,27 @@ def _allocation_pass(fence: _Fence, campaign: dict, deadline: float) -> dict:
                 )
             else:  # out_of_stock
                 out_of_stock += 1
+                if _is_full_auto_random(fresh_block):
+                    # Never reroll for a temporary lack of inventory (§
+                    # Voucher issuance / Retry and recovery): keep this
+                    # exact winner and its existing reward row exactly as
+                    # `_allocate_for_entry` left them (still `out_of_stock`,
+                    # not `assigned` — reused, not re-drawn, on the next
+                    # attempt) and stop the pass rather than disqualifying
+                    # a selected winner. The preflight check above is the
+                    # normal guard; this is defense-in-depth for a shortage
+                    # that only appears between preflight and the atomic
+                    # claim (e.g. a pool shared with another campaign).
+                    _entries().update_one(
+                        {"_id": entry["_id"], "status": mp.ENTRY_STATUS_REWARD_ALLOCATING},
+                        {"$set": {"status": mp.ENTRY_STATUS_WINNER, "updated_at": now}},
+                    )
+                    _campaigns().update_one(_fenced_filter(fence), {"$set": {
+                        "mission_pool.pending_inventory": True, "mission_pool.updated_at": now,
+                    }})
+                    _log("pending_inventory_mid_batch", campaign_id=campaign_id, entry=entry["_id"])
+                    return {"done": False, "pending_inventory": True,
+                            "allocated": allocated, "out_of_stock": out_of_stock}
                 _entries().update_one(
                     {"_id": entry["_id"]},
                     {"$set": {
@@ -1556,10 +1986,92 @@ def _notifications_outstanding(campaign_id: str) -> int:
 # State machine driver (§18, §34)
 # ---------------------------------------------------------------------------
 
-def process_campaign(campaign_id: str, *, source: str = "worker") -> dict:
+DRAW_SUMMARIES_COLLECTION = "mission_pool_draw_summaries"
+
+
+def ensure_draw_summary_indexes() -> None:
+    try:
+        database.db[DRAW_SUMMARIES_COLLECTION].create_index(
+            [("campaign_id", 1), ("completed_at", -1)], name="ix_mission_draw_summaries_campaign",
+        )
+    except Exception:
+        logger.warning("[MISSION_POOL] draw_summary_index_creation_failed", exc_info=True)
+
+
+ensure_draw_summary_indexes()
+
+
+def _record_draw_summary(campaign_id: str, fence: _Fence, now: datetime, source: str) -> None:
+    """Append-only completion record (§ Completion). Written exactly once,
+    the moment a campaign reaches STAGE_COMPLETED — never updated afterwards,
+    so it is a permanent audit artifact independent of whatever the live
+    `gc_campaigns` document does next (e.g. a later admin action). Contains
+    counts and a seed COMMITMENT only — never a voucher code, the raw seed,
+    or a full username (§ structured logs / § Protect the raw seed)."""
+    campaign = _campaign_doc(campaign_id) or {}
+    block = campaign.get("mission_pool") or {}
+    reward_base = {"campaign_id": campaign_id, "category": REWARD_CATEGORY}
+    issued = _rewards().count_documents({**reward_base, "status": "assigned"})
+    failed_notifications = _rewards().count_documents({
+        **reward_base, "notification_status": {"$in": ["failed_retryable", "failed_terminal"]},
+    })
+    try:
+        database.db[DRAW_SUMMARIES_COLLECTION].insert_one({
+            "campaign_id": campaign_id,
+            "draw_id": block.get("draw_id"),
+            "trigger_type": block.get("close_trigger"),
+            "eligible_participant_count": block.get("qualified_count"),
+            "winner_count_requested": block.get("winner_count_requested"),
+            "winner_count_actual": block.get("winner_count_actual"),
+            "voucher_count_requested": block.get("winner_count_actual"),
+            "voucher_count_issued": issued,
+            "pending_inventory_count": block.get("inventory_shortage_count") or 0,
+            "failed_notification_count": failed_notifications,
+            "started_at": block.get("selection_started_at"),
+            "completed_at": now,
+            "selection_seed_commitment": block.get("selection_seed_commitment"),
+            "processing_generation": fence.generation,
+            "worker_id": fence.owner,
+            "source": source,
+            "created_at": now,
+        })
+    except Exception:
+        logger.warning("[MISSION_POOL] draw_summary_write_failed campaign=%s", campaign_id, exc_info=True)
+
+
+def _minimum_not_met(block: dict, campaign_id: str) -> bool:
+    """The scheduled-close-fallback safety gate (§ Scheduled-close
+    fallback). Uses the actual FROZEN qualified count computed by
+    `_eligibility_pass` — never the live counter, which is only accurate
+    for an armed mission and is not the authority here — so this is correct
+    whether or not the mission was ever armed, and whatever path closed it
+    (threshold, scheduled elapse, or an explicit admin close)."""
+    if block.get("allocation_method") != mp.ALLOCATION_RANDOM_QUALIFIED:
+        return False
+    minimum = block.get("minimum_qualified_entries")
+    if not minimum:
+        return False
+    qualified = _entries().count_documents({"campaign_id": campaign_id, "status": {"$in": [
+        mp.ENTRY_STATUS_QUALIFIED, mp.ENTRY_STATUS_WINNER, mp.ENTRY_STATUS_NON_WINNER,
+        mp.ENTRY_STATUS_REWARD_ALLOCATING, mp.ENTRY_STATUS_REWARD_ALLOCATED,
+    ]}})
+    return qualified < int(minimum)
+
+
+def process_campaign(campaign_id: str, *, source: str = "worker",
+                      admin_triggered: bool = False, override_minimum: bool = False) -> dict:
     """Advance one campaign as far as the time budget and its own state
     allow. Safe to call repeatedly, concurrently, and after a crash at any
-    point: every stage is idempotent and every mutation is fenced."""
+    point: every stage is idempotent and every mutation is fenced.
+
+    ``admin_triggered`` forces past the operator ``auto_draw``/``auto_issue``
+    pause gates (an admin explicitly asking to process is implicit consent —
+    Pause Auto Draw only ever blocks the SCHEDULER's own automatic tick, see
+    mission_pool.admin_process_mission / admin_draw_now). ``override_minimum``
+    additionally forces past the `minimum_qualified_entries` safety gate and
+    is set ONLY by the dedicated, confirmed `Draw Now` admin action — never
+    by the scheduler and never implied by `admin_triggered` alone.
+    """
     if not mp.mission_pool_enabled():
         return {"skipped": "mission_pool_disabled"}
 
@@ -1599,6 +2111,25 @@ def process_campaign(campaign_id: str, *, source: str = "worker") -> dict:
 
         if stage == mp.STAGE_QUALIFIED_SNAPSHOT_READY:
             stages.append(stage)
+            campaign = _campaign_doc(campaign_id) or campaign
+            block = campaign.get("mission_pool") or {}
+
+            if _minimum_not_met(block, campaign_id) and not override_minimum:
+                _campaigns().update_one(_fenced_filter(fence), {"$set": {
+                    "mission_pool.waiting_for_minimum": True, "mission_pool.updated_at": datetime.now(timezone.utc),
+                }})
+                _log("waiting_for_minimum", campaign_id=campaign_id, generation=fence.generation)
+                return {**result, "skipped": "waiting_for_minimum"}
+
+            if (block.get("allocation_method") == mp.ALLOCATION_RANDOM_QUALIFIED
+                    and not block.get("auto_draw", True) and not admin_triggered):
+                return {**result, "skipped": "auto_draw_paused"}
+
+            if block.get("waiting_for_minimum"):
+                _campaigns().update_one(_fenced_filter(fence), {"$set": {
+                    "mission_pool.waiting_for_minimum": False, "mission_pool.updated_at": datetime.now(timezone.utc),
+                }})
+
             if not _set_stage(fence, mp.STAGE_SELECTING_WINNERS, datetime.now(timezone.utc)):
                 return {**result, "skipped": "ownership_lost"}
             stage = mp.STAGE_SELECTING_WINNERS
@@ -1614,6 +2145,11 @@ def process_campaign(campaign_id: str, *, source: str = "worker") -> dict:
 
         if stage == mp.STAGE_WINNERS_SELECTED:
             stages.append(stage)
+            campaign = _campaign_doc(campaign_id) or campaign
+            block = campaign.get("mission_pool") or {}
+            if (block.get("allocation_method") == mp.ALLOCATION_RANDOM_QUALIFIED
+                    and not block.get("auto_issue", True) and not admin_triggered):
+                return {**result, "skipped": "auto_issue_paused"}
             if not _set_stage(fence, mp.STAGE_ALLOCATING_REWARDS, datetime.now(timezone.utc)):
                 return {**result, "skipped": "ownership_lost"}
             stage = mp.STAGE_ALLOCATING_REWARDS
@@ -1647,6 +2183,7 @@ def process_campaign(campaign_id: str, *, source: str = "worker") -> dict:
                        completed_at=final_now)
             result["completed"] = True
             _emit("mission_campaign_completed", campaign_id=campaign_id, source=source)
+            _record_draw_summary(campaign_id, fence, final_now, source)
 
         result["stages"] = stages
         return result
@@ -1702,10 +2239,15 @@ def run_mission_pool_processor() -> dict:
         return {"skipped": "disabled"}
 
     started = time.monotonic()
+    now = datetime.now(timezone.utc)
     try:
-        _fcfs_maintenance(datetime.now(timezone.utc))
+        _fcfs_maintenance(now)
     except Exception:
         logger.exception("[MISSION_FCFS] maintenance_pass_failed")
+    try:
+        _random_maintenance(now)
+    except Exception:
+        logger.exception("[MISSION_RANDOM] maintenance_pass_failed")
     campaign_ids = find_due_campaigns()
     results = []
     for campaign_id in campaign_ids:

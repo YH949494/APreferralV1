@@ -342,9 +342,10 @@ def test_first_qualified_allocation_is_submission_ordered(fake_db):
 
 
 def test_selection_is_reproducible_from_the_stored_seed(fake_db):
-    """§21: given the frozen qualified set + the stored seed, the winner set
-    is exactly recomputable for an internal audit."""
-    import random as _random
+    """§21: given the frozen qualified set + the stored seed + draw_id, the
+    winner set is exactly recomputable for an internal audit via the
+    documented sha256(seed:campaign_id:draw_id:entry_id) ranking."""
+    import hashlib
 
     _seed_campaign(fake_db, winner_count=3)
     _seed_pool(fake_db, 10)
@@ -356,14 +357,25 @@ def test_selection_is_reproducible_from_the_stored_seed(fake_db):
         mpp.process_campaign(CAMPAIGN_ID)
 
     block = fake_db["gc_campaigns"].find_one({"campaign_id": CAMPAIGN_ID})["mission_pool"]
+    seed = block["selection_seed"]
+    draw_id = block["draw_id"]
+    assert seed and draw_id
+    # The commitment is a pure function of the seed and must always verify —
+    # an auditor with only the commitment can confirm a claimed seed matches
+    # without the raw seed ever having been exposed beforehand.
+    assert block["selection_seed_commitment"] == hashlib.sha256(seed.encode()).hexdigest()
+
     ordered = [e["_id"] for e in fake_db[mp.ENTRIES_COLLECTION].find(
         {"campaign_id": CAMPAIGN_ID, "status": {"$in": [
             mp.ENTRY_STATUS_REWARD_ALLOCATED, mp.ENTRY_STATUS_NON_WINNER]}},
         sort=[("submitted_at", 1), ("_id", 1)],
     )]
-    shuffled = list(ordered)
-    _random.Random(block["selection_seed"]).shuffle(shuffled)
-    expected = set(shuffled[:3])
+
+    def _score(entry_id):
+        return hashlib.sha256(f"{seed}:{CAMPAIGN_ID}:{draw_id}:{entry_id}".encode()).hexdigest()
+
+    ranked = sorted(ordered, key=lambda eid: (_score(eid), str(eid)))
+    expected = set(ranked[:3])
     actual = {e["_id"] for e in _entries(fake_db, status=mp.ENTRY_STATUS_REWARD_ALLOCATED)}
     assert actual == expected
 
