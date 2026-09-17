@@ -1014,9 +1014,51 @@ def arm_random_campaign(campaign_id: str, *, now: datetime | None = None) -> dic
     if res.matched_count != 1:
         return {"armed": False, "reason": "cas_lost"}
 
-    _random_log("ARMED", campaign_id=campaign_id,
-                 threshold=block.get("auto_close_qualified_entries"))
-    return {"armed": True, "threshold": block.get("auto_close_qualified_entries")}
+    threshold = block.get("auto_close_qualified_entries")
+    _random_log("ARMED", campaign_id=campaign_id, threshold=threshold)
+
+    # The zero-entries guard above and this CAS are two separate writes, not
+    # one atomic operation: a submission whose own pre-write "fresh" read
+    # landed in that gap can still see the campaign unarmed and insert its
+    # entry via the OLD path, after the guard's count but before
+    # random_armed flips. Left alone, that entry would sit at `submitted`,
+    # skip the inline mechanic entirely, and only be picked up much later by
+    # `_eligibility_pass` once the campaign closes — which could leave the
+    # mission open well past the point it actually had enough qualified
+    # entries, since qualified_live_count was just reset to 0 and never
+    # learns about it. Feed any such straggler through the exact same
+    # try_consume_random_qualifying_slot the hot path uses, in submission
+    # order, right now (mirrors `_catch_up_fcfs_race`).
+    _catch_up_random_race(campaign_id, block.get("eligibility_policy") or mp.DEFAULT_ELIGIBILITY_POLICY,
+                           threshold, now)
+    return {"armed": True, "threshold": threshold}
+
+
+def _catch_up_random_race(campaign_id: str, policy: dict, threshold: int, now: datetime,
+                           *, max_passes: int = 3) -> None:
+    """Closes (without a transaction, so not to an absolute guarantee) the
+    arm/submission race described in `arm_random_campaign`. Bounded to a few
+    passes for the same reason `_catch_up_fcfs_race` is: for another entry to
+    still land during this catch-up, a request would need its own fresh read
+    to have raced the CAS by microseconds AND its insert to then also race
+    this scan by microseconds — vanishingly unlikely, and even then it fails
+    toward under- rather than over-counting (the straggler is simply picked
+    up later by the ordinary `_eligibility_pass`, exactly as it would have
+    been before this mechanic existed)."""
+    for _ in range(max_passes):
+        rows = list(_entries().find(
+            {"campaign_id": campaign_id, "status": mp.ENTRY_STATUS_SUBMITTED},
+            sort=[("submitted_at", 1), ("_id", 1)],
+            limit=50,
+        ))
+        if not rows:
+            return
+        for row in rows:
+            try:
+                try_consume_random_qualifying_slot(campaign_id, policy, threshold, row, now)
+            except Exception:
+                logger.exception("[MISSION_RANDOM] catch_up_failed campaign=%s entry=%s",
+                                  campaign_id, row["_id"])
 
 
 def _random_maintenance(now: datetime) -> None:
@@ -1037,7 +1079,7 @@ def _random_maintenance(now: datetime) -> None:
          SCHEDULED_CLOSE) when the authoritative qualified count already
          meets `minimum_qualified_entries` — or, when it does not, stamp
          `waiting_for_minimum` for the admin UI rather than closing at all.
-         `process_campaign`'s own `_minimum_not_met` gate (reused here, the
+         `process_campaign`'s own `minimum_not_met` gate (reused here, the
          one source of truth for the rule) still re-checks this
          independently against the frozen post-eligibility count before any
          draw — this pass only makes the WAITING_FOR_MINIMUM state visible
@@ -1069,7 +1111,7 @@ def _random_maintenance(now: datetime) -> None:
         ends_at = mp._as_utc((campaign.get("schedule") or {}).get("ends_at"))
         if ends_at is None or ends_at > now or block.get("closed_at"):
             continue
-        if _minimum_not_met(block, campaign_id):
+        if minimum_not_met(block, campaign_id):
             if not block.get("waiting_for_minimum"):
                 _campaigns().update_one({"campaign_id": campaign_id}, {"$set": {
                     "mission_pool.waiting_for_minimum": True, "mission_pool.updated_at": now,
@@ -1162,9 +1204,17 @@ def try_consume_random_qualifying_slot(campaign_id: str, policy: dict, threshold
     # invariant as the FCFS `$inc`: no count -> compare -> update race is
     # possible. Guarded on `status: "live"` + `closed_at: None` so a
     # submission that loses the race against the lock boundary can never
-    # still increment the count of a mission that has already locked.
+    # still increment the count of a mission that has already locked, AND
+    # on `qualified_live_count < threshold` so two racers at threshold-1 can
+    # never BOTH win the increment before either sees the close — without
+    # this bound the count could run past `auto_close_qualified_entries`
+    # under sustained concurrent load, not just by the single harmless
+    # in-flight straggler the design tolerates.
+    claim_filter = {"campaign_id": campaign_id, "status": "live", "mission_pool.closed_at": None}
+    if threshold:
+        claim_filter["mission_pool.qualified_live_count"] = {"$lt": int(threshold)}
     claim = _campaigns().find_one_and_update(
-        {"campaign_id": campaign_id, "status": "live", "mission_pool.closed_at": None},
+        claim_filter,
         {"$inc": {"mission_pool.qualified_live_count": 1}, "$set": {"mission_pool.updated_at": now}},
         return_document=True,
     )
@@ -2039,7 +2089,7 @@ def _record_draw_summary(campaign_id: str, fence: _Fence, now: datetime, source:
         logger.warning("[MISSION_POOL] draw_summary_write_failed campaign=%s", campaign_id, exc_info=True)
 
 
-def _minimum_not_met(block: dict, campaign_id: str) -> bool:
+def minimum_not_met(block: dict, campaign_id: str) -> bool:
     """The scheduled-close-fallback safety gate (§ Scheduled-close
     fallback). Uses the actual FROZEN qualified count computed by
     `_eligibility_pass` — never the live counter, which is only accurate
@@ -2114,7 +2164,7 @@ def process_campaign(campaign_id: str, *, source: str = "worker",
             campaign = _campaign_doc(campaign_id) or campaign
             block = campaign.get("mission_pool") or {}
 
-            if _minimum_not_met(block, campaign_id) and not override_minimum:
+            if minimum_not_met(block, campaign_id) and not override_minimum:
                 _campaigns().update_one(_fenced_filter(fence), {"$set": {
                     "mission_pool.waiting_for_minimum": True, "mission_pool.updated_at": datetime.now(timezone.utc),
                 }})

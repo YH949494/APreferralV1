@@ -684,8 +684,12 @@ def test_notification_failure_and_retry_never_issues_a_second_voucher(fake_db):
     # Exactly the same voucher — a Telegram failure never re-rolls the code
     # or creates a second reward row.
     assert reward_after["voucher_code"] == voucher_code
+    # Whichever of the two candidates the (randomly seeded) draw picked as
+    # the single winner, it must hold exactly one reward row — never a
+    # second one created by the notification retry.
     assert fake_db["campaign_rewards"].count_documents(
-        {"campaign_id": CAMPAIGN_ID, "category": "mission_pool", "telegram_user_id": 9930}) == 1
+        {"campaign_id": CAMPAIGN_ID, "category": "mission_pool",
+         "telegram_user_id": reward["telegram_user_id"]}) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -791,6 +795,82 @@ def test_pause_auto_draw_holds_selection_until_resumed_or_admin_forces_it(fake_d
         resp = client.post(f"/api/admin/mission-pool/{CAMPAIGN_ID}/process")
         assert resp.status_code == 200
     assert _campaign(fake_db)["mission_pool"]["processing_stage"] == mp.STAGE_COMPLETED
+
+
+# ---------------------------------------------------------------------------
+# Codex review fixes: bounded increment, arm/submission race, draw-now vs
+# minimum on a still-open mission
+# ---------------------------------------------------------------------------
+
+def test_qualifying_increment_never_exceeds_auto_close_threshold(fake_db):
+    """Concurrent submissions racing at threshold-1 must never push
+    qualified_live_count past auto_close_qualified_entries — the guarded
+    $inc bounds on the count itself, not just on status/closed_at."""
+    _seed_random(fake_db, winner_count=1, minimum=1, auto_close=6, qualified_live_count=5)
+    app = _app()
+
+    def submit_one(idx):
+        with app.test_client() as client:
+            return _submit(client, 9970 + idx)
+
+    results = _run_concurrently(submit_one, 10)
+    for r in results:
+        assert r.status_code in (200, 409)
+
+    campaign = _campaign(fake_db)
+    assert campaign["mission_pool"]["qualified_live_count"] == 6  # never higher
+    assert campaign["status"] == "ended"
+    qualified_entries = fake_db[mp.ENTRIES_COLLECTION].count_documents(
+        {"campaign_id": CAMPAIGN_ID, "status": mp.ENTRY_STATUS_QUALIFIED})
+    assert qualified_entries == 1  # exactly one of the ten actually incremented
+
+
+def test_arm_catch_up_counts_a_straggler_entry_immediately(fake_db):
+    """arm_random_campaign/_catch_up_random_race: an entry that slipped in
+    between the zero-entries guard and the arming CAS must still be counted
+    right away, not left stranded until the mission eventually closes."""
+    _seed_random(fake_db, winner_count=1, minimum=1, auto_close=3, armed=True, qualified_live_count=0)
+    fake_db["users"].insert_one({"user_id": 9980})
+    entry_id = _seed_qualified_entry(fake_db, 9980, status=mp.ENTRY_STATUS_SUBMITTED)
+    fake_db[mp.ENTRIES_COLLECTION].update_one({"_id": entry_id}, {"$set": {"is_correct": True}})
+
+    now = datetime.now(timezone.utc)
+    mpp._catch_up_random_race(CAMPAIGN_ID, mp.DEFAULT_ELIGIBILITY_POLICY, 3, now)
+
+    entry = fake_db[mp.ENTRIES_COLLECTION].find_one({"_id": entry_id})
+    assert entry["status"] == mp.ENTRY_STATUS_QUALIFIED
+    assert _block(fake_db)["qualified_live_count"] == 1
+
+
+def test_draw_now_below_minimum_never_locks_a_still_open_mission(fake_db):
+    """A rejected Draw Now on a mission that hasn't closed yet must leave it
+    exactly as open as before — never lock intake and then refuse, which
+    would strand it (Extend Deadline's already_locked guard would then also
+    refuse it, with no way back)."""
+    _seed_random(fake_db, winner_count=3, minimum=4, auto_close=6,
+                 status="live", armed=True, qualified_live_count=2)
+
+    app = _app()
+    with _admin_ok(), app.test_client() as client:
+        resp = client.post(f"/api/admin/mission-pool/{CAMPAIGN_ID}/draw-now", json={"confirm": True})
+    assert resp.status_code == 409
+    assert resp.get_json()["code"] == "minimum_not_met"
+
+    campaign = _campaign(fake_db)
+    assert campaign["status"] == "live"
+    assert campaign["mission_pool"]["closed_at"] is None
+
+    # Extend Deadline must still work — the mission was never locked.
+    new_deadline = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+    with _admin_ok(), app.test_client() as client:
+        extend_resp = client.post(f"/api/admin/mission-pool/{CAMPAIGN_ID}/extend-deadline",
+                                   json={"scheduled_close_at": new_deadline})
+    assert extend_resp.status_code == 200
+
+    # And submissions are still accepted.
+    with app.test_client() as client:
+        submit_resp = _submit(client, 9990)
+    assert submit_resp.status_code == 200
 
 
 def test_admin_pause_races_automatic_closure_intake_still_locks(fake_db):

@@ -1889,8 +1889,20 @@ def admin_draw_now(campaign_id: str):
 
     now = datetime.now(timezone.utc)
     block = campaign.get("mission_pool") or {}
+    still_open = not block.get("closed_at") and campaign.get("status") == "live"
+
+    # Never lock an still-open mission on a Draw Now that is about to be
+    # refused for being below minimum: closing intake here and THEN letting
+    # process_campaign's gate answer "waiting_for_minimum" would permanently
+    # strand the mission (closed_at is now set, so Extend Deadline's own
+    # already_locked guard would refuse it too) for a request that never
+    # should have locked anything in the first place.
+    if still_open and mpp.minimum_not_met(block, campaign_id) and not override_minimum:
+        _audit("mission_draw_now_blocked_minimum", admin, campaign_id, {"still_open": True})
+        return jsonify({"status": "error", "code": "minimum_not_met"}), 409
+
     locked_now = False
-    if not block.get("closed_at") and campaign.get("status") == "live":
+    if still_open:
         locked_now = mpp.close_random_intake(campaign_id, now, CLOSE_TRIGGER_ADMIN_OVERRIDE)
 
     result = mpp.process_campaign(campaign_id, source="admin", admin_triggered=True,
