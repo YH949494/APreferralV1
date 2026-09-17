@@ -623,7 +623,49 @@ def arm_fcfs_campaign(campaign_id: str, *, now: datetime | None = None) -> dict:
 
     _fcfs_log("ARMED", campaign_id=campaign_id, capacity=capacity,
               winner_count=winner_count, available=available)
+
+    # The zero-entries guard above and this CAS are two separate writes, not
+    # one atomic operation (no multi-document transactions here): a
+    # submission whose own pre-write "fresh" read landed in that gap can
+    # still see the campaign unarmed and insert its entry via the OLD path,
+    # after the guard's count but before fcfs_armed flips. Left alone, that
+    # entry would sit at `submitted`, skip the inline mechanic entirely, and
+    # only be picked up much later by `_eligibility_pass` once the campaign
+    # closes -- where it could re-enter `_select_winners` alongside entries
+    # already marked `winner` by the inline mechanic and push the total
+    # winner count past `fcfs_capacity`. Feed any such straggler through the
+    # exact same `try_consume_fcfs_slot` the hot path uses, in submission
+    # order, right now.
+    _catch_up_fcfs_race(campaign_id, block.get("eligibility_policy") or mp.DEFAULT_ELIGIBILITY_POLICY,
+                         capacity, now)
     return {"armed": True, "capacity": capacity}
+
+
+def _catch_up_fcfs_race(campaign_id: str, policy: dict, capacity: int, now: datetime,
+                         *, max_passes: int = 3) -> None:
+    """Closes (without a transaction, so not to an absolute guarantee) the
+    arm/submission race described in `arm_fcfs_campaign`. Bounded to a few
+    passes: for another entry to still land during this catch-up, a request
+    would need its own fresh read to have raced the CAS by microseconds AND
+    its insert to then also race this scan by microseconds -- vanishingly
+    unlikely, and even then it fails toward under- rather than
+    over-allocation (the straggler is simply picked up later by the ordinary
+    `_eligibility_pass`, exactly as it would have been before this mechanic
+    existed)."""
+    for _ in range(max_passes):
+        rows = list(_entries().find(
+            {"campaign_id": campaign_id, "status": mp.ENTRY_STATUS_SUBMITTED},
+            sort=[("submitted_at", 1), ("_id", 1)],
+            limit=50,
+        ))
+        if not rows:
+            return
+        for row in rows:
+            try:
+                try_consume_fcfs_slot(campaign_id, policy, capacity, row, now)
+            except Exception:
+                logger.exception("[MISSION_FCFS] catch_up_failed campaign=%s entry=%s",
+                                  campaign_id, row["_id"])
 
 
 def _fcfs_maintenance(now: datetime) -> None:
@@ -685,7 +727,12 @@ def try_consume_fcfs_slot(campaign_id: str, policy: dict, capacity: int, entry: 
     identity may consume exactly one slot; a wrong answer (never reaches
     here — see submit_mission's retry gate), a quality exclusion, a
     duplicate identity, or arriving after capacity is exhausted all consume
-    zero.
+    zero. A guarded-update failure that is NOT genuine capacity exhaustion
+    (e.g. the campaign was paused between the caller's own state check and
+    this call) returns `{"state": "deferred"}` and touches nothing: the
+    entry stays `submitted` for the ordinary `_eligibility_pass` to decide
+    once the campaign resumes and later closes, rather than being
+    permanently mislabeled `mission_full`.
 
     FAILURE SEQUENCE and what a crash at each point leaves recoverable —
     entry -> eligibility -> identity claim -> FCFS slot -> qualified state:
@@ -775,6 +822,32 @@ def try_consume_fcfs_slot(campaign_id: str, policy: dict, capacity: int, entry: 
         return_document=True,
     )
     if not claim:
+        # The guarded update can fail for two different reasons and they
+        # must NOT be treated alike: genuine capacity exhaustion (or an
+        # already-landed close) is terminal, but `status != "live"` can also
+        # mean an admin paused the campaign in the gap between this
+        # request's own pre-write state check and this exact claim attempt
+        # -- a transient condition, not a full mission. Re-read to tell them
+        # apart rather than permanently disqualifying an otherwise-winning
+        # entry (and pinning its identity claim to it) for a pause that gets
+        # lifted moments later.
+        current = _campaign_doc(campaign_id) or {}
+        current_block = current.get("mission_pool") or {}
+        truly_full = (
+            current_block.get("closed_at") is not None
+            or int(current_block.get("fcfs_claimed") or 0) >= capacity
+        )
+        if not truly_full:
+            # Nothing to undo: the entry is already durably `submitted` and
+            # its identity claim already belongs to THIS entry_id, which
+            # `_claim_identity` re-claims idempotently. Once the campaign
+            # resumes and eventually closes, the ordinary `_eligibility_pass`
+            # decides this entry exactly like any other — never permanently
+            # locked out as `mission_full` for a pause that was never a
+            # capacity exhaustion.
+            _fcfs_log("SLOT_CLAIM_DEFERRED", campaign_id=campaign_id, status=current.get("status"))
+            return {"state": "deferred"}
+
         _entries().update_one(
             {"_id": entry_id, "status": mp.ENTRY_STATUS_SUBMITTED},
             {"$set": {

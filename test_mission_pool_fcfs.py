@@ -296,6 +296,141 @@ def test_publish_transition_arms_a_fresh_fcfs_campaign(fake_db):
     assert block["fcfs_claimed"] == 0
 
 
+def test_arm_catches_up_an_entry_that_raced_the_cas(fake_db):
+    """Codex P1: arm_fcfs_campaign's zero-entries guard and its CAS are two
+    separate writes. A submission whose own fresh read lands in that gap can
+    still insert an entry via the old (un-armed) path. arm_fcfs_campaign must
+    feed any such straggler through try_consume_fcfs_slot itself rather than
+    leaving it to be picked up later by _eligibility_pass, which would let it
+    re-enter _select_winners alongside already-decided winners and risk
+    exceeding fcfs_capacity."""
+    _seed_fcfs(fake_db, capacity=None, armed=False, winner_count=2, pool_available=2)
+    now = datetime.now(timezone.utc)
+    straggler_uid = 42424242
+    fake_db["users"].insert_one({"user_id": straggler_uid})
+    # Simulates an entry inserted via the old path between arm's zero-entries
+    # check and its CAS -- from arm's point of view this straggler exists
+    # the whole time (the count check would see it), so to reproduce the
+    # actual race we insert it, then call arm, and assert it is NOT left
+    # behind at `submitted` once arming completes.
+    fake_db[mp.ENTRIES_COLLECTION].insert_one({
+        "campaign_id": FCFS_CAMPAIGN_ID, "telegram_user_id": straggler_uid, "answer": "x",
+        "answer_normalized": "x", "is_correct": True, "status": mp.ENTRY_STATUS_SUBMITTED,
+        "identity_key": None, "identity_type": None, "disqualification_reason": None,
+        "reward_id": None, "submitted_at": now, "created_at": now, "updated_at": now,
+    })
+
+    # arm_fcfs_campaign's own existing-entries guard would normally refuse to
+    # arm at all here (this is exactly Decision 1's protection). Exercise the
+    # catch-up mechanism directly, the way it runs right after a real CAS.
+    result = mpp.arm_fcfs_campaign(FCFS_CAMPAIGN_ID)
+    assert result == {"armed": False, "reason": "existing_entries"}
+
+    mpp._campaigns().update_one(
+        {"campaign_id": FCFS_CAMPAIGN_ID},
+        {"$set": {"mission_pool.fcfs_armed": True, "mission_pool.fcfs_capacity": 2,
+                   "mission_pool.fcfs_claimed": 0, "mission_pool.fcfs_armed_at": now}},
+    )
+    mpp._catch_up_fcfs_race(FCFS_CAMPAIGN_ID, dict(mp.DEFAULT_ELIGIBILITY_POLICY), 2, now)
+
+    entry = fake_db[mp.ENTRIES_COLLECTION].find_one({"telegram_user_id": straggler_uid})
+    assert entry["status"] == mp.ENTRY_STATUS_WINNER
+    campaign = fake_db["gc_campaigns"].find_one({"campaign_id": FCFS_CAMPAIGN_ID})
+    assert campaign["mission_pool"]["fcfs_claimed"] == 1
+
+
+def test_publish_time_arm_catches_up_a_racing_submission(fake_db):
+    """End-to-end version of the same race, through the real publish path:
+    an entry that lands between the zero-entries guard and the arming CAS
+    must come out of arm_fcfs_campaign already decided (winner or excluded),
+    never sitting at `submitted`."""
+    _seed_pool(fake_db, 2)
+    now = datetime.now(timezone.utc)
+    fake_db["gc_campaigns"].insert_one({
+        "campaign_id": FCFS_CAMPAIGN_ID, "name": "Race Arm", "type": "mission_pool",
+        "mechanic": "mission_pool", "status": "live",
+        "schedule": {"starts_at": now - timedelta(hours=1), "ends_at": now + timedelta(hours=1)},
+        "mission_config": {"mission_type": "keyword", "prompt": "p", "correct_answer": "x"},
+        "mission_pool": {
+            "pool_id": FCFS_POOL_ID, "pool_type": "voucher_drop", "winner_count": 2,
+            "allocation_method": mp.ALLOCATION_FIRST_QUALIFIED,
+            "eligibility_policy": dict(mp.DEFAULT_ELIGIBILITY_POLICY),
+            "cancelled": False, "processing_stage": mp.STAGE_PENDING, "processing_generation": 0,
+        },
+    })
+    # No pre-existing entries, so arm_fcfs_campaign itself will pass the
+    # zero-entries guard; monkeypatch the inventory read to insert a
+    # straggler entry right as arming computes capacity, reproducing the
+    # exact gap between the guard and the CAS without needing real threads.
+    original_pool_stock = vps.pool_stock
+
+    def _pool_stock_with_race(pool_id):
+        fake_db[mp.ENTRIES_COLLECTION].insert_one({
+            "campaign_id": FCFS_CAMPAIGN_ID, "telegram_user_id": 909090, "answer": "x",
+            "answer_normalized": "x", "is_correct": True, "status": mp.ENTRY_STATUS_SUBMITTED,
+            "identity_key": None, "identity_type": None, "disqualification_reason": None,
+            "reward_id": None, "submitted_at": datetime.now(timezone.utc),
+            "created_at": datetime.now(timezone.utc), "updated_at": datetime.now(timezone.utc),
+        })
+        return original_pool_stock(pool_id)
+
+    fake_db["users"].insert_one({"user_id": 909090})
+    with patch.object(vps, "pool_stock", side_effect=_pool_stock_with_race):
+        result = mpp.arm_fcfs_campaign(FCFS_CAMPAIGN_ID)
+
+    assert result["armed"] is True
+    entry = fake_db[mp.ENTRIES_COLLECTION].find_one({"telegram_user_id": 909090})
+    assert entry["status"] != mp.ENTRY_STATUS_SUBMITTED
+    assert entry["status"] == mp.ENTRY_STATUS_WINNER
+
+
+def test_transient_claim_failure_defers_instead_of_permanently_disqualifying(fake_db):
+    """Codex P2: a guarded-update failure that is NOT genuine capacity
+    exhaustion (e.g. an admin paused the campaign between the submission's
+    own pre-write check and this exact claim attempt) must not permanently
+    disqualify an otherwise-winning entry as mission_full -- it must be left
+    exactly as-is (`submitted`) for the ordinary eligibility pass to decide
+    once the campaign resumes."""
+    _seed_fcfs(fake_db, capacity=5, claimed=1, armed=True, winner_count=5, status="paused")
+    now = datetime.now(timezone.utc)
+    uid = 606060
+    fake_db["users"].insert_one({"user_id": uid})
+    entry = _submitted_entry(fake_db, uid, now)
+
+    result = mpp.try_consume_fcfs_slot(FCFS_CAMPAIGN_ID, dict(mp.DEFAULT_ELIGIBILITY_POLICY), 5, entry, now)
+
+    assert result == {"state": "deferred"}
+    stored = fake_db[mp.ENTRIES_COLLECTION].find_one({"_id": entry["_id"]})
+    assert stored["status"] == mp.ENTRY_STATUS_SUBMITTED
+    assert stored["disqualification_reason"] is None
+    campaign = fake_db["gc_campaigns"].find_one({"campaign_id": FCFS_CAMPAIGN_ID})
+    assert campaign["mission_pool"]["fcfs_claimed"] == 1  # unchanged -- no slot consumed
+
+    # Once resumed, the SAME entry is fairly (re-)claimable -- the identity
+    # claim already belongs to this entry_id and is idempotent to re-claim.
+    fake_db["gc_campaigns"].update_one({"campaign_id": FCFS_CAMPAIGN_ID}, {"$set": {"status": "live"}})
+    result2 = mpp.try_consume_fcfs_slot(FCFS_CAMPAIGN_ID, dict(mp.DEFAULT_ELIGIBILITY_POLICY), 5, entry, now)
+    assert result2["state"] == "winner"
+
+
+def test_genuine_capacity_exhaustion_still_permanently_disqualifies(fake_db):
+    """The pause-vs-full distinction must not weaken the real mission_full
+    path: once fcfs_claimed truly reaches capacity, the failed claim is
+    still permanent."""
+    _seed_fcfs(fake_db, capacity=1, claimed=1, armed=True, winner_count=1, status="live")
+    now = datetime.now(timezone.utc)
+    uid = 606061
+    fake_db["users"].insert_one({"user_id": uid})
+    entry = _submitted_entry(fake_db, uid, now)
+
+    result = mpp.try_consume_fcfs_slot(FCFS_CAMPAIGN_ID, dict(mp.DEFAULT_ELIGIBILITY_POLICY), 1, entry, now)
+
+    assert result == {"state": "full"}
+    stored = fake_db[mp.ENTRIES_COLLECTION].find_one({"_id": entry["_id"]})
+    assert stored["status"] == mp.ENTRY_STATUS_DISQUALIFIED
+    assert stored["disqualification_reason"] == mp.REASON_MISSION_FULL
+
+
 # ---------------------------------------------------------------------------
 # try_consume_fcfs_slot — exclusions consume zero slots
 # ---------------------------------------------------------------------------
