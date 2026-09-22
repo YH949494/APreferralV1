@@ -311,6 +311,27 @@ def mission_view(campaign_id: str):
         },
         "winner_count": block.get("winner_count"),
     }
+    if block.get("allocation_method") == mp.ALLOCATION_RANDOM_QUALIFIED:
+        # Qualified count + winner count only — never an exact probability
+        # here (that stays admin-only, computed from the same authoritative
+        # count; see mission_pool._random_pool_summary). If this mission was
+        # armed for the live auto-close mechanic, the counter is already an
+        # O(1) field read; otherwise it's the same bounded indexed count the
+        # admin summary uses.
+        if block.get("random_armed"):
+            qualified_current = int(block.get("qualified_live_count") or 0)
+        else:
+            qualified_current = database.db[mp.ENTRIES_COLLECTION].count_documents({
+                "campaign_id": campaign_id,
+                "status": {"$in": [
+                    mp.ENTRY_STATUS_QUALIFIED, mp.ENTRY_STATUS_WINNER, mp.ENTRY_STATUS_NON_WINNER,
+                    mp.ENTRY_STATUS_REWARD_ALLOCATING, mp.ENTRY_STATUS_REWARD_ALLOCATED,
+                ]},
+            })
+        payload["random_pool"] = {
+            "qualified_current": qualified_current,
+            "winner_count": block.get("winner_count"),
+        }
     if admin_only and is_admin:
         payload["preview_mode"] = True
         payload["visibility"] = "admin-only"

@@ -356,6 +356,17 @@
     if (view.preview_mode && view.visibility_reason) {
       card.appendChild(el("div", { class: "mp-admin-reason", text: view.visibility_reason }));
     }
+    // Random Pool: qualified count + winner count only — never an exact
+    // probability (that would need the authoritative live count computed
+    // server-side at every render, and the product ask is explicitly the
+    // participant/winner counts, not an odds figure).
+    if (view.random_pool) {
+      card.appendChild(el("div", {
+        class: "mp-random-pool-info",
+        text: "Random Reward Pool — " + (view.random_pool.qualified_current || 0) +
+          " qualified participants — " + (view.random_pool.winner_count || 0) + " winners will be selected",
+      }));
+    }
 
     var readAnswer = null;
 
