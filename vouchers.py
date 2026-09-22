@@ -323,14 +323,31 @@ def _public_pool_ip_block_seconds() -> int:
 def _public_pool_subnet_hard_block() -> bool:
     return bool(_abuse_setting("public_pool_subnet_hard_block", PUBLIC_POOL_SUBNET_HARD_BLOCK))
 
+# Historical hardcoded fallbacks (mirrors referral_destination.py /
+# channel_reactivation.py) so an unset/blank env var never breaks the
+# Welcome Voucher's live getChatMember subscription check — without this,
+# _official_channel_identifier() returns None and check_channel_subscribed()
+# permanently reports "not subscribed" (reason=channel_unset) even after
+# the user joins, stranding the Join Channel/Verify Subscription card.
+_DEFAULT_OFFICIAL_CHANNEL_ID = -1002396761021
+_DEFAULT_OFFICIAL_CHANNEL_USERNAME = "advantplayofficial"
+
 _RAW_OFFICIAL_CHANNEL_ID = getattr(_cfg, "OFFICIAL_CHANNEL_ID", os.getenv("OFFICIAL_CHANNEL_ID"))
 try:
-    OFFICIAL_CHANNEL_ID = int(str(_RAW_OFFICIAL_CHANNEL_ID).strip()) if _RAW_OFFICIAL_CHANNEL_ID not in (None, "") else None
+    OFFICIAL_CHANNEL_ID = (
+        int(str(_RAW_OFFICIAL_CHANNEL_ID).strip())
+        if _RAW_OFFICIAL_CHANNEL_ID not in (None, "")
+        else _DEFAULT_OFFICIAL_CHANNEL_ID
+    )
 except (TypeError, ValueError):
-    OFFICIAL_CHANNEL_ID = None
+    OFFICIAL_CHANNEL_ID = _DEFAULT_OFFICIAL_CHANNEL_ID
 
 _RAW_OFFICIAL_CHANNEL_USERNAME = getattr(_cfg, "OFFICIAL_CHANNEL_USERNAME", os.getenv("OFFICIAL_CHANNEL_USERNAME"))
-OFFICIAL_CHANNEL_USERNAME = (str(_RAW_OFFICIAL_CHANNEL_USERNAME).strip() or "") if _RAW_OFFICIAL_CHANNEL_USERNAME is not None else ""
+OFFICIAL_CHANNEL_USERNAME = (
+    (str(_RAW_OFFICIAL_CHANNEL_USERNAME).strip() or _DEFAULT_OFFICIAL_CHANNEL_USERNAME)
+    if _RAW_OFFICIAL_CHANNEL_USERNAME is not None
+    else _DEFAULT_OFFICIAL_CHANNEL_USERNAME
+)
 _RAW_MAIN_GROUP_ID = getattr(_cfg, "MAIN_GROUP_ID", os.getenv("MAIN_GROUP_ID", "-1002304653063"))
 try:
     MAIN_GROUP_ID = int(str(_RAW_MAIN_GROUP_ID).strip()) if _RAW_MAIN_GROUP_ID not in (None, "") else None
