@@ -323,16 +323,33 @@ def _public_pool_ip_block_seconds() -> int:
 def _public_pool_subnet_hard_block() -> bool:
     return bool(_abuse_setting("public_pool_subnet_hard_block", PUBLIC_POOL_SUBNET_HARD_BLOCK))
 
-# Official channel identity: resolved once in referral_destination.py so
-# every runtime (main.py, scheduler.py, and this module) agrees on which
-# chat is the official channel. This module used to re-parse
-# OFFICIAL_CHANNEL_ID/USERNAME from config/env independently, which could
-# silently diverge from the canonical value and made the Live Drop channel
-# gate fragile to config drift — see the Live Drop channel-gate audit.
-from referral_destination import OFFICIAL_CHANNEL_ID
-OFFICIAL_CHANNEL_USERNAME = (os.getenv("OFFICIAL_CHANNEL_USERNAME") or "@advantplayofficial").strip()
+# Official channel identity: the numeric ID is resolved once in
+# referral_destination.py so every runtime (main.py, scheduler.py, and this
+# module) agrees on which chat is the official channel. This module used to
+# re-parse OFFICIAL_CHANNEL_ID/USERNAME from config/env independently, which
+# could silently diverge from the canonical value and made the Live Drop
+# channel gate fragile to config drift — see the Live Drop channel-gate
+# audit. referral_destination.OFFICIAL_CHANNEL_ID always resolves to a
+# non-None value (it falls back to a hardcoded historical ID when the env
+# var is unset), so a deployment that configures ONLY
+# OFFICIAL_CHANNEL_USERNAME (no OFFICIAL_CHANNEL_ID) is preserved as a
+# username-only override here rather than silently overridden by that
+# canonical fallback ID (a real deployments-can-break regression Codex
+# review flagged on PR #498).
+from referral_destination import OFFICIAL_CHANNEL_ID as _CANONICAL_OFFICIAL_CHANNEL_ID
+
+OFFICIAL_CHANNEL_USERNAME = (os.getenv("OFFICIAL_CHANNEL_USERNAME") or "").strip()
 if OFFICIAL_CHANNEL_USERNAME and not OFFICIAL_CHANNEL_USERNAME.startswith("@"):
     OFFICIAL_CHANNEL_USERNAME = f"@{OFFICIAL_CHANNEL_USERNAME}"
+
+if os.getenv("OFFICIAL_CHANNEL_ID") in (None, "") and OFFICIAL_CHANNEL_USERNAME:
+    # No explicit ID configured for this deployment, but a username was —
+    # honor that override instead of the canonical resolver's fallback ID.
+    OFFICIAL_CHANNEL_ID = None
+else:
+    OFFICIAL_CHANNEL_ID = _CANONICAL_OFFICIAL_CHANNEL_ID
+    if not OFFICIAL_CHANNEL_USERNAME:
+        OFFICIAL_CHANNEL_USERNAME = "@advantplayofficial"
 
 if OFFICIAL_CHANNEL_ID is None and not OFFICIAL_CHANNEL_USERNAME:
     logger.error(

@@ -6349,6 +6349,19 @@
       return _loadVouchersInFlight;
     }
 
+    // For callers whose state loadVouchers() depends on (e.g. the user's
+    // region) changed AFTER a load may have already started — joining that
+    // in-flight load via loadVouchers() would silently return stale
+    // (pre-state-change) results. Waits for any in-flight load to finish,
+    // then always starts a guaranteed-fresh one — never runs two
+    // /vouchers/visible requests concurrently either way.
+    async function reloadVouchersForUpdatedState() {
+      if (_loadVouchersInFlight) {
+        await _loadVouchersInFlight.catch(() => {});
+      }
+      return loadVouchers();
+    }
+
     async function _loadVouchersImpl() {
       const section = document.getElementById("voucher-section");
       const messageEl = document.getElementById("campaign-voucher-message");
@@ -7908,8 +7921,14 @@ ${referral}`;
                   const lockData = await lockRes.json();
                   if (lockData?.success) {
                     setStoredRegion(lockData.region || guessedRegion);
-                    // Refresh vouchers now that backend has the region saved.
-                    loadVouchers();
+                    // Refresh vouchers now that backend has the region
+                    // saved. The initial (regionless) loadVouchers() call
+                    // may still be in flight when this resolves — join it
+                    // with loadVouchers() and its stale, pre-region-save
+                    // result would just be handed back, silently skipping
+                    // the reload. reloadVouchersForUpdatedState() waits for
+                    // it to finish and then always starts a fresh load.
+                    reloadVouchersForUpdatedState();
                   }
                 }
               } catch (geoErr) {

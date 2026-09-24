@@ -19,6 +19,7 @@ Also covers P3: vouchers.py's OFFICIAL_CHANNEL_ID must be the canonical
 value resolved by referral_destination.py (the same one main.py/scheduler.py
 use), not an independently re-parsed env var.
 """
+import importlib
 import os
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -265,6 +266,30 @@ class CanonicalChannelConfigTests(unittest.TestCase):
 
     def test_official_channel_username_normalized_with_at_prefix(self):
         self.assertEqual(m.OFFICIAL_CHANNEL_USERNAME, "@advantplayofficial")
+
+    def test_username_only_override_is_preserved_not_replaced_by_canonical_id(self):
+        # Codex review on PR #498 (P1): a deployment that configures ONLY
+        # OFFICIAL_CHANNEL_USERNAME (no OFFICIAL_CHANNEL_ID) must keep using
+        # that username, not be silently switched to
+        # referral_destination.OFFICIAL_CHANNEL_ID's hardcoded fallback ID.
+        orig_id_env = os.environ.get("OFFICIAL_CHANNEL_ID")
+        orig_username_env = os.environ.get("OFFICIAL_CHANNEL_USERNAME")
+        try:
+            os.environ.pop("OFFICIAL_CHANNEL_ID", None)
+            os.environ["OFFICIAL_CHANNEL_USERNAME"] = "@customchannel"
+            importlib.reload(m)
+            self.assertIsNone(m.OFFICIAL_CHANNEL_ID)
+            self.assertEqual(m.OFFICIAL_CHANNEL_USERNAME, "@customchannel")
+        finally:
+            if orig_id_env is None:
+                os.environ.pop("OFFICIAL_CHANNEL_ID", None)
+            else:
+                os.environ["OFFICIAL_CHANNEL_ID"] = orig_id_env
+            if orig_username_env is None:
+                os.environ.pop("OFFICIAL_CHANNEL_USERNAME", None)
+            else:
+                os.environ["OFFICIAL_CHANNEL_USERNAME"] = orig_username_env
+            importlib.reload(m)
 
 
 if __name__ == "__main__":

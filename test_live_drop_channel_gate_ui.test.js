@@ -594,6 +594,38 @@ test("P4: two concurrent loadVouchers() calls collapse into a single /vouchers/v
   assert.equal(checkOnlyCallCount(fetchLog), 1, "only one check_only probe per live drop, not two duplicate getChatMember checks");
 });
 
+test("P4/Codex: reloadVouchersForUpdatedState() waits out an in-flight load then starts a guaranteed-fresh one (not a stale join)", async () => {
+  // Regression for a Codex review finding on PR #498: joining an in-flight
+  // loadVouchers() call via loadVouchers() itself after state it depends on
+  // (e.g. the user's region) just changed would silently hand back a
+  // pre-state-change result and skip the reload entirely.
+  let visibleCalls = 0;
+  let resolveFirst;
+  const firstGate = new Promise((resolve) => {
+    resolveFirst = resolve;
+  });
+  const { sandbox } = buildSandbox({
+    fetchImpl: async (url) => {
+      if (String(url).includes("/vouchers/visible")) {
+        visibleCalls += 1;
+        if (visibleCalls === 1) await firstGate; // hold the first request open
+        return { ok: true, status: 200, json: async () => ({ status: "ok", drops: [] }) };
+      }
+      return { ok: true, status: 200, json: async () => ({ status: "ok" }) };
+    },
+  });
+  run(sandbox);
+
+  const firstLoad = sandbox.loadVouchers(); // starts the in-flight load
+  await flush(5);
+  const reload = sandbox.reloadVouchersForUpdatedState(); // must NOT just join firstLoad
+  resolveFirst();
+  await Promise.all([firstLoad, reload]);
+  await flush();
+
+  assert.equal(visibleCalls, 2, "reloadVouchersForUpdatedState() must trigger a second, fresh /vouchers/visible request");
+});
+
 test("P4: a loadVouchers() call after the previous one settles starts a fresh (uncached) load", async () => {
   let visibleCalls = 0;
   const { sandbox } = buildSandbox({
