@@ -21,12 +21,13 @@ from __future__ import annotations
 
 import logging
 import random
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
 from bson import ObjectId
 from bson.errors import InvalidId
 from flask import Blueprint, jsonify, request
+from pymongo.errors import DuplicateKeyError
 
 import database
 from config import KL_TZ
@@ -38,6 +39,7 @@ lucky_games_public_bp = Blueprint("lucky_games_public", __name__)
 
 COLLECTION = "lucky_games"
 DAILY_SELECTION_COLLECTION = "lucky_game_daily_selection"
+EVENTS_COLLECTION = "lucky_game_events"
 
 VOLATILITY_OPTIONS = ("Low", "Low-Med", "Medium", "High-Med", "High")
 DEFAULT_LABEL = "Lucky Game"
@@ -60,6 +62,20 @@ _EDITABLE_FIELDS = (
 # is_published, created_at/updated_at — never leaves this module.
 _PUBLIC_FIELDS = ("name", "label", "volatility", "max_win", "image_url", "game_url", "provider")
 
+# Click-tracking: the Lucky Game card always points at the same AdvantPlay
+# games page, tagged for attribution. Not admin-configurable — this is a
+# fixed marketing destination, not part of the per-game catalogue.
+TRACKING_SURFACE = "miniapp_lucky_game"
+LUCKY_GAME_DESTINATION_URL = (
+    "https://advantplay.com/our-games.html"
+    "?utm_source=telegram&utm_medium=miniapp&utm_campaign=lucky_game"
+)
+ALLOWED_TRACK_EVENTS = ("impression", "click")
+MAX_TRACKING_KEY_LEN = 200
+ANALYTICS_DEFAULT_DAYS = 7
+ANALYTICS_MIN_DAYS = 1
+ANALYTICS_MAX_DAYS = 90
+
 
 def _require_admin():
     from vouchers import require_admin
@@ -80,6 +96,44 @@ def _ensure_indexes() -> None:
         logger.warning("[LUCKY_GAMES] index_creation_failed", exc_info=True)
 
 
+def _ensure_event_indexes() -> None:
+    """Indexes for lucky_game_events, created through the project's existing
+    ``database.safe_create_index`` convention (idempotent, tolerant of a
+    pre-existing equivalent index under a different name)."""
+    try:
+        col = database.db[EVENTS_COLLECTION]
+        # General lookups: "has this user already interacted with today's
+        # selection" / per-tracking-key breakdowns.
+        database.safe_create_index(
+            col, [("user_id", 1), ("tracking_key", 1), ("event_type", 1)],
+            name="ix_lucky_game_events_user_tracking_type",
+        )
+        # Impression uniqueness: one user + tracking_key may only ever have
+        # one impression row. Scoped to event_type == "impression" via a
+        # partial filter so click rows (intentionally not unique) are
+        # entirely unaffected by this constraint.
+        database.safe_create_index(
+            col, [("user_id", 1), ("tracking_key", 1), ("event_type", 1)],
+            name="ux_lucky_game_events_impression_unique",
+            unique=True,
+            partialFilterExpression={"event_type": "impression"},
+        )
+        database.safe_create_index(
+            col, [("tracking_key", 1), ("event_type", 1)],
+            name="ix_lucky_game_events_tracking_type",
+        )
+        database.safe_create_index(
+            col, [("selection_date_kl", 1), ("event_type", 1)],
+            name="ix_lucky_game_events_date_type",
+        )
+        database.safe_create_index(
+            col, [("event_type", 1), ("created_at_utc", 1)],
+            name="ix_lucky_game_events_type_created",
+        )
+    except Exception:
+        logger.warning("[LUCKY_GAMES] event_index_creation_failed", exc_info=True)
+
+
 def _backfill_selection_weight_defaults() -> None:
     """Idempotent backfill: any pre-existing lucky_games row (seeded before
     ``selection_weight`` existed, or migrated by seed_lucky_games.py before
@@ -96,6 +150,7 @@ def _backfill_selection_weight_defaults() -> None:
 
 
 _ensure_indexes()
+_ensure_event_indexes()
 _backfill_selection_weight_defaults()
 
 
@@ -490,8 +545,8 @@ def _weighted_pick(games: list[dict], rng=None) -> dict:
 
 def _build_daily_slot(game: dict) -> dict:
     """Public payload for the daily-pick tile. Keeps the pre-existing
-    ``tag``/``maxwin`` keys the Mini App's ``renderDailyGame()`` already
-    reads (backward compatibility with cached/older clients) alongside the
+    ``tag``/``maxwin`` keys the Mini App's ``renderDailyGameDisplay()``
+    already reads (backward compatibility with cached/older clients) alongside the
     richer lucky_games field set the admin catalogue exposes. Never
     includes ``selection_weight`` — internal probability weighting is not
     exposed publicly."""
@@ -500,6 +555,27 @@ def _build_daily_slot(game: dict) -> dict:
     slot["tag"] = game.get("volatility", "")
     slot["maxwin"] = game.get("max_win", "")
     return slot
+
+
+def _build_tracking_key(date_kl: str, game_id: str) -> str:
+    """Canonical click-tracking identity for a day's selection. Deliberately
+    keyed on the persisted ``game_id`` (not the display name) so a game
+    rename never fragments a single day's tracking_key into two."""
+    return f"daily_game:{date_kl}:{game_id}"
+
+
+def _build_selection_result(date_kl: str, game: dict) -> dict:
+    """Public payload for ``get_daily_game_selection`` — extends the
+    pre-existing {"ok", "date_kl", "slot"} shape with a ``tracking_key`` an
+    older cached client simply ignores, so this is additive-only and never
+    breaks ``loadDailyGame()``'s existing ``data.date_kl``/``data.slot``
+    checks in static/index.html."""
+    return {
+        "ok": True,
+        "date_kl": date_kl,
+        "slot": _build_daily_slot(game),
+        "tracking_key": _build_tracking_key(date_kl, game["id"]),
+    }
 
 
 def _select_and_build_doc(date_kl: str, *, rng=None) -> dict | None:
@@ -547,7 +623,7 @@ def get_daily_game_selection(now: datetime | None = None, *, rng=None) -> dict:
     if existing:
         game = _load_game_by_id(existing.get("game_id"))
         if game is not None:
-            return {"ok": True, "date_kl": date_kl, "slot": _build_daily_slot(game)}
+            return _build_selection_result(date_kl, game)
 
         # Today's previously-selected game was unpublished or deleted since
         # selection — controlled reselection, replacing only if nobody else
@@ -573,12 +649,12 @@ def get_daily_game_selection(now: datetime | None = None, *, rng=None) -> dict:
             existing = col.find_one({"_id": date_kl}) or {}
             game = _load_game_by_id(existing.get("game_id"))
             if game is not None:
-                return {"ok": True, "date_kl": date_kl, "slot": _build_daily_slot(game)}
+                return _build_selection_result(date_kl, game)
             return {"ok": False, "date_kl": date_kl, "error": "no_eligible_games"}
         game = _load_game_by_id(new_doc["game_id"])
         if game is None:
             return {"ok": False, "date_kl": date_kl, "error": "no_eligible_games"}
-        return {"ok": True, "date_kl": date_kl, "slot": _build_daily_slot(game)}
+        return _build_selection_result(date_kl, game)
 
     # No selection recorded yet today — first request of the day.
     new_doc = _select_and_build_doc(date_kl, rng=rng)
@@ -596,4 +672,306 @@ def get_daily_game_selection(now: datetime | None = None, *, rng=None) -> dict:
         # and this read. Leave the stale row for the next request's
         # reselection branch above rather than retrying in a loop here.
         return {"ok": False, "date_kl": date_kl, "error": "no_eligible_games"}
-    return {"ok": True, "date_kl": date_kl, "slot": _build_daily_slot(game)}
+    return _build_selection_result(date_kl, game)
+
+
+# ---------------------------------------------------------------------------
+# Click tracking (impressions + clicks on the Mini App's Lucky Game card)
+# ---------------------------------------------------------------------------
+#
+# Collection: ``lucky_game_events``. Analytics only — never grants XP,
+# vouchers, or referral credit. Every event's identity (user_id, game_id,
+# selection_date_kl, tracking_key) is resolved server-side from the same
+# persisted daily selection ``get_daily_game_selection`` already serves, not
+# from client-supplied fields — a caller can only ever confirm the current
+# canonical selection, never assert a different one. user_id is always the
+# Telegram id verified from initData (miniapp_identity), never a
+# client-supplied value.
+#
+# Impressions are deduped to one per (user_id, tracking_key) via a partial
+# unique index scoped to event_type == "impression" (see
+# _ensure_event_indexes) — reopening the Mini App repeatedly on the same day
+# therefore still counts as exactly one unique viewer. Clicks are never
+# deduped: every intentional tap is its own row, so repeat engagement by the
+# same user still shows up in "total clicks" while "unique clickers" is
+# computed separately by distinct user_id.
+
+
+def record_lucky_game_event(
+    *, event_type: str, user_id: int, client_tracking_key: str
+) -> tuple[bool, str, dict]:
+    """Best-effort analytics write. Never raises. Resolves game identity
+    (game_id/game_name/selection_date_kl) exclusively from today's canonical
+    persisted selection — never from anything client-supplied.
+
+    ``client_tracking_key`` is required and must exactly equal the canonical
+    selection's tracking_key or the event is rejected outright (reason
+    "invalid_tracking_key") — it is never rewritten to record the event
+    under a *different* game than the one the client claimed to be showing.
+    A client-supplied tracking_key can diverge from canonical not just via
+    tampering but via a stale local cache (the Mini App caches the daily
+    slot in localStorage for the rest of the KL day; if an admin
+    unpublishes/deletes today's game mid-day, get_daily_game_selection()
+    reselects). That staleness is handled upstream instead: the frontend
+    (loadDailyGame/activateLuckyGameTracking in static/index.html) always
+    revalidates its cached slot against GET /v2/miniapp/daily-game before
+    treating any tracking_key as confirmed, and only ever calls this with a
+    just-confirmed value — so a legitimate stale-cache mismatch should never
+    actually reach here. This strict equality check exists as defense in
+    depth: even a buggy/malicious/out-of-date caller can only ever have its
+    event rejected, never silently reattributed to whatever is canonical.
+
+    Returns ``(accepted, reason, info)``:
+      accepted=True,  reason="recorded"             -- new row written
+      accepted=True,  reason="duplicate"            -- impression already seen today
+      accepted=False, reason="no_active_selection"  -- no eligible game right now
+      accepted=False, reason="invalid_tracking_key" -- didn't match canonical
+      accepted=False, reason="write_failed"         -- Mongo error (logged, swallowed)
+    """
+    selection = get_daily_game_selection()
+    if not selection.get("ok"):
+        return False, "no_active_selection", {}
+
+    date_kl = selection["date_kl"]
+    slot = selection["slot"]
+    tracking_key = selection["tracking_key"]
+    game_id = slot.get("id", "")
+    game_name = slot.get("name", "")
+
+    if client_tracking_key != tracking_key:
+        logger.info(
+            "[LUCKY_GAME][TRACK_REJECT] reason=invalid_tracking_key client=%s canonical=%s",
+            client_tracking_key, tracking_key,
+        )
+        return False, "invalid_tracking_key", {"tracking_key": tracking_key}
+
+    doc = {
+        "event_type": event_type,
+        "user_id": int(user_id),
+        "game_id": game_id,
+        "game_name": game_name,
+        "selection_date_kl": date_kl,
+        "tracking_key": tracking_key,
+        "surface": TRACKING_SURFACE,
+        "destination": LUCKY_GAME_DESTINATION_URL,
+        "created_at_utc": datetime.now(timezone.utc),
+    }
+    try:
+        database.db[EVENTS_COLLECTION].insert_one(doc)
+    except DuplicateKeyError:
+        logger.info(
+            "[LUCKY_GAME][IMPRESSION] uid=%s game_id=%s date_kl=%s duplicate=1",
+            user_id, game_id, date_kl,
+        )
+        return True, "duplicate", {"tracking_key": tracking_key, "game_id": game_id, "date_kl": date_kl}
+    except Exception:
+        logger.warning("[LUCKY_GAME] event_write_failed event_type=%s", event_type, exc_info=True)
+        return False, "write_failed", {}
+
+    if event_type == "impression":
+        logger.info(
+            "[LUCKY_GAME][IMPRESSION] uid=%s game_id=%s date_kl=%s duplicate=0",
+            user_id, game_id, date_kl,
+        )
+    else:
+        logger.info(
+            "[LUCKY_GAME][CLICK] uid=%s game_id=%s date_kl=%s",
+            user_id, game_id, date_kl,
+        )
+    return True, "recorded", {"tracking_key": tracking_key, "game_id": game_id, "date_kl": date_kl}
+
+
+@lucky_games_public_bp.post("/api/lucky-game/track")
+def track_lucky_game_event():
+    """Best-effort click/impression analytics — never blocks or fails the
+    caller. Always returns 200 with a fast, minimal body so a
+    fire-and-forget frontend call never has to branch on the response before
+    continuing navigation to the AdvantPlay destination.
+
+    Auth: user_id always comes from verified Telegram initData
+    (``miniapp_identity.resolve_authenticated_telegram_user_id``), never
+    from the request body — an unverifiable caller cannot spoof another
+    user's clicks. An unauthenticated/unverifiable request is discarded
+    (not written to analytics) but still answers 200, mirroring
+    event_banner.py's ``/api/event-banner/track``.
+
+    ``tracking_key`` is required and must exactly match today's canonical
+    selection (see record_lucky_game_event()'s docstring) — a missing or
+    mismatched value is rejected, never silently reattributed to whatever
+    game is currently canonical."""
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        body = {}
+
+    event_type = str(body.get("event") or "").strip().lower()
+    if event_type not in ALLOWED_TRACK_EVENTS:
+        logger.info("[LUCKY_GAME][TRACK_REJECT] reason=invalid_event")
+        return jsonify({"success": False, "error": "invalid_event"}), 400
+
+    client_tracking_key = body.get("tracking_key")
+    if (
+        not isinstance(client_tracking_key, str)
+        or not client_tracking_key.strip()
+        or len(client_tracking_key) > MAX_TRACKING_KEY_LEN
+    ):
+        logger.info("[LUCKY_GAME][TRACK_REJECT] reason=invalid_tracking_key")
+        return jsonify({"success": False, "error": "invalid_tracking_key"}), 400
+
+    try:
+        from miniapp_identity import resolve_authenticated_telegram_user_id
+
+        user_id, auth_err = resolve_authenticated_telegram_user_id()
+    except Exception:
+        user_id, auth_err = None, True
+    if auth_err or user_id is None:
+        logger.info("[LUCKY_GAME][TRACK_REJECT] reason=unauthenticated")
+        return jsonify({"success": True}), 200
+
+    accepted, reason, _info = record_lucky_game_event(
+        event_type=event_type, user_id=user_id, client_tracking_key=client_tracking_key,
+    )
+    if not accepted and reason == "invalid_tracking_key":
+        return jsonify({"success": False, "error": "invalid_tracking_key"}), 400
+    if not accepted:
+        # no_active_selection / write_failed -- never the caller's fault; the
+        # AdvantPlay page has already opened client-side by the time this
+        # resolves, so there is nothing to retry or surface.
+        return jsonify({"success": True}), 200
+
+    return jsonify({"success": True, "duplicate": reason == "duplicate"}), 200
+
+
+# ---------------------------------------------------------------------------
+# Admin analytics
+# ---------------------------------------------------------------------------
+
+
+def _safe_rate(numerator: int, denominator: int) -> float:
+    if not denominator:
+        return 0
+    return round(numerator / denominator, 4)
+
+
+def _kl_date_bounds(days: int) -> tuple[str, str]:
+    today = datetime.now(KL_TZ).date()
+    start = today - timedelta(days=days - 1)
+    return start.isoformat(), today.isoformat()
+
+
+def _new_event_bucket() -> dict:
+    return {"impressions": 0, "viewers": set(), "clicks": 0, "clickers": set()}
+
+
+def _accumulate_event(bucket: dict, doc: dict) -> None:
+    uid = doc.get("user_id")
+    if doc.get("event_type") == "impression":
+        bucket["impressions"] += 1
+        if uid is not None:
+            bucket["viewers"].add(uid)
+    elif doc.get("event_type") == "click":
+        bucket["clicks"] += 1
+        if uid is not None:
+            bucket["clickers"].add(uid)
+
+
+def _finalize_event_row(bucket: dict, extra: dict) -> dict:
+    row = dict(extra)
+    row["impressions"] = bucket["impressions"]
+    row["unique_viewers"] = len(bucket["viewers"])
+    row["clicks"] = bucket["clicks"]
+    row["unique_clickers"] = len(bucket["clickers"])
+    row["ctr"] = _safe_rate(len(bucket["clickers"]), len(bucket["viewers"]))
+    return row
+
+
+def _build_daily_breakdown(docs: list[dict]) -> list[dict]:
+    """One row per (selection_date_kl, tracking_key) — deliberately *not*
+    grouped by date alone. A same-day reselection (today's persisted game
+    gets unpublished/deleted mid-day and get_daily_game_selection() picks a
+    replacement — see that function's docstring) can put two different
+    games under the same KL date; grouping by date alone would conflate
+    both games' counts into one row and report them under whichever
+    game_id happened to be seen last while iterating."""
+    buckets: dict = {}
+    for d in docs:
+        date_kl = d.get("selection_date_kl")
+        tracking_key = d.get("tracking_key")
+        if date_kl is None or tracking_key is None:
+            continue
+        bucket = buckets.setdefault((date_kl, tracking_key), _new_event_bucket())
+        _accumulate_event(bucket, d)
+        bucket["date"] = date_kl
+        bucket["game_id"] = d.get("game_id") or bucket.get("game_id")
+        bucket["game_name"] = d.get("game_name") or bucket.get("game_name")
+
+    rows = []
+    for key in sorted(buckets.keys()):
+        bucket = buckets[key]
+        rows.append(_finalize_event_row(
+            bucket, {"date": bucket["date"], "game_id": bucket.get("game_id"), "game_name": bucket.get("game_name")}
+        ))
+    return rows
+
+
+def _build_game_breakdown(docs: list[dict]) -> list[dict]:
+    """One row per game_id, aggregated across every KL day it was selected
+    on (including non-consecutive days from a reselection elsewhere) — this
+    is the intentional "clicks by selected Lucky Game" totals view, distinct
+    from _build_daily_breakdown's per-day-per-game rows."""
+    buckets: dict = {}
+    for d in docs:
+        game_id = d.get("game_id")
+        if game_id is None:
+            continue
+        bucket = buckets.setdefault(game_id, _new_event_bucket())
+        _accumulate_event(bucket, d)
+        bucket["game_name"] = d.get("game_name") or bucket.get("game_name")
+
+    rows = []
+    for game_id in sorted(buckets.keys()):
+        bucket = buckets[game_id]
+        rows.append(_finalize_event_row(bucket, {"game_id": game_id, "game_name": bucket.get("game_name")}))
+    return rows
+
+
+@lucky_games_admin_bp.get("/api/admin/lucky-game/analytics")
+def lucky_game_analytics():
+    """Impressions/clicks/CTR summary for the Lucky Game card. CTR is always
+    unique_clickers / unique_viewers (never raw clicks / impressions, which
+    repeat clicks or reopens would inflate); 0 when there were no viewers.
+    ``days`` is bounded to [1, 90] so this can never trigger an unbounded
+    full-collection scan."""
+    _, err = _require_admin()
+    if err:
+        return err
+
+    try:
+        days = int(request.args.get("days", ANALYTICS_DEFAULT_DAYS))
+    except (TypeError, ValueError):
+        days = ANALYTICS_DEFAULT_DAYS
+    days = max(ANALYTICS_MIN_DAYS, min(ANALYTICS_MAX_DAYS, days))
+
+    start_str, end_str = _kl_date_bounds(days)
+    col = database.db[EVENTS_COLLECTION]
+    match = {"selection_date_kl": {"$gte": start_str, "$lte": end_str}}
+    docs = list(col.find(match))
+
+    impressions = [d for d in docs if d.get("event_type") == "impression"]
+    clicks = [d for d in docs if d.get("event_type") == "click"]
+    unique_viewers = {d.get("user_id") for d in impressions if d.get("user_id") is not None}
+    unique_clickers = {d.get("user_id") for d in clicks if d.get("user_id") is not None}
+
+    summary = {
+        "impressions": len(impressions),
+        "unique_viewers": len(unique_viewers),
+        "clicks": len(clicks),
+        "unique_clickers": len(unique_clickers),
+        "unique_ctr": _safe_rate(len(unique_clickers), len(unique_viewers)),
+    }
+
+    return jsonify({
+        "period": {"from": start_str, "to": end_str, "days": days},
+        "summary": summary,
+        "by_day": _build_daily_breakdown(docs),
+        "by_game": _build_game_breakdown(docs),
+    })

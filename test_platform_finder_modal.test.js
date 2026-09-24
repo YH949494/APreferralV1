@@ -20,14 +20,14 @@ const vm = require("node:vm");
 
 const HTML_PATH = path.join(__dirname, "static", "index.html");
 const START_MARKER = "    function openTelegramSafeLink(url) {";
-const END_MARKER = "\n    function renderDailyGame(slot) {";
+const END_MARKER = "\n    function renderDailyGameDisplay(slot) {";
 
 function loadFeatureSource() {
   const html = fs.readFileSync(HTML_PATH, "utf8");
   const start = html.indexOf(START_MARKER);
   const end = html.indexOf(END_MARKER, start);
   assert.ok(start !== -1, "openTelegramSafeLink start marker not found in static/index.html");
-  assert.ok(end !== -1, "renderDailyGame end marker not found in static/index.html");
+  assert.ok(end !== -1, "renderDailyGameDisplay end marker not found in static/index.html");
   return html.slice(start, end);
 }
 
