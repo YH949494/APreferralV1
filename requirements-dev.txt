@@ -6,6 +6,14 @@
 pytest==8.3.5
 pytest-asyncio==1.3.0
 
+# Some containers ship an apt-installed python3-cryptography/cffi-backend
+# built against a different Python ABI than the interpreter actually in use.
+# pymongo's SSL fallback (pymongo.pyopenssl_context) then hits that stale
+# cryptography package, whose Rust extension panics (not a catchable
+# ImportError) looking for _cffi_backend, crashing `import pymongo` itself.
+# Pinning our own cffi wheel here shadows the broken system one on sys.path.
+cffi==2.1.1
+
 # Ten legacy suites import mongomock directly (test_checkin_streak_integrity,
 # test_official_channel_reopen_audit, test_referral_channel_migration,
 # test_referral_error_hardening, test_weekly_leaderboard_archive_recovery,
