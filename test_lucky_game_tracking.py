@@ -240,9 +240,14 @@ def test_unauthenticated_event_is_discarded_not_written(fake_db):
 # ---------------------------------------------------------------------------
 
 
-def test_spoofed_tracking_key_is_rejected(fake_db):
-    _seed_single_game(fake_db)
-    _current_selection(fake_db)
+def test_spoofed_tracking_key_is_resolved_to_canonical_not_rejected(fake_db):
+    # A client-supplied tracking_key that doesn't match today's canonical
+    # selection is never authoritative -- whether it's tampering or (far
+    # more commonly) a stale client-side cache from before a same-day
+    # reselection, the event must still be recorded, attributed to the
+    # actual current selection, rather than silently dropped.
+    game_id = _seed_single_game(fake_db)
+    selection = _current_selection(fake_db)
     app = _app()
     client = app.test_client()
 
@@ -252,9 +257,12 @@ def test_spoofed_tracking_key_is_rejected(fake_db):
             json={"event": "click", "tracking_key": "daily_game:2099-01-01:not-a-real-game-id"},
         )
 
-    assert resp.status_code == 400
-    assert resp.get_json()["error"] == "invalid_tracking_key"
-    assert fake_db[lg.EVENTS_COLLECTION].count_documents({}) == 0
+    assert resp.status_code == 200
+    assert resp.get_json()["success"] is True
+    doc = fake_db[lg.EVENTS_COLLECTION].find_one({})
+    assert doc is not None
+    assert doc["game_id"] == game_id
+    assert doc["tracking_key"] == selection["tracking_key"]
 
 
 def test_event_tied_to_persisted_daily_selection_not_client_claims(fake_db):
@@ -313,13 +321,44 @@ def test_kl_date_boundary_produces_distinct_tracking_keys_and_day_buckets(fake_d
     fake_db[lg.EVENTS_COLLECTION].insert_one(doc_day1)
     fake_db[lg.EVENTS_COLLECTION].insert_one(doc_day2)
 
-    by_day = lg._build_breakdown(
-        list(fake_db[lg.EVENTS_COLLECTION].find({})), key_field="selection_date_kl", key_name="date"
-    )
+    by_day = lg._build_daily_breakdown(list(fake_db[lg.EVENTS_COLLECTION].find({})))
     assert {row["date"] for row in by_day} == {"2026-09-21", "2026-09-22"}
     for row in by_day:
         assert row["impressions"] == 1
         assert row["unique_viewers"] == 1
+
+
+def test_same_day_reselection_keeps_games_in_separate_daily_rows(fake_db):
+    # Two different games recorded under the *same* selection_date_kl -- the
+    # scenario a same-day reselection produces (today's persisted game got
+    # unpublished/deleted mid-day and get_daily_game_selection() picked a
+    # replacement). by_day must not conflate their counts into one row.
+    game_a, game_b = "aaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbb"
+    now = __import__("datetime").datetime.now(__import__("datetime").timezone.utc)
+    doc_a = {
+        "event_type": "impression", "user_id": 1, "game_id": game_a, "game_name": "A",
+        "selection_date_kl": "2026-09-21", "tracking_key": lg._build_tracking_key("2026-09-21", game_a),
+        "surface": lg.TRACKING_SURFACE, "destination": lg.LUCKY_GAME_DESTINATION_URL, "created_at_utc": now,
+    }
+    doc_b = {
+        "event_type": "impression", "user_id": 2, "game_id": game_b, "game_name": "B",
+        "selection_date_kl": "2026-09-21", "tracking_key": lg._build_tracking_key("2026-09-21", game_b),
+        "surface": lg.TRACKING_SURFACE, "destination": lg.LUCKY_GAME_DESTINATION_URL, "created_at_utc": now,
+    }
+    fake_db[lg.EVENTS_COLLECTION].insert_one(doc_a)
+    fake_db[lg.EVENTS_COLLECTION].insert_one(doc_b)
+
+    by_day = lg._build_daily_breakdown(list(fake_db[lg.EVENTS_COLLECTION].find({})))
+    assert len(by_day) == 2
+    rows_by_game = {row["game_id"]: row for row in by_day}
+    assert rows_by_game[game_a]["date"] == "2026-09-21"
+    assert rows_by_game[game_a]["unique_viewers"] == 1
+    assert rows_by_game[game_b]["date"] == "2026-09-21"
+    assert rows_by_game[game_b]["unique_viewers"] == 1
+
+    # by_game still aggregates each game across every day it appeared.
+    by_game = lg._build_game_breakdown(list(fake_db[lg.EVENTS_COLLECTION].find({})))
+    assert {row["game_id"] for row in by_game} == {game_a, game_b}
 
 
 # ---------------------------------------------------------------------------

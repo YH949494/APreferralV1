@@ -700,16 +700,25 @@ def get_daily_game_selection(now: datetime | None = None, *, rng=None) -> dict:
 def record_lucky_game_event(
     *, event_type: str, user_id: int, client_tracking_key: str | None = None
 ) -> tuple[bool, str, dict]:
-    """Best-effort analytics write. Never raises. Resolves today's canonical
-    persisted selection itself; if ``client_tracking_key`` is given it must
-    match that canonical value or the event is rejected — a client can
-    corroborate the current selection but never dictate a different one.
+    """Best-effort analytics write. Never raises. Always resolves identity
+    from today's canonical persisted selection itself — ``client_tracking_key``
+    is accepted only for logging/observability and never gates the write.
+
+    A client-supplied tracking_key is never trusted as authoritative: it can
+    diverge from the canonical value not just via tampering but via a
+    perfectly legitimate stale local cache (the Mini App caches the daily
+    slot in localStorage for the rest of the KL day; if an admin
+    unpublishes/deletes today's game mid-day, get_daily_game_selection()
+    reselects, but a client still showing the cached old slot would submit
+    the old tracking_key). Rejecting on mismatch would silently drop that
+    client's impressions/clicks for the rest of the day; resolving to the
+    canonical selection instead means the event is still recorded — correctly
+    attributed to the game currently selected — rather than lost.
 
     Returns ``(accepted, reason, info)``:
       accepted=True,  reason="recorded"            -- new row written
       accepted=True,  reason="duplicate"           -- impression already seen today
       accepted=False, reason="no_active_selection" -- no eligible game right now
-      accepted=False, reason="invalid_tracking_key"-- client value didn't match canonical
       accepted=False, reason="write_failed"        -- Mongo error (logged, swallowed)
     """
     selection = get_daily_game_selection()
@@ -723,7 +732,10 @@ def record_lucky_game_event(
     game_name = slot.get("name", "")
 
     if client_tracking_key and client_tracking_key != tracking_key:
-        return False, "invalid_tracking_key", {"tracking_key": tracking_key}
+        logger.info(
+            "[LUCKY_GAME][TRACKING_KEY_STALE] client=%s canonical=%s",
+            client_tracking_key, tracking_key,
+        )
 
     doc = {
         "event_type": event_type,
@@ -773,7 +785,12 @@ def track_lucky_game_event():
     from the request body — an unverifiable caller cannot spoof another
     user's clicks. An unauthenticated/unverifiable request is discarded
     (not written to analytics) but still answers 200, mirroring
-    event_banner.py's ``/api/event-banner/track``."""
+    event_banner.py's ``/api/event-banner/track``.
+
+    ``tracking_key`` in the body is optional and only sanity-checked here
+    (type/length) — it is never authoritative game identity. See
+    record_lucky_game_event()'s docstring for why a mismatched value is
+    resolved to the canonical selection rather than rejected."""
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
         body = {}
@@ -803,9 +820,6 @@ def track_lucky_game_event():
     accepted, reason, _info = record_lucky_game_event(
         event_type=event_type, user_id=user_id, client_tracking_key=client_tracking_key,
     )
-    if not accepted and reason == "invalid_tracking_key":
-        logger.info("[LUCKY_GAME][TRACK_REJECT] reason=invalid_tracking_key")
-        return jsonify({"success": False, "error": "invalid_tracking_key"}), 400
     if not accepted:
         # no_active_selection / write_failed -- never the caller's fault; the
         # AdvantPlay page has already opened client-side by the time this
@@ -832,45 +846,79 @@ def _kl_date_bounds(days: int) -> tuple[str, str]:
     return start.isoformat(), today.isoformat()
 
 
-def _build_breakdown(docs: list[dict], *, key_field: str, key_name: str) -> list[dict]:
-    """Groups event docs by ``key_field`` (e.g. selection_date_kl or
-    game_id) and computes impressions/unique_viewers/clicks/unique_clickers/
-    ctr per bucket. Plain-Python grouping (not an aggregation pipeline) so
-    this works identically against the real MongoDB driver and the
-    in-memory FakeDb used in tests."""
+def _new_event_bucket() -> dict:
+    return {"impressions": 0, "viewers": set(), "clicks": 0, "clickers": set()}
+
+
+def _accumulate_event(bucket: dict, doc: dict) -> None:
+    uid = doc.get("user_id")
+    if doc.get("event_type") == "impression":
+        bucket["impressions"] += 1
+        if uid is not None:
+            bucket["viewers"].add(uid)
+    elif doc.get("event_type") == "click":
+        bucket["clicks"] += 1
+        if uid is not None:
+            bucket["clickers"].add(uid)
+
+
+def _finalize_event_row(bucket: dict, extra: dict) -> dict:
+    row = dict(extra)
+    row["impressions"] = bucket["impressions"]
+    row["unique_viewers"] = len(bucket["viewers"])
+    row["clicks"] = bucket["clicks"]
+    row["unique_clickers"] = len(bucket["clickers"])
+    row["ctr"] = _safe_rate(len(bucket["clickers"]), len(bucket["viewers"]))
+    return row
+
+
+def _build_daily_breakdown(docs: list[dict]) -> list[dict]:
+    """One row per (selection_date_kl, tracking_key) — deliberately *not*
+    grouped by date alone. A same-day reselection (today's persisted game
+    gets unpublished/deleted mid-day and get_daily_game_selection() picks a
+    replacement — see that function's docstring) can put two different
+    games under the same KL date; grouping by date alone would conflate
+    both games' counts into one row and report them under whichever
+    game_id happened to be seen last while iterating."""
     buckets: dict = {}
     for d in docs:
-        key = d.get(key_field)
-        if key is None:
+        date_kl = d.get("selection_date_kl")
+        tracking_key = d.get("tracking_key")
+        if date_kl is None or tracking_key is None:
             continue
-        bucket = buckets.setdefault(
-            key, {"impressions": 0, "viewers": set(), "clicks": 0, "clickers": set(), "game_id": None, "game_name": None}
-        )
-        bucket["game_id"] = d.get("game_id") or bucket["game_id"]
-        bucket["game_name"] = d.get("game_name") or bucket["game_name"]
-        uid = d.get("user_id")
-        if d.get("event_type") == "impression":
-            bucket["impressions"] += 1
-            if uid is not None:
-                bucket["viewers"].add(uid)
-        elif d.get("event_type") == "click":
-            bucket["clicks"] += 1
-            if uid is not None:
-                bucket["clickers"].add(uid)
+        bucket = buckets.setdefault((date_kl, tracking_key), _new_event_bucket())
+        _accumulate_event(bucket, d)
+        bucket["date"] = date_kl
+        bucket["game_id"] = d.get("game_id") or bucket.get("game_id")
+        bucket["game_name"] = d.get("game_name") or bucket.get("game_name")
 
     rows = []
     for key in sorted(buckets.keys()):
         bucket = buckets[key]
-        rows.append({
-            key_name: key,
-            "game_id": bucket["game_id"],
-            "game_name": bucket["game_name"],
-            "impressions": bucket["impressions"],
-            "unique_viewers": len(bucket["viewers"]),
-            "clicks": bucket["clicks"],
-            "unique_clickers": len(bucket["clickers"]),
-            "ctr": _safe_rate(len(bucket["clickers"]), len(bucket["viewers"])),
-        })
+        rows.append(_finalize_event_row(
+            bucket, {"date": bucket["date"], "game_id": bucket.get("game_id"), "game_name": bucket.get("game_name")}
+        ))
+    return rows
+
+
+def _build_game_breakdown(docs: list[dict]) -> list[dict]:
+    """One row per game_id, aggregated across every KL day it was selected
+    on (including non-consecutive days from a reselection elsewhere) — this
+    is the intentional "clicks by selected Lucky Game" totals view, distinct
+    from _build_daily_breakdown's per-day-per-game rows."""
+    buckets: dict = {}
+    for d in docs:
+        game_id = d.get("game_id")
+        if game_id is None:
+            continue
+        bucket = buckets.setdefault(game_id, _new_event_bucket())
+        _accumulate_event(bucket, d)
+        bucket["game_name"] = d.get("game_name") or bucket.get("game_name")
+
+    rows = []
+    for game_id in sorted(buckets.keys()):
+        bucket = buckets[game_id]
+        rows.append(_finalize_event_row(bucket, {"game_id": game_id, "game_name": bucket.get("game_name")}))
     return rows
 
 
@@ -912,6 +960,6 @@ def lucky_game_analytics():
     return jsonify({
         "period": {"from": start_str, "to": end_str, "days": days},
         "summary": summary,
-        "by_day": _build_breakdown(docs, key_field="selection_date_kl", key_name="date"),
-        "by_game": _build_breakdown(docs, key_field="game_id", key_name="game_id"),
+        "by_day": _build_daily_breakdown(docs),
+        "by_game": _build_game_breakdown(docs),
     })
