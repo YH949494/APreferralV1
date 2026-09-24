@@ -80,16 +80,13 @@ class TestFrontendMatchesBackend:
             "affiliate_reward_plans.ADMIN_AFFILIATE_POOL_IDS"
         )
 
-    def test_legacy_upload_selector_offers_every_pool(self):
-        options = _select_options(INDEX_HTML.read_text(), "aff_pool_id")
-        assert options == list(ADMIN_AFFILIATE_POOL_IDS), (
-            "static/index.html affiliate pool selector has drifted from the catalogue"
-        )
-
-    def test_client_allowlist_matches_backend_allowlist(self):
+    def test_legacy_miniapp_panel_has_no_upload_path(self):
+        # Voucher Batches is the single upload entry point. The legacy
+        # MiniApp panel is read-only monitoring: no pool picker, no code
+        # textarea, no call into the undated /admin/pools/upload endpoint.
         text = INDEX_HTML.read_text()
-        raw = re.search(r"const ALLOWED_AFFILIATE_POOLS = (\[[^\]]*\]);", text).group(1)
-        assert json.loads(raw) == list(ADMIN_AFFILIATE_POOL_IDS)
+        for needle in ('id="aff_pool_id"', 'id="aff_codes_text"', "affUploadPool", "/admin/pools/upload"):
+            assert needle not in text, f"static/index.html still exposes {needle!r}"
 
     def test_entitlement_month_pool_map_matches_backend(self):
         text = ADMIN_JS.read_text()
@@ -102,11 +99,51 @@ class TestFrontendMatchesBackend:
         )
 
     def test_no_frontend_offers_a_pool_the_backend_would_reject(self):
-        for path, select_id in ((ADMIN_HTML, "ab-pool-id"), (INDEX_HTML, "aff_pool_id")):
-            for pool_id in _select_options(path.read_text(), select_id):
-                assert pool_id in ADMIN_AFFILIATE_POOL_IDS, (
-                    f"{path.name} offers {pool_id!r}, which the backend rejects"
-                )
+        for pool_id in _select_options(ADMIN_HTML.read_text(), "ab-pool-id"):
+            assert pool_id in ADMIN_AFFILIATE_POOL_IDS, (
+                f"admin-dashboard.html offers {pool_id!r}, which the backend rejects"
+            )
+
+
+class TestAdminInventoryUiCleanup:
+    """Voucher Pools is read-only monitoring; Voucher Batches is the only
+    uploader, and legacy T1-T5 tier pools are not an everyday choice."""
+
+    def _pools_view(self) -> str:
+        html = ADMIN_HTML.read_text()
+        start = html.index('<section id="view-affiliatePools"')
+        return html[start:html.index("</section>", start)]
+
+    def test_voucher_pools_view_has_no_upload_form(self):
+        view = self._pools_view()
+        for needle in ("ap-pool-id", "ap-codes", "ap-upload-btn", "ap-currency",
+                       "ap-display-label", "ap-value-hint", "<textarea", "<select"):
+            assert needle not in view, f"Voucher Pools view still contains {needle!r}"
+
+    def test_dashboard_js_never_posts_to_undated_pool_upload(self):
+        assert "/admin/pools/upload" not in ADMIN_JS.read_text()
+
+    def test_voucher_pools_view_does_not_load_unbounded_batch_history(self):
+        # list_batches has no limit and runs two count_documents per batch;
+        # the monitoring view must stick to live (non-expired) batches.
+        js = ADMIN_JS.read_text()
+        body = js[js.index("function loadAffiliatePools("):js.index("function bindAffiliatePools(")]
+        assert "include_expired" not in body
+
+    def test_legacy_tier_options_are_hidden_and_disabled_by_default(self):
+        html = ADMIN_HTML.read_text()
+        start = html.index('id="ab-pool-id"')
+        select = html[start:html.index("</select>", start)]
+        group_start = select.index('<optgroup id="ab-legacy-tier-options"')
+        group_tag = select[group_start:select.index(">", group_start)]
+        assert " hidden" in group_tag and " disabled" in group_tag
+        group = select[group_start:select.index("</optgroup>", group_start)]
+        assert re.findall(r'<option value="([^"]+)"', group) == ["T1", "T2", "T3", "T4", "T5"]
+        # Every non-legacy choice sits outside the gated group.
+        outside = select[:group_start] + select[select.index("</optgroup>", group_start):]
+        assert re.findall(r'<option value="([^"]+)"', outside) == [
+            *DENOMINATION_POOL_IDS, "WELCOME",
+        ]
 
 
 class TestSubmittedPayloadIsAccepted:

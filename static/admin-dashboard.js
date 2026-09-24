@@ -297,20 +297,24 @@
 
       if (pools && pools.items) {
         pools.items.forEach(function (p) {
+          // Legacy T1-T5 pools are expected to sit empty from Sep 2026
+          // onward; an Aug-and-earlier ledger stuck on their stock already
+          // surfaces as PENDING_MANUAL in Pending Approval.
+          if (affIsLegacyTierPool(p.pool_id)) return;
           // p.claimable_available === null (with blocking_reason
           // "claimability_check_failed") means the claimability check
           // itself failed — never fall back to p.available/raw_available
           // as if it were claimable here, or a pool the bot genuinely
           // can't issue from would silently read as "fine".
           if (p.blocking_reason === "claimability_check_failed") {
-            signals.push({ sev: "yellow", title: "Voucher pool status unknown: " + p.pool_id, sub: "Claimability check failed — see Pool Summary", view: "affiliatePools" });
+            signals.push({ sev: "yellow", title: "Voucher pool status unknown: " + affPoolLabel(p.pool_id), sub: "Claimability check failed — see Voucher Pools", view: "affiliatePools" });
             return;
           }
           // No claimable_available at all (older/degraded response, no
           // key) is the only case allowed to fall back to raw.
           var claimable = typeof p.claimable_available === "number" ? p.claimable_available : p.available;
           if (typeof claimable === "number" && claimable < 10) {
-            signals.push({ sev: "red", title: "Voucher pool low: " + p.pool_id, sub: claimable + " code(s) claimable" + (p.blocking_reason ? " (" + p.blocking_reason + ")" : ""), view: "affiliatePools" });
+            signals.push({ sev: "red", title: "Voucher pool low: " + affPoolLabel(p.pool_id), sub: claimable + " code(s) claimable" + (p.blocking_reason ? " (" + p.blocking_reason + ")" : ""), view: "affiliatePools" });
           }
         });
       }
@@ -808,9 +812,9 @@
           dqCard("Pending Review", s.pending_review) + dqCard("Approved", s.approved) +
           dqCard("Issued", s.issued) + dqCard("Rejected", s.rejected);
 
-        var pools = (d.pool_availability || []).map(function (p) {
+        var pools = (d.pool_availability || []).filter(function (p) { return !affIsLegacyTierPool(p.pool_id); }).map(function (p) {
           var claimable = typeof p.currently_claimable === "number" ? fmt(p.currently_claimable) : "—";
-          return "<tr><td>" + esc(p.pool_id) + '</td><td class="num">' + fmt(p.available) + '</td><td class="num">' + claimable + '</td><td class="num">' + fmt(p.issued) + "</td></tr>";
+          return "<tr><td>" + esc(affPoolLabel(p.pool_id)) + '</td><td class="num">' + fmt(p.available) + '</td><td class="num">' + claimable + '</td><td class="num">' + fmt(p.issued) + "</td></tr>";
         }).join("");
         var mi = ((d.monthly_issuance || {}).by_status || []).map(function (m) {
           return "<tr><td>" + esc(m.status) + '</td><td class="num">' + fmt(m.count) + "</td></tr>";
@@ -11000,99 +11004,141 @@
     }).catch(function (e) { statePanel("gc-verification-body", "error", "Failed to load verification status: " + e.message); });
   }
 
+  // Legacy per-tier pools (T1-T5) only fulfil entitlement months up to and
+  // including Aug 2026 (affiliate_reward_plans.LEGACY_PLAN_ID). Every later
+  // month draws from the AFFILIATE_5/10/50 denomination pools, so the tier
+  // pools are hidden from inventory monitoring and upload. The backend
+  // keeps them untouched for historical/backfill settlement.
+  function affIsLegacyTierPool(poolId) {
+    return ["T1", "T2", "T3", "T4", "T5"].indexOf(String(poolId || "").toUpperCase()) !== -1;
+  }
+
+  // Mirrors affiliate_reward_plans.DENOMINATION_POOL_VALUES.
+  function affPoolLabel(poolId) {
+    var id = String(poolId || "").toUpperCase();
+    return { AFFILIATE_5: "$5", AFFILIATE_10: "$10", AFFILIATE_50: "$50", WELCOME: "WELCOME (New User)" }[id] || id;
+  }
+
+  var AFF_INVENTORY_POOL_ORDER = ["AFFILIATE_5", "AFFILIATE_10", "AFFILIATE_50", "WELCOME"];
+
+  function affInventoryCard(p) {
+    // claimable_available is the issuance-authoritative count (same
+    // rules _claim_voucher_from_pool applies); raw_available/available
+    // is the naive "status: available" row count and is shown only as
+    // a diagnostic so this card can never claim "Healthy" when the
+    // bot actually sees zero claimable vouchers.
+    //
+    // claimable_available === null means the claimability check
+    // itself failed server-side (blocking_reason
+    // "claimability_check_failed") — this must render as Unknown,
+    // never fall back to raw_available/available as if it were
+    // claimable, or a genuinely-blocked pool could read as Healthy
+    // whenever the check errors out.
+    var unknown = p.claimable_available === null || p.blocking_reason === "claimability_check_failed";
+    var hasClaimable = typeof p.claimable_available === "number";
+    var claimable = hasClaimable ? p.claimable_available : 0;
+    var raw = typeof p.raw_available === "number" ? p.raw_available : (typeof p.available === "number" ? p.available : null);
+    var issued = typeof p.issued === "number" ? p.issued : 0;
+    var total = (raw || 0) + issued;
+    var pctIssued = total > 0 ? Math.round((issued / total) * 100) : 0;
+    var blocked = !unknown && hasClaimable && claimable <= 0 && !!p.blocking_reason;
+    var sev = unknown ? "neutral" : (blocked ? "red" : (claimable < 10 ? "red" : (claimable < 50 ? "yellow" : "green")));
+    var pillClass = unknown ? "neutral" : (sev === "red" ? "rejected" : sev === "yellow" ? "pending" : "approved");
+    var pillLabel = unknown ? "Unknown" : (blocked ? "Blocked" : (sev === "red" ? "Low" : sev === "yellow" ? "Watch" : "Healthy"));
+    var note = unknown
+      ? '<div class="sub" style="margin-top:4px;">claimability check failed</div>'
+      : (p.blocking_reason ? '<div class="sub" style="margin-top:4px;">' + esc(p.blocking_reason) + '</div>' : '');
+    return '<div class="kpi">' +
+      '<div style="display:flex;justify-content:space-between;align-items:center;">' +
+      '<div class="label">' + esc(affPoolLabel(p.pool_id)) + '</div>' +
+      '<span class="pill ' + pillClass + '">' + pillLabel + '</span>' +
+      '</div>' +
+      '<div class="value">' + (unknown ? "—" : fmt(claimable)) + '</div>' +
+      '<div class="sub">claimable now</div>' +
+      '<div class="sub" style="margin-top:6px;">Available: ' + (raw === null ? "—" : fmt(raw)) +
+        ' · Issued: ' + fmt(issued) + ' · Total: ' + (raw === null ? "—" : fmt(total)) + '</div>' +
+      note +
+      '<div class="progress-row"><div class="bar-wrap"><div class="bar" style="width:' + pctIssued + '%;"></div></div>' +
+      '<div class="progress-label">' + pctIssued + '% used</div></div>' +
+      '</div>';
+  }
+
+  var AFF_SOURCE_BATCH_ROW_LIMIT = 50;
+
+  function affRenderSourceBatches(items) {
+    var rows = (items || []).filter(function (b) { return !affIsLegacyTierPool(b.pool_id); });
+    if (!rows.length) {
+      $("#affiliate-pools-batches-body").innerHTML = emptyState("No live voucher batches. Upload codes in Voucher Batches (expired batches are listed there).");
+      return;
+    }
+    rows.sort(function (a, b) {
+      var pa = AFF_INVENTORY_POOL_ORDER.indexOf(a.pool_id), pb = AFF_INVENTORY_POOL_ORDER.indexOf(b.pool_id);
+      if (pa !== pb) return pa - pb;
+      return String(b.starts_at_utc || "").localeCompare(String(a.starts_at_utc || ""));
+    });
+    var hiddenCount = Math.max(0, rows.length - AFF_SOURCE_BATCH_ROW_LIMIT);
+    rows = rows.slice(0, AFF_SOURCE_BATCH_ROW_LIMIT);
+    $("#affiliate-pools-batches-body").innerHTML = '<table class="data-table"><thead><tr>' +
+      '<th>Pool</th><th>Source Batch</th><th>Month / Window</th><th>Status</th><th>Uploaded At</th>' +
+      '<th class="num">Available</th><th class="num">Issued</th><th class="num">Total</th>' +
+      '</tr></thead><tbody>' + rows.map(function (b) {
+        var windowLabel = b.pool_id === "WELCOME"
+          ? esc((b.starts_at_kl || "").replace("T", " ").slice(0, 16)) + " → " + esc((b.ends_at_kl || "").replace("T", " ").slice(0, 16))
+          : esc(b.entitlement_month || "—");
+        return '<tr>' +
+          '<td>' + esc(affPoolLabel(b.pool_id)) + '</td>' +
+          '<td>' + esc(b.batch_name || "—") + '</td>' +
+          '<td>' + windowLabel + '</td>' +
+          '<td><span class="pill ' + abStatusPillClass(b.status) + '">' + esc(b.status) + '</span></td>' +
+          '<td>' + esc(dt(b.upload_completed_at || b.created_at)) + '</td>' +
+          '<td class="num">' + fmt(b.available_count) + '</td>' +
+          '<td class="num">' + fmt(b.issued_count) + '</td>' +
+          '<td class="num">' + fmt((b.available_count || 0) + (b.issued_count || 0)) + '</td>' +
+          '</tr>';
+      }).join("") + '</tbody></table>' +
+      (hiddenCount ? '<div class="note">' + fmt(hiddenCount) + ' more batch(es) not shown — see Voucher Batches.</div>' : '');
+  }
+
   function loadAffiliatePools(force) {
-    statePanel("affiliate-pools-summary-body", "loading", "Loading pool summary…");
+    statePanel("affiliate-pools-summary-body", "loading", "Loading voucher inventory…");
+    statePanel("affiliate-pools-batches-body", "loading", "Loading source batches…");
     fetch("/v2/miniapp/admin/pools/summary", { credentials: "same-origin", headers: { "Accept": "application/json" } })
       .then(function (r) { return r.json(); })
       .then(function (data) {
-        var items = data.items || [];
+        var byPool = {};
+        (data.items || []).forEach(function (p) { byPool[p.pool_id] = p; });
+        var items = AFF_INVENTORY_POOL_ORDER.map(function (id) { return byPool[id]; }).filter(Boolean);
         if (!items.length) {
-          $("#affiliate-pools-summary-body").innerHTML = emptyState("No voucher pools configured yet.");
+          $("#affiliate-pools-summary-body").innerHTML = emptyState("No voucher inventory yet. Upload codes in Voucher Batches.");
           return;
         }
-        $("#affiliate-pools-summary-body").innerHTML = '<div class="card-grid">' + items.map(function (p) {
-          // claimable_available is the issuance-authoritative count (same
-          // rules _claim_voucher_from_pool applies); raw_available/available
-          // is the naive "status: available" row count and is shown only as
-          // a diagnostic so this card can never claim "Healthy" when the
-          // bot actually sees zero claimable vouchers.
-          //
-          // claimable_available === null means the claimability check
-          // itself failed server-side (blocking_reason
-          // "claimability_check_failed") — this must render as Unknown,
-          // never fall back to raw_available/available as if it were
-          // claimable, or a genuinely-blocked pool could read as Healthy
-          // whenever the check errors out.
-          var unknown = p.claimable_available === null || p.blocking_reason === "claimability_check_failed";
-          var hasClaimable = typeof p.claimable_available === "number";
-          var claimable = hasClaimable ? p.claimable_available : 0;
-          var raw = typeof p.raw_available === "number" ? p.raw_available : (typeof p.available === "number" ? p.available : null);
-          var issued = typeof p.issued === "number" ? p.issued : 0;
-          var total = (raw || 0) + issued;
-          var pctIssued = total > 0 ? Math.round((issued / total) * 100) : 0;
-          var blocked = !unknown && hasClaimable && claimable <= 0 && !!p.blocking_reason;
-          var sev = unknown ? "neutral" : (blocked ? "red" : (claimable < 10 ? "red" : (claimable < 50 ? "yellow" : "green")));
-          var pillClass = unknown ? "neutral" : (sev === "red" ? "rejected" : sev === "yellow" ? "pending" : "approved");
-          var pillLabel = unknown ? "Unknown" : (blocked ? "Blocked" : (sev === "red" ? "Low" : sev === "yellow" ? "Watch" : "Healthy"));
-          var mismatchNote = unknown
-            ? '<div class="sub" style="margin-top:4px;">' + (raw === null ? "" : fmt(raw) + ' stored · ') + 'claimability check failed</div>'
-            : (hasClaimable && raw !== claimable
-              ? '<div class="sub" style="margin-top:4px;">' + fmt(raw) + ' stored' + (p.blocking_reason ? " · " + esc(p.blocking_reason) : "") + '</div>'
-              : '');
-          return '<div class="kpi">' +
-            '<div style="display:flex;justify-content:space-between;align-items:center;">' +
-            '<div class="label">' + esc(p.pool_id) + '</div>' +
-            '<span class="pill ' + pillClass + '">' +
-            pillLabel + '</span>' +
-            '</div>' +
-            '<div class="value">' + (unknown ? "—" : fmt(claimable)) + '</div>' +
-            '<div class="sub">claimable · ' + fmt(issued) + ' issued</div>' +
-            mismatchNote +
-            '<div class="progress-row"><div class="bar-wrap"><div class="bar" style="width:' + pctIssued + '%;"></div></div>' +
-            '<div class="progress-label">' + pctIssued + '% used</div></div>' +
-            '<div class="sub" style="margin-top:8px;">' + esc(p.display_label || "—") +
-            (p.value_hint ? " · " + esc(p.value_hint) : "") + (p.currency ? " " + esc(p.currency) : "") + '</div>' +
-            '</div>';
-        }).join("") + '</div>';
+        $("#affiliate-pools-summary-body").innerHTML = '<div class="card-grid">' + items.map(affInventoryCard).join("") + '</div>';
       })
-      .catch(function (e) { statePanel("affiliate-pools-summary-body", "error", "Failed to load pool summary: " + e.message); });
+      .catch(function (e) { statePanel("affiliate-pools-summary-body", "error", "Failed to load voucher inventory: " + e.message); });
+    // Live batches only (active/scheduled/exhausted/disabled/uploading/
+    // failed). Expired history is unbounded and each batch costs two
+    // count_documents on the server, so it stays behind the explicit
+    // "Include expired" filter in Voucher Batches.
+    fetch("/api/admin/affiliate-voucher-batches", { credentials: "same-origin", headers: { "Accept": "application/json" } })
+      .then(function (r) {
+        if (r.status === 401) { window.location.href = "/static/admin-login.html"; throw new Error("unauthorized"); }
+        return r.json();
+      })
+      .then(function (data) {
+        if (!data.ok) { statePanel("affiliate-pools-batches-body", "error", abErrorMessage(data)); return; }
+        affRenderSourceBatches(data.items);
+      })
+      .catch(function (e) { statePanel("affiliate-pools-batches-body", "error", "Failed to load source batches: " + e.message); });
   }
 
   function bindAffiliatePools() {
-    var uploadBtn = $("#ap-upload-btn");
-    if (!uploadBtn) return;
-    uploadBtn.addEventListener("click", function () {
-      var resultEl = $("#ap-upload-result");
-      var codesText = $("#ap-codes").value || "";
-      if (!codesText.trim()) { resultEl.textContent = "Please provide codes."; return; }
-      var payload = {
-        pool_id: $("#ap-pool-id").value,
-        codes_text: codesText,
-        display_label: ($("#ap-display-label").value || "").trim() || null,
-        value_hint: ($("#ap-value-hint").value || "").trim() || null,
-        currency: ($("#ap-currency").value || "").trim() || null,
-      };
-      uploadBtn.disabled = true;
-      resultEl.textContent = "Uploading…";
-      fetch("/v2/miniapp/admin/pools/upload", {
-        method: "POST",
-        credentials: "same-origin",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
-        .then(function (res) {
-          if (!res.ok || res.d.status !== "ok") throw new Error(res.d.reason || "unknown");
-          resultEl.textContent = "Inserted " + res.d.inserted + " / " + res.d.received + " code(s) into " + res.d.pool_id + ".";
-          toast("✅ Inserted " + res.d.inserted + "/" + res.d.received + " code(s) into " + res.d.pool_id, "success");
-          $("#ap-codes").value = "";
-          loadAffiliatePools(true);
-        })
-        .catch(function (e) { resultEl.textContent = "Upload failed: " + e.message; toast("❌ Upload failed: " + e.message, "error"); })
-        .finally(function () { uploadBtn.disabled = false; });
-    });
+    var gotoBtn = $("#ap-goto-batches-btn");
+    if (gotoBtn) gotoBtn.addEventListener("click", function () { switchView("affiliateBatches"); });
+    var refreshBtn = $("#ap-refresh-btn");
+    if (refreshBtn) refreshBtn.addEventListener("click", function () { loadAffiliatePools(true); });
   }
 
-  // ---------- Voucher Batches (scheduled T1-T4 affiliate + WELCOME pools) ----------
+  // ---------- Voucher Batches (the single voucher-code upload entry point) ----------
   var abItemsCache = {};
   state.abEditingBatchId = null;
 
@@ -11101,7 +11147,7 @@
     invalid_start_at: "Start date/time could not be parsed. Please use the date/time picker.",
     invalid_end_at: "End date/time could not be parsed. Please use the date/time picker.",
     end_before_start: "End time must be after the start time.",
-    invalid_pool_id: "Choose a valid pool (T1-T4 or WELCOME).",
+    invalid_pool_id: "Choose a valid pool ($5 / $10 / $50 or WELCOME).",
     invalid_batch_name: "Batch name is required.",
     no_codes: "No valid voucher codes were provided. Paste at least one code.",
     duplicate_codes: "All submitted codes were already in the system — no new codes were inserted.",
@@ -11161,6 +11207,17 @@
     return !!AB_ENTITLEMENT_MONTH_POOLS[poolId];
   }
 
+  // Legacy T1-T5 tier pools are hidden from the uploader by default: only an
+  // Aug-2026-and-earlier entitlement stuck on tier stock (PENDING_MANUAL)
+  // ever needs them. Disabled + hidden so they can't be picked by accident.
+  function abSetLegacyTierChoices(show) {
+    var group = $("#ab-legacy-tier-options");
+    if (group) { group.hidden = !show; group.disabled = !show; }
+    var toggle = $("#ab-show-legacy-tiers");
+    if (toggle) toggle.checked = !!show;
+    if (!show && affIsLegacyTierPool($("#ab-pool-id").value)) $("#ab-pool-id").value = "AFFILIATE_5";
+  }
+
   function abUpdatePoolFieldVisibility() {
     var poolId = $("#ab-pool-id").value;
     var useMonth = abIsEntitlementMonthPool(poolId);
@@ -11198,7 +11255,7 @@
     if (!codesText.trim() && !hasWindowInput) { el.style.display = "none"; return; }
     el.style.display = "block";
     el.innerHTML =
-      "<b>Preview:</b> Tier " + esc(tier) +
+      "<b>Preview:</b> Pool " + esc(affPoolLabel(tier)) +
       " · " + windowLabel +
       " · " + parsed.unique.length + " unique code(s)" +
       (parsed.duplicates ? " · " + parsed.duplicates + " duplicate code(s) in pasted input" : "") +
@@ -11217,7 +11274,8 @@
     $("#ab-create-btn").textContent = "Create Batch";
     $("#ab-cancel-edit-btn").style.display = "none";
     $("#ab-batch-name").value = "";
-    $("#ab-pool-id").value = "T1";
+    abSetLegacyTierChoices(false);
+    $("#ab-pool-id").value = "AFFILIATE_5";
     $("#ab-pool-id").disabled = false;
     $("#ab-entitlement-month").value = "";
     $("#ab-starts-at").value = "";
@@ -11236,6 +11294,7 @@
     $("#ab-create-btn").textContent = "Save Changes";
     $("#ab-cancel-edit-btn").style.display = "inline-block";
     $("#ab-batch-name").value = item.batch_name || "";
+    abSetLegacyTierChoices(affIsLegacyTierPool(item.pool_id));
     $("#ab-pool-id").value = item.pool_id;
     $("#ab-pool-id").disabled = true;
     abUpdatePoolFieldVisibility();
@@ -11587,6 +11646,13 @@
       abUpdatePoolFieldVisibility();
       abUpdatePreview();
     });
+    var legacyToggle = $("#ab-show-legacy-tiers");
+    if (legacyToggle) legacyToggle.addEventListener("change", function () {
+      abSetLegacyTierChoices(legacyToggle.checked);
+      abUpdatePoolFieldVisibility();
+      abUpdatePreview();
+    });
+    abSetLegacyTierChoices(false);
     abUpdatePoolFieldVisibility();
     $("#ab-refresh-btn").addEventListener("click", function () { loadAffiliateBatches(true); });
     ["#ab-filter-pool", "#ab-filter-status", "#ab-filter-include-expired"].forEach(function (sel) {
