@@ -545,8 +545,8 @@ def _weighted_pick(games: list[dict], rng=None) -> dict:
 
 def _build_daily_slot(game: dict) -> dict:
     """Public payload for the daily-pick tile. Keeps the pre-existing
-    ``tag``/``maxwin`` keys the Mini App's ``renderDailyGame()`` already
-    reads (backward compatibility with cached/older clients) alongside the
+    ``tag``/``maxwin`` keys the Mini App's ``renderDailyGameDisplay()``
+    already reads (backward compatibility with cached/older clients) alongside the
     richer lucky_games field set the admin catalogue exposes. Never
     includes ``selection_weight`` — internal probability weighting is not
     exposed publicly."""
@@ -568,7 +568,7 @@ def _build_selection_result(date_kl: str, game: dict) -> dict:
     """Public payload for ``get_daily_game_selection`` — extends the
     pre-existing {"ok", "date_kl", "slot"} shape with a ``tracking_key`` an
     older cached client simply ignores, so this is additive-only and never
-    breaks ``renderDailyGame()``'s existing ``data.date_kl``/``data.slot``
+    breaks ``loadDailyGame()``'s existing ``data.date_kl``/``data.slot``
     checks in static/index.html."""
     return {
         "ok": True,
@@ -698,28 +698,35 @@ def get_daily_game_selection(now: datetime | None = None, *, rng=None) -> dict:
 
 
 def record_lucky_game_event(
-    *, event_type: str, user_id: int, client_tracking_key: str | None = None
+    *, event_type: str, user_id: int, client_tracking_key: str
 ) -> tuple[bool, str, dict]:
-    """Best-effort analytics write. Never raises. Always resolves identity
-    from today's canonical persisted selection itself — ``client_tracking_key``
-    is accepted only for logging/observability and never gates the write.
+    """Best-effort analytics write. Never raises. Resolves game identity
+    (game_id/game_name/selection_date_kl) exclusively from today's canonical
+    persisted selection — never from anything client-supplied.
 
-    A client-supplied tracking_key is never trusted as authoritative: it can
-    diverge from the canonical value not just via tampering but via a
-    perfectly legitimate stale local cache (the Mini App caches the daily
+    ``client_tracking_key`` is required and must exactly equal the canonical
+    selection's tracking_key or the event is rejected outright (reason
+    "invalid_tracking_key") — it is never rewritten to record the event
+    under a *different* game than the one the client claimed to be showing.
+    A client-supplied tracking_key can diverge from canonical not just via
+    tampering but via a stale local cache (the Mini App caches the daily
     slot in localStorage for the rest of the KL day; if an admin
     unpublishes/deletes today's game mid-day, get_daily_game_selection()
-    reselects, but a client still showing the cached old slot would submit
-    the old tracking_key). Rejecting on mismatch would silently drop that
-    client's impressions/clicks for the rest of the day; resolving to the
-    canonical selection instead means the event is still recorded — correctly
-    attributed to the game currently selected — rather than lost.
+    reselects). That staleness is handled upstream instead: the frontend
+    (loadDailyGame/activateLuckyGameTracking in static/index.html) always
+    revalidates its cached slot against GET /v2/miniapp/daily-game before
+    treating any tracking_key as confirmed, and only ever calls this with a
+    just-confirmed value — so a legitimate stale-cache mismatch should never
+    actually reach here. This strict equality check exists as defense in
+    depth: even a buggy/malicious/out-of-date caller can only ever have its
+    event rejected, never silently reattributed to whatever is canonical.
 
     Returns ``(accepted, reason, info)``:
-      accepted=True,  reason="recorded"            -- new row written
-      accepted=True,  reason="duplicate"           -- impression already seen today
-      accepted=False, reason="no_active_selection" -- no eligible game right now
-      accepted=False, reason="write_failed"        -- Mongo error (logged, swallowed)
+      accepted=True,  reason="recorded"             -- new row written
+      accepted=True,  reason="duplicate"            -- impression already seen today
+      accepted=False, reason="no_active_selection"  -- no eligible game right now
+      accepted=False, reason="invalid_tracking_key" -- didn't match canonical
+      accepted=False, reason="write_failed"         -- Mongo error (logged, swallowed)
     """
     selection = get_daily_game_selection()
     if not selection.get("ok"):
@@ -731,11 +738,12 @@ def record_lucky_game_event(
     game_id = slot.get("id", "")
     game_name = slot.get("name", "")
 
-    if client_tracking_key and client_tracking_key != tracking_key:
+    if client_tracking_key != tracking_key:
         logger.info(
-            "[LUCKY_GAME][TRACKING_KEY_STALE] client=%s canonical=%s",
+            "[LUCKY_GAME][TRACK_REJECT] reason=invalid_tracking_key client=%s canonical=%s",
             client_tracking_key, tracking_key,
         )
+        return False, "invalid_tracking_key", {"tracking_key": tracking_key}
 
     doc = {
         "event_type": event_type,
@@ -787,10 +795,10 @@ def track_lucky_game_event():
     (not written to analytics) but still answers 200, mirroring
     event_banner.py's ``/api/event-banner/track``.
 
-    ``tracking_key`` in the body is optional and only sanity-checked here
-    (type/length) — it is never authoritative game identity. See
-    record_lucky_game_event()'s docstring for why a mismatched value is
-    resolved to the canonical selection rather than rejected."""
+    ``tracking_key`` is required and must exactly match today's canonical
+    selection (see record_lucky_game_event()'s docstring) — a missing or
+    mismatched value is rejected, never silently reattributed to whatever
+    game is currently canonical."""
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
         body = {}
@@ -801,8 +809,10 @@ def track_lucky_game_event():
         return jsonify({"success": False, "error": "invalid_event"}), 400
 
     client_tracking_key = body.get("tracking_key")
-    if client_tracking_key is not None and (
-        not isinstance(client_tracking_key, str) or len(client_tracking_key) > MAX_TRACKING_KEY_LEN
+    if (
+        not isinstance(client_tracking_key, str)
+        or not client_tracking_key.strip()
+        or len(client_tracking_key) > MAX_TRACKING_KEY_LEN
     ):
         logger.info("[LUCKY_GAME][TRACK_REJECT] reason=invalid_tracking_key")
         return jsonify({"success": False, "error": "invalid_tracking_key"}), 400
@@ -820,6 +830,8 @@ def track_lucky_game_event():
     accepted, reason, _info = record_lucky_game_event(
         event_type=event_type, user_id=user_id, client_tracking_key=client_tracking_key,
     )
+    if not accepted and reason == "invalid_tracking_key":
+        return jsonify({"success": False, "error": "invalid_tracking_key"}), 400
     if not accepted:
         # no_active_selection / write_failed -- never the caller's fault; the
         # AdvantPlay page has already opened client-side by the time this

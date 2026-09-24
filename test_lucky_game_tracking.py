@@ -5,10 +5,18 @@
 Covers: authenticated writes, impression dedup (one per user+tracking_key),
 raw clicks never deduped, distinct viewers/clickers across users, malformed
 event rejection, spoofed-identity rejection (user_id always comes from
-verified Telegram initData, never the request body), tracking_key
-validation against the server's own persisted daily selection, KL-day
+verified Telegram initData, never the request body), strict tracking_key
+validation against the server's own persisted daily selection (a missing or
+mismatched tracking_key is rejected outright, never silently reattributed to
+a different game), same-day-reselection analytics separation, KL-day
 attribution, admin analytics math (including the zero-viewer CTR case), and
 admin-auth + bounds on the analytics endpoint's ``days`` parameter.
+
+The client-side half of attribution correctness (always revalidating a
+cached daily-game slot against GET /v2/miniapp/daily-game before treating
+any tracking_key as confirmed) is covered by
+test_lucky_game_click_tracking.test.js, not here -- this file only exercises
+the backend's own defense-in-depth strict-equality check.
 """
 
 from __future__ import annotations
@@ -147,12 +155,13 @@ def test_duplicate_impression_stays_one_unique_impression(fake_db):
 
 def test_same_user_clicking_twice_creates_two_raw_clicks_but_one_unique_clicker(fake_db):
     _seed_single_game(fake_db)
+    selection = _current_selection(fake_db)
     app = _app()
     client = app.test_client()
 
     with _mock_verified_user(222):
-        client.post("/api/lucky-game/track?init_data=raw", json={"event": "click"})
-        client.post("/api/lucky-game/track?init_data=raw", json={"event": "click"})
+        client.post("/api/lucky-game/track?init_data=raw", json={"event": "click", "tracking_key": selection["tracking_key"]})
+        client.post("/api/lucky-game/track?init_data=raw", json={"event": "click", "tracking_key": selection["tracking_key"]})
 
     click_docs = list(fake_db[lg.EVENTS_COLLECTION].find({"event_type": "click"}))
     assert len(click_docs) == 2
@@ -161,16 +170,17 @@ def test_same_user_clicking_twice_creates_two_raw_clicks_but_one_unique_clicker(
 
 def test_different_users_count_as_distinct_clickers_and_viewers(fake_db):
     _seed_single_game(fake_db)
+    selection = _current_selection(fake_db)
     app = _app()
     client = app.test_client()
 
     for uid in (1, 2, 3):
         with _mock_verified_user(uid):
-            client.post("/api/lucky-game/track?init_data=raw", json={"event": "impression"})
-            client.post("/api/lucky-game/track?init_data=raw", json={"event": "click"})
+            client.post("/api/lucky-game/track?init_data=raw", json={"event": "impression", "tracking_key": selection["tracking_key"]})
+            client.post("/api/lucky-game/track?init_data=raw", json={"event": "click", "tracking_key": selection["tracking_key"]})
     # One of them clicks again -- must not inflate unique clickers.
     with _mock_verified_user(1):
-        client.post("/api/lucky-game/track?init_data=raw", json={"event": "click"})
+        client.post("/api/lucky-game/track?init_data=raw", json={"event": "click", "tracking_key": selection["tracking_key"]})
 
     events = list(fake_db[lg.EVENTS_COLLECTION].find({}))
     viewers = {d["user_id"] for d in events if d["event_type"] == "impression"}
@@ -206,13 +216,14 @@ def test_unknown_event_type_is_rejected(fake_db):
 
 def test_client_supplied_user_id_is_ignored(fake_db):
     _seed_single_game(fake_db)
+    selection = _current_selection(fake_db)
     app = _app()
     client = app.test_client()
 
     with _mock_verified_user(555):
         resp = client.post(
             "/api/lucky-game/track?init_data=raw",
-            json={"event": "click", "user_id": 999999, "uid": 999999},
+            json={"event": "click", "tracking_key": selection["tracking_key"], "user_id": 999999, "uid": 999999},
         )
 
     assert resp.status_code == 200
@@ -222,11 +233,15 @@ def test_client_supplied_user_id_is_ignored(fake_db):
 
 def test_unauthenticated_event_is_discarded_not_written(fake_db):
     _seed_single_game(fake_db)
+    selection = _current_selection(fake_db)
     app = _app()
     client = app.test_client()
 
     with patch("vouchers.verify_telegram_init_data", return_value=(False, {}, "hash_mismatch")):
-        resp = client.post("/api/lucky-game/track?init_data=raw", json={"event": "click"})
+        resp = client.post(
+            "/api/lucky-game/track?init_data=raw",
+            json={"event": "click", "tracking_key": selection["tracking_key"]},
+        )
 
     # Never blocks/errors the caller -- but nothing is written under an
     # unverifiable identity.
@@ -240,14 +255,17 @@ def test_unauthenticated_event_is_discarded_not_written(fake_db):
 # ---------------------------------------------------------------------------
 
 
-def test_spoofed_tracking_key_is_resolved_to_canonical_not_rejected(fake_db):
+def test_spoofed_tracking_key_is_rejected_never_reattributed(fake_db):
     # A client-supplied tracking_key that doesn't match today's canonical
-    # selection is never authoritative -- whether it's tampering or (far
-    # more commonly) a stale client-side cache from before a same-day
-    # reselection, the event must still be recorded, attributed to the
-    # actual current selection, rather than silently dropped.
-    game_id = _seed_single_game(fake_db)
+    # selection must be rejected outright -- never silently rewritten to
+    # record the event under whichever game is currently canonical. (Client
+    # cache staleness is handled upstream by the frontend always
+    # revalidating against GET /v2/miniapp/daily-game before it ever
+    # activates tracking -- see loadDailyGame() in static/index.html -- so a
+    # legitimate stale-cache mismatch should never actually reach here.)
+    other_game_id = _seed_single_game(fake_db, name="Other Game")
     selection = _current_selection(fake_db)
+    assert selection["slot"]["id"] == other_game_id
     app = _app()
     client = app.test_client()
 
@@ -257,12 +275,23 @@ def test_spoofed_tracking_key_is_resolved_to_canonical_not_rejected(fake_db):
             json={"event": "click", "tracking_key": "daily_game:2099-01-01:not-a-real-game-id"},
         )
 
-    assert resp.status_code == 200
-    assert resp.get_json()["success"] is True
-    doc = fake_db[lg.EVENTS_COLLECTION].find_one({})
-    assert doc is not None
-    assert doc["game_id"] == game_id
-    assert doc["tracking_key"] == selection["tracking_key"]
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "invalid_tracking_key"
+    assert fake_db[lg.EVENTS_COLLECTION].count_documents({}) == 0
+
+
+def test_missing_tracking_key_is_rejected(fake_db):
+    _seed_single_game(fake_db)
+    _current_selection(fake_db)
+    app = _app()
+    client = app.test_client()
+
+    with _mock_verified_user(1):
+        resp = client.post("/api/lucky-game/track?init_data=raw", json={"event": "click"})
+
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "invalid_tracking_key"
+    assert fake_db[lg.EVENTS_COLLECTION].count_documents({}) == 0
 
 
 def test_event_tied_to_persisted_daily_selection_not_client_claims(fake_db):
@@ -273,9 +302,19 @@ def test_event_tied_to_persisted_daily_selection_not_client_claims(fake_db):
     client = app.test_client()
 
     with _mock_verified_user(1):
-        # No tracking_key sent at all -- server must resolve it from the
-        # persisted selection itself, never leave game identity unresolved.
-        client.post("/api/lucky-game/track?init_data=raw", json={"event": "click"})
+        # The correct (server-issued) tracking_key is supplied, but a
+        # spoofed game_id/game_name is also sent -- those fields are never
+        # read by the endpoint, so game identity must come exclusively from
+        # the persisted selection, not from anything else in the body.
+        client.post(
+            "/api/lucky-game/track?init_data=raw",
+            json={
+                "event": "click",
+                "tracking_key": selection["tracking_key"],
+                "game_id": "spoofed-game-id",
+                "game_name": "Spoofed Game",
+            },
+        )
 
     doc = fake_db[lg.EVENTS_COLLECTION].find_one({})
     assert doc["game_id"] == game_id
@@ -286,11 +325,17 @@ def test_event_tied_to_persisted_daily_selection_not_client_claims(fake_db):
 
 def test_no_eligible_game_rejects_tracking_without_error_to_caller(fake_db):
     # No games seeded at all -- get_daily_game_selection returns ok=False.
+    # A plausible-looking tracking_key is still supplied so the request
+    # passes the endpoint's format check and actually reaches
+    # record_lucky_game_event(), which is what this test exercises.
     app = _app()
     client = app.test_client()
 
     with _mock_verified_user(1):
-        resp = client.post("/api/lucky-game/track?init_data=raw", json={"event": "click"})
+        resp = client.post(
+            "/api/lucky-game/track?init_data=raw",
+            json={"event": "click", "tracking_key": "daily_game:2026-01-01:nonexistent"},
+        )
 
     assert resp.status_code == 200
     assert resp.get_json()["success"] is True
@@ -372,17 +417,19 @@ def test_admin_analytics_summary_and_ctr_math(fake_db):
     app = _app()
     client = app.test_client()
 
+    tk = selection["tracking_key"]
+
     # 3 unique viewers (one reopens -> still 1 impression row thanks to
     # dedup), 2 unique clickers, one of whom clicks twice (raw clicks = 3).
     for uid in (1, 2, 3):
         with _mock_verified_user(uid):
-            client.post("/api/lucky-game/track?init_data=raw", json={"event": "impression"})
+            client.post("/api/lucky-game/track?init_data=raw", json={"event": "impression", "tracking_key": tk})
     with _mock_verified_user(1):
-        client.post("/api/lucky-game/track?init_data=raw", json={"event": "impression"})  # duplicate, ignored
-        client.post("/api/lucky-game/track?init_data=raw", json={"event": "click"})
-        client.post("/api/lucky-game/track?init_data=raw", json={"event": "click"})
+        client.post("/api/lucky-game/track?init_data=raw", json={"event": "impression", "tracking_key": tk})  # duplicate, ignored
+        client.post("/api/lucky-game/track?init_data=raw", json={"event": "click", "tracking_key": tk})
+        client.post("/api/lucky-game/track?init_data=raw", json={"event": "click", "tracking_key": tk})
     with _mock_verified_user(2):
-        client.post("/api/lucky-game/track?init_data=raw", json={"event": "click"})
+        client.post("/api/lucky-game/track?init_data=raw", json={"event": "click", "tracking_key": tk})
 
     with _mock_admin():
         resp = client.get("/api/admin/lucky-game/analytics?days=7")
@@ -409,11 +456,15 @@ def test_admin_analytics_summary_and_ctr_math(fake_db):
 
 def test_admin_analytics_zero_viewers_ctr_is_zero_not_error(fake_db):
     _seed_single_game(fake_db)
+    selection = _current_selection(fake_db)
     app = _app()
     client = app.test_client()
 
     with _mock_verified_user(1):
-        client.post("/api/lucky-game/track?init_data=raw", json={"event": "click"})
+        client.post(
+            "/api/lucky-game/track?init_data=raw",
+            json={"event": "click", "tracking_key": selection["tracking_key"]},
+        )
 
     with _mock_admin():
         resp = client.get("/api/admin/lucky-game/analytics")

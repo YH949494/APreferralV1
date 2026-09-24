@@ -2976,9 +2976,18 @@
     // trackLuckyGameEvent() is never awaited by handleLuckyGameClick(), so a
     // slow/failing/offline tracking call can never delay or block opening
     // the AdvantPlay page, and no failure here is ever surfaced to the user.
+    //
+    // Attribution correctness: the locally cached slot is a display-only
+    // optimization (paints instantly instead of a "Loading…" flash) — it is
+    // NEVER treated as authoritative for tracking. Every impression/click is
+    // sent only under a tracking_key this session has confirmed against the
+    // live GET /v2/miniapp/daily-game response, so a stale cache (e.g. an
+    // admin reselected today's game after this card was cached) can never
+    // misattribute an event to whichever game happened to be cached.
     const LUCKY_GAME_DESTINATION_URL =
       "https://advantplay.com/our-games.html?utm_source=telegram&utm_medium=miniapp&utm_campaign=lucky_game";
     let luckyGameTrackingKey = null;
+    let luckyGameTrackingConfirmed = false;
     let luckyGameLastImpressionKey = null;
     let luckyGameClickBusy = false;
 
@@ -2990,9 +2999,12 @@
     }
 
     function trackLuckyGameEvent(eventType) {
+      // Only ever called with a server-confirmed tracking_key (see
+      // activateLuckyGameTracking / handleLuckyGameClick's confirmed guard)
+      // -- never with a merely-cached, unrevalidated one.
+      if (!luckyGameTrackingKey) return;
       try {
-        const payload = { event: eventType };
-        if (luckyGameTrackingKey) payload.tracking_key = luckyGameTrackingKey;
+        const payload = { event: eventType, tracking_key: luckyGameTrackingKey };
         const initDataRaw = luckyGameInitData();
         if (initDataRaw) payload.init_data = initDataRaw;
         fetch(`${API_BASE}/api/lucky-game/track`, {
@@ -3014,7 +3026,14 @@
       luckyGameClickBusy = true;
       setTimeout(() => { luckyGameClickBusy = false; }, 800);
 
-      trackLuckyGameEvent("click");
+      // The destination must open regardless of tracking state -- only send
+      // a click event when this session has a server-confirmed tracking_key
+      // for what's currently displayed (e.g. the daily-game revalidation
+      // failed and we're showing a stale cached card: skip tracking rather
+      // than risk sending a key that no longer matches, or none at all).
+      if (luckyGameTrackingConfirmed) {
+        trackLuckyGameEvent("click");
+      }
 
       try {
         const waApp = window.Telegram?.WebApp;
@@ -3033,7 +3052,11 @@
       }
     }
 
-    function renderDailyGame(slot, dateKl) {
+    // Pure display: paints the card and nothing else. Used both for the
+    // instant optimistic cache-hit paint and for the final, server-confirmed
+    // paint -- it must never have tracking side effects, since a cache-hit
+    // render may later turn out to not match the server's canonical slot.
+    function renderDailyGameDisplay(slot) {
       const contentEl = document.getElementById("daily-game-content");
       if (!contentEl) return;
       if (!slot || !slot.name) {
@@ -3045,19 +3068,21 @@
       const maxwin = slot.maxwin ? `<span style="display:inline-block;margin-top:6px;margin-left:6px;padding:2px 8px;border-radius:999px;background:#fff4e6;color:#b26a00;font-size:12px;">Max win ${escapeHtml(slot.maxwin)}</span>` : "";
       const reason = slot.reason ? `<div style="margin-top:8px;font-size:13px;color:#555;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(slot.reason)}</div>` : "";
       contentEl.innerHTML = `<div style="font-size:18px;font-weight:700;">${name}</div>${tag}${maxwin}${reason}`;
+    }
 
-      // Impression: only once the card has actually rendered a real game
-      // (the "unavailable" early-return above never reaches here), and only
-      // once per tracking_key per page session -- the backend also dedupes
-      // this server-side (one impression per user+tracking_key), so a
-      // reopened Mini App still counts as exactly one unique viewer.
-      if (slot.id && dateKl) {
-        const trackingKey = `daily_game:${dateKl}:${slot.id}`;
-        luckyGameTrackingKey = trackingKey;
-        if (luckyGameLastImpressionKey !== trackingKey) {
-          luckyGameLastImpressionKey = trackingKey;
-          trackLuckyGameEvent("impression");
-        }
+    // Authoritative: only ever called with a slot/tracking_key just returned
+    // by GET /v2/miniapp/daily-game (never a cached one). Marks tracking as
+    // confirmed for this session and emits an impression once per
+    // tracking_key -- the backend also dedupes this server-side (one
+    // impression per user+tracking_key), so a reopened Mini App still
+    // counts as exactly one unique viewer.
+    function activateLuckyGameTracking(trackingKey) {
+      if (!trackingKey) return;
+      luckyGameTrackingKey = trackingKey;
+      luckyGameTrackingConfirmed = true;
+      if (luckyGameLastImpressionKey !== trackingKey) {
+        luckyGameLastImpressionKey = trackingKey;
+        trackLuckyGameEvent("impression");
       }
     }
 
@@ -3068,7 +3093,7 @@
         if (!raw) return null;
         const parsed = JSON.parse(raw);
         if (!parsed || parsed.date_kl !== dateKl || !parsed.slot) return null;
-        return parsed;
+        return parsed; // tracking_key may be absent on a legacy cache entry
       } catch (_) {
         return null;
       }
@@ -3079,7 +3104,8 @@
         if (!payload || !payload.date_kl || !payload.slot) return;
         localStorage.setItem(`${DAILY_GAME_CACHE_PREFIX}${payload.date_kl}`, JSON.stringify({
           date_kl: payload.date_kl,
-          slot: payload.slot
+          slot: payload.slot,
+          tracking_key: payload.tracking_key || null
         }));
       } catch (_) {}
     }
@@ -3107,26 +3133,45 @@
       const sectionEl = document.getElementById("daily-game-section");
       const contentEl = document.getElementById("daily-game-content");
       if (!sectionEl || !contentEl) return;
-      contentEl.textContent = "Loading today’s recommendation…";
-      try {
-        const dateKl = getCurrentKlDateString();
-        const cached = getDailyGameCache(dateKl);
-        if (cached?.slot) {
-          renderDailyGame(cached.slot, cached.date_kl || dateKl);
-          return;
-        }
 
+      const dateKl = getCurrentKlDateString();
+      const cached = getDailyGameCache(dateKl);
+      let cachePainted = false;
+      if (cached?.slot) {
+        // Optimistic local paint only -- never activates tracking. The
+        // fetch below always runs afterward to confirm (or correct) it.
+        renderDailyGameDisplay(cached.slot);
+        cachePainted = true;
+      } else {
+        contentEl.textContent = "Loading today’s recommendation…";
+      }
+
+      try {
         const res = await v2Fetch(`${API_V2}/daily-game`);
         if (!res.ok) throw new Error(`daily-game ${res.status}`);
         const data = await res.json();
-        if (!data?.ok || !data?.date_kl || !data?.slot) throw new Error("invalid daily-game payload");
+        if (!data?.ok || !data?.date_kl || !data?.slot || !data?.tracking_key) {
+          throw new Error("invalid daily-game payload");
+        }
 
-        renderDailyGame(data.slot, data.date_kl);
+        // Revalidate: only re-paint if the cached slot didn't already match
+        // the server's canonical tracking_key (a legacy cache entry with no
+        // tracking_key at all always counts as a mismatch here, so it's
+        // never trusted without this revalidation).
+        if (!cached || cached.tracking_key !== data.tracking_key) {
+          renderDailyGameDisplay(data.slot);
+        }
         setDailyGameCache(data);
+        activateLuckyGameTracking(data.tracking_key);
         // TODO: reward_hint, mission_flag rendering can be added here when reward logic is enabled.
       } catch (err) {
         console.warn("Daily game load failed:", err);
-        sectionEl.style.display = "none";
+        // Fall back to the cached display if we already painted one -- the
+        // card (and its destination link) stays usable, just untracked,
+        // rather than misattributing events to a possibly-stale game.
+        if (!cachePainted) {
+          sectionEl.style.display = "none";
+        }
       }
     }
     
