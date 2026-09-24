@@ -61,9 +61,12 @@ test("5. daily Lucky Game tile still loads from /v2/miniapp/daily-game", () => {
 
 test("6. daily Lucky Game tile design/classes are unchanged", () => {
   const html = readHtml();
+  // Classes/base style are unchanged (same visual design); the tile also now
+  // carries click/keyboard-activation attributes (see the click-tracking
+  // tests below) which this assertion intentionally does not constrain.
   assert.match(
     html,
-    /<div id="daily-game-section" class="ap-tile ap-tile-gold" style="display:block;">/,
+    /<div id="daily-game-section" class="ap-tile ap-tile-gold" style="display:block;"[^>]*>/,
     "daily tile markup/classes must be unchanged"
   );
 });
