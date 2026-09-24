@@ -2796,7 +2796,7 @@ class RejoinBufferClaimEndpointTests(unittest.TestCase):
         orig_load_user_context = m.load_user_context
         orig_is_drop_allowed = m.is_drop_allowed
         orig_is_user_eligible = m.is_user_eligible_for_drop
-        orig_subscribed = m.check_channel_subscribed
+        orig_sub_state = m.get_channel_subscription_state
         orig_dedup = m._acquire_request_dedup_lock
         orig_rejoin_check = m.check_rejoin_buffer_for_pooled_claim
 
@@ -2808,7 +2808,7 @@ class RejoinBufferClaimEndpointTests(unittest.TestCase):
             m.load_user_context = lambda **kwargs: {}
             m.is_drop_allowed = lambda *args, **kwargs: True
             m.is_user_eligible_for_drop = lambda *args, **kwargs: True
-            m.check_channel_subscribed = lambda uid: True
+            m.get_channel_subscription_state = lambda uid: {"state": "subscribed"}
             m._acquire_request_dedup_lock = lambda **kwargs: True
             m.check_rejoin_buffer_for_pooled_claim = lambda uid, now_ref: {
                 "ok": False,
@@ -2842,7 +2842,7 @@ class RejoinBufferClaimEndpointTests(unittest.TestCase):
             m.load_user_context = orig_load_user_context
             m.is_drop_allowed = orig_is_drop_allowed
             m.is_user_eligible_for_drop = orig_is_user_eligible
-            m.check_channel_subscribed = orig_subscribed
+            m.get_channel_subscription_state = orig_sub_state
             m._acquire_request_dedup_lock = orig_dedup
             m.check_rejoin_buffer_for_pooled_claim = orig_rejoin_check
 
@@ -2875,7 +2875,7 @@ class RejoinBufferClaimEndpointTests(unittest.TestCase):
         orig_load_user_context = m.load_user_context
         orig_is_drop_allowed = m.is_drop_allowed
         orig_is_user_eligible = m.is_user_eligible_for_drop
-        orig_subscribed = m.check_channel_subscribed
+        orig_sub_state = m.get_channel_subscription_state
         orig_dedup = m._acquire_request_dedup_lock
         orig_rejoin_check = m.check_rejoin_buffer_for_pooled_claim
 
@@ -2887,7 +2887,7 @@ class RejoinBufferClaimEndpointTests(unittest.TestCase):
             m.load_user_context = lambda **kwargs: {}
             m.is_drop_allowed = lambda *args, **kwargs: True
             m.is_user_eligible_for_drop = lambda *args, **kwargs: True
-            m.check_channel_subscribed = lambda uid: True
+            m.get_channel_subscription_state = lambda uid: {"state": "subscribed"}
             m._acquire_request_dedup_lock = lambda **kwargs: True
             m.check_rejoin_buffer_for_pooled_claim = lambda uid, now_ref: {
                 "ok": False,
@@ -2918,7 +2918,7 @@ class RejoinBufferClaimEndpointTests(unittest.TestCase):
             m.load_user_context = orig_load_user_context
             m.is_drop_allowed = orig_is_drop_allowed
             m.is_user_eligible_for_drop = orig_is_user_eligible
-            m.check_channel_subscribed = orig_subscribed
+            m.get_channel_subscription_state = orig_sub_state
             m._acquire_request_dedup_lock = orig_dedup
             m.check_rejoin_buffer_for_pooled_claim = orig_rejoin_check
 
@@ -2946,7 +2946,7 @@ class RejoinBufferClaimEndpointTests(unittest.TestCase):
         orig_load_user_context = m.load_user_context
         orig_is_drop_allowed = m.is_drop_allowed
         orig_is_user_eligible = m.is_user_eligible_for_drop
-        orig_subscribed = m.check_channel_subscribed
+        orig_sub_state = m.get_channel_subscription_state
         orig_dedup = m._acquire_request_dedup_lock
         orig_rejoin_check = m.check_rejoin_buffer_for_pooled_claim
 
@@ -2958,7 +2958,7 @@ class RejoinBufferClaimEndpointTests(unittest.TestCase):
             m.load_user_context = lambda **kwargs: {}
             m.is_drop_allowed = lambda *args, **kwargs: True
             m.is_user_eligible_for_drop = lambda *args, **kwargs: True
-            m.check_channel_subscribed = lambda uid: True
+            m.get_channel_subscription_state = lambda uid: {"state": "subscribed"}
             m._acquire_request_dedup_lock = lambda **kwargs: True
             m.check_rejoin_buffer_for_pooled_claim = lambda uid, now_ref: {"ok": True}
 
@@ -2981,9 +2981,160 @@ class RejoinBufferClaimEndpointTests(unittest.TestCase):
             m.load_user_context = orig_load_user_context
             m.is_drop_allowed = orig_is_drop_allowed
             m.is_user_eligible_for_drop = orig_is_user_eligible
-            m.check_channel_subscribed = orig_subscribed
+            m.get_channel_subscription_state = orig_sub_state
             m._acquire_request_dedup_lock = orig_dedup
             m.check_rejoin_buffer_for_pooled_claim = orig_rejoin_check
+
+
+class LiveDropChannelGateTaxonomyTests(unittest.TestCase):
+    """Live Drop channel-gate audit (P1): api_claim()'s pooled-drop
+    channel-subscription gate must distinguish confirmed_not_subscribed from
+    verification_failed instead of collapsing every non-"subscribed" result
+    into a blanket "not_subscribed" — and a verification_failed result must
+    never let a real claim through (no voucher issued)."""
+
+    def _base_fixture(self, m, drop, uid=8551, username="u8551"):
+        app = Flask(__name__)
+        orig = {
+            "extract_raw_init_data_from_query": m.extract_raw_init_data_from_query,
+            "verify_telegram_init_data": m.verify_telegram_init_data,
+            "db": m.db,
+            "users_collection": m.users_collection,
+            "load_user_context": m.load_user_context,
+            "is_drop_allowed": m.is_drop_allowed,
+            "is_user_eligible_for_drop": m.is_user_eligible_for_drop,
+            "get_channel_subscription_state": m.get_channel_subscription_state,
+            "_acquire_request_dedup_lock": m._acquire_request_dedup_lock,
+            "_acquire_claim_lock": m._acquire_claim_lock,
+        }
+
+        def _fail_if_claim_lock_acquired(**kwargs):
+            raise AssertionError("a voucher must never be reserved when the channel gate did not confirm subscription")
+
+        m.extract_raw_init_data_from_query = lambda req: "ok"
+        m.verify_telegram_init_data = lambda init_data: (True, {"user": f'{{"id": {uid}, "username": "{username}"}}'}, "ok")
+        m.db = FakeDb([drop], [])
+        m.users_collection = FakeSimpleCollection([{"user_id": uid, "usernameLower": username, "region": "th"}])
+        m.load_user_context = lambda **kwargs: {}
+        m.is_drop_allowed = lambda *args, **kwargs: True
+        m.is_user_eligible_for_drop = lambda *args, **kwargs: True
+        m._acquire_request_dedup_lock = lambda **kwargs: True
+        m._acquire_claim_lock = _fail_if_claim_lock_acquired
+        return app, orig
+
+    def _restore(self, m, orig):
+        for key, value in orig.items():
+            setattr(m, key, value)
+
+    def _drop(self, drop_id):
+        now = datetime.now(timezone.utc)
+        return {
+            "_id": drop_id,
+            "name": "Public Drop",
+            "type": "pooled",
+            "audience": "public",
+            "eligibility": {"mode": "public"},
+            "status": "active",
+            "startsAt": now - timedelta(minutes=5),
+            "endsAt": now + timedelta(minutes=5),
+        }
+
+    def test_verification_failed_on_real_claim_blocks_and_issues_zero_voucher(self):
+        import vouchers as m
+
+        drop_id = "drop-verification-failed-real"
+        app, orig = self._base_fixture(m, self._drop(drop_id))
+        try:
+            m.get_channel_subscription_state = lambda uid: {
+                "state": "verification_failed",
+                "reason": "network_error",
+                "retry_after_sec": 3,
+            }
+            with app.test_request_context(
+                "/vouchers/claim?init_data=ok",
+                method="POST",
+                json={"dropId": drop_id},
+            ):
+                resp, status = m.api_claim()
+                payload = resp.get_json()
+
+            self.assertEqual(status, 503)
+            self.assertEqual(payload.get("code"), "verification_failed")
+            self.assertEqual(payload.get("subscribed"), False)
+            self.assertEqual(payload.get("verified"), False)
+            self.assertEqual(payload.get("reason"), "network_error")
+            self.assertEqual(payload.get("retry_after_sec"), 3)
+        finally:
+            self._restore(m, orig)
+
+    def test_confirmed_not_subscribed_on_real_claim_returns_not_subscribed(self):
+        import vouchers as m
+
+        drop_id = "drop-confirmed-not-sub-real"
+        app, orig = self._base_fixture(m, self._drop(drop_id))
+        try:
+            m.get_channel_subscription_state = lambda uid: {"state": "confirmed_not_subscribed", "reason": "left"}
+            with app.test_request_context(
+                "/vouchers/claim?init_data=ok",
+                method="POST",
+                json={"dropId": drop_id},
+            ):
+                resp, status = m.api_claim()
+                payload = resp.get_json()
+
+            self.assertEqual(status, 403)
+            self.assertEqual(payload.get("code"), "not_subscribed")
+            self.assertEqual(payload.get("subscribed"), False)
+        finally:
+            self._restore(m, orig)
+
+    def test_verification_failed_check_only_returns_contract_shape(self):
+        import vouchers as m
+
+        drop_id = "drop-verification-failed-checkonly"
+        app, orig = self._base_fixture(m, self._drop(drop_id))
+        try:
+            m.get_channel_subscription_state = lambda uid: {
+                "state": "verification_failed",
+                "reason": "rate_limited",
+                "retry_after_sec": 3,
+            }
+            with app.test_request_context(
+                "/vouchers/claim?init_data=ok",
+                method="POST",
+                json={"dropId": drop_id, "check_only": True},
+            ):
+                resp, status = m.api_claim()
+                payload = resp.get_json()
+
+            self.assertEqual(status, 503)
+            self.assertEqual(payload.get("code"), "verification_failed")
+            self.assertEqual(payload.get("subscribed"), False)
+            self.assertEqual(payload.get("verified"), False)
+            self.assertIn("retry_after_sec", payload)
+        finally:
+            self._restore(m, orig)
+
+    def test_confirmed_not_subscribed_check_only_returns_contract_shape(self):
+        import vouchers as m
+
+        drop_id = "drop-confirmed-not-sub-checkonly"
+        app, orig = self._base_fixture(m, self._drop(drop_id))
+        try:
+            m.get_channel_subscription_state = lambda uid: {"state": "confirmed_not_subscribed", "reason": "kicked"}
+            with app.test_request_context(
+                "/vouchers/claim?init_data=ok",
+                method="POST",
+                json={"dropId": drop_id, "check_only": True},
+            ):
+                resp, status = m.api_claim()
+                payload = resp.get_json()
+
+            self.assertEqual(status, 403)
+            self.assertEqual(payload.get("code"), "not_subscribed")
+            self.assertEqual(payload.get("subscribed"), False)
+        finally:
+            self._restore(m, orig)
 
 
 class AdminDeleteDropTests(unittest.TestCase):
