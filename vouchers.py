@@ -323,14 +323,40 @@ def _public_pool_ip_block_seconds() -> int:
 def _public_pool_subnet_hard_block() -> bool:
     return bool(_abuse_setting("public_pool_subnet_hard_block", PUBLIC_POOL_SUBNET_HARD_BLOCK))
 
-_RAW_OFFICIAL_CHANNEL_ID = getattr(_cfg, "OFFICIAL_CHANNEL_ID", os.getenv("OFFICIAL_CHANNEL_ID"))
-try:
-    OFFICIAL_CHANNEL_ID = int(str(_RAW_OFFICIAL_CHANNEL_ID).strip()) if _RAW_OFFICIAL_CHANNEL_ID not in (None, "") else None
-except (TypeError, ValueError):
-    OFFICIAL_CHANNEL_ID = None
+# Official channel identity: the numeric ID is resolved once in
+# referral_destination.py so every runtime (main.py, scheduler.py, and this
+# module) agrees on which chat is the official channel. This module used to
+# re-parse OFFICIAL_CHANNEL_ID/USERNAME from config/env independently, which
+# could silently diverge from the canonical value and made the Live Drop
+# channel gate fragile to config drift — see the Live Drop channel-gate
+# audit. referral_destination.OFFICIAL_CHANNEL_ID always resolves to a
+# non-None value (it falls back to a hardcoded historical ID when the env
+# var is unset), so a deployment that configures ONLY
+# OFFICIAL_CHANNEL_USERNAME (no OFFICIAL_CHANNEL_ID) is preserved as a
+# username-only override here rather than silently overridden by that
+# canonical fallback ID (a real deployments-can-break regression Codex
+# review flagged on PR #498).
+from referral_destination import OFFICIAL_CHANNEL_ID as _CANONICAL_OFFICIAL_CHANNEL_ID
 
-_RAW_OFFICIAL_CHANNEL_USERNAME = getattr(_cfg, "OFFICIAL_CHANNEL_USERNAME", os.getenv("OFFICIAL_CHANNEL_USERNAME"))
-OFFICIAL_CHANNEL_USERNAME = (str(_RAW_OFFICIAL_CHANNEL_USERNAME).strip() or "") if _RAW_OFFICIAL_CHANNEL_USERNAME is not None else ""
+OFFICIAL_CHANNEL_USERNAME = (os.getenv("OFFICIAL_CHANNEL_USERNAME") or "").strip()
+if OFFICIAL_CHANNEL_USERNAME and not OFFICIAL_CHANNEL_USERNAME.startswith("@"):
+    OFFICIAL_CHANNEL_USERNAME = f"@{OFFICIAL_CHANNEL_USERNAME}"
+
+if os.getenv("OFFICIAL_CHANNEL_ID") in (None, "") and OFFICIAL_CHANNEL_USERNAME:
+    # No explicit ID configured for this deployment, but a username was —
+    # honor that override instead of the canonical resolver's fallback ID.
+    OFFICIAL_CHANNEL_ID = None
+else:
+    OFFICIAL_CHANNEL_ID = _CANONICAL_OFFICIAL_CHANNEL_ID
+    if not OFFICIAL_CHANNEL_USERNAME:
+        OFFICIAL_CHANNEL_USERNAME = "@advantplayofficial"
+
+if OFFICIAL_CHANNEL_ID is None and not OFFICIAL_CHANNEL_USERNAME:
+    logger.error(
+        "[LIVE_DROP][CONFIG] official_channel_unresolved — no OFFICIAL_CHANNEL_ID or "
+        "OFFICIAL_CHANNEL_USERNAME could be resolved; the channel-subscription gate "
+        "will report verification_failed (never not_subscribed) until this is fixed"
+    )
 _RAW_MAIN_GROUP_ID = getattr(_cfg, "MAIN_GROUP_ID", os.getenv("MAIN_GROUP_ID", "-1002304653063"))
 try:
     MAIN_GROUP_ID = int(str(_RAW_MAIN_GROUP_ID).strip()) if _RAW_MAIN_GROUP_ID not in (None, "") else None
@@ -3208,6 +3234,13 @@ def process_verification_queue(batch_limit: int | None = None) -> None:
     )
      
 ALLOWED_CHANNEL_STATUSES = {"member", "administrator", "creator"}
+# Only these Telegram getChatMember statuses positively confirm the user left
+# the channel. Everything else (unrecognized statuses, missing config,
+# network errors, 429s, non-200s, bad/ok=false responses) is ambiguous and
+# must resolve to verification_failed, never confirmed_not_subscribed — see
+# get_channel_subscription_state().
+CONFIRMED_NOT_SUBSCRIBED_STATUSES = {"left", "kicked"}
+CHANNEL_VERIFICATION_RETRY_AFTER_SEC = 3
 SUB_CHECK_TTL_SECONDS = int(os.getenv("SUB_CHECK_TTL_SECONDS", "120"))
 SUB_CACHE_TTL_DAYS = int(os.getenv("SUB_CACHE_TTL_DAYS", "3"))
 
@@ -4020,21 +4053,42 @@ def _effective_public_visible_remaining(*, drop: dict, drop_id: str, uid: int | 
     )
     return visible_remaining
 
-def check_channel_subscribed(uid: int) -> bool:
+def get_channel_subscription_state(uid: int) -> dict:
+    """Tri-state Telegram official-channel subscription verification.
+
+    Returns one of:
+      {"state": "subscribed"}
+      {"state": "confirmed_not_subscribed", "reason": "<telegram_status>"}
+      {"state": "verification_failed", "reason": "<reason>", "retry_after_sec": N}
+
+    Only an explicit getChatMember status of left/kicked resolves to
+    confirmed_not_subscribed. Everything ambiguous — missing channel config,
+    a network error, a Telegram 429, a non-200/invalid/ok=false response, or
+    an unrecognized member status — resolves to verification_failed so a
+    subscribed user is never mislabeled "not subscribed" because Telegram
+    hiccuped. Callers that must never issue a voucher without a positive
+    confirmation should branch on "state" directly; check_channel_subscribed()
+    below stays a fail-closed boolean for callers that only need pass/fail.
+    """
     if uid is None:
-        return False
+        return {"state": "verification_failed", "reason": "missing_uid", "retry_after_sec": CHANNEL_VERIFICATION_RETRY_AFTER_SEC}
 
     cached = get_cached_subscription(uid)
     if cached:
-        current_app.logger.info("[SUB_CACHE][HIT] uid=%s", uid)     
-        return True
+        current_app.logger.info("[SUB_CACHE][HIT] uid=%s", uid)
+        return {"state": "subscribed"}
     current_app.logger.info("[SUB_CACHE][MISS] uid=%s", uid)
- 
+
     chat_id = _official_channel_identifier()
     token = os.environ.get("BOT_TOKEN", "")
     if not chat_id or not token:
-        current_app.logger.info("[welcome] gate_fail uid=%s reason=channel_unset", uid)
-        return False
+        current_app.logger.error(
+            "[LIVE_DROP][CHANNEL_GATE] verification_failed uid=%s reason=channel_config_missing chat_id_set=%s token_set=%s",
+            uid,
+            bool(chat_id),
+            bool(token),
+        )
+        return {"state": "verification_failed", "reason": "channel_config_missing", "retry_after_sec": CHANNEL_VERIFICATION_RETRY_AFTER_SEC}
 
     max_attempts = 3
     resp = None
@@ -4053,7 +4107,7 @@ def check_channel_subscribed(uid: int) -> bool:
                     attempt,
                     e,
                 )
-                return False
+                return {"state": "verification_failed", "reason": "network_error", "retry_after_sec": CHANNEL_VERIFICATION_RETRY_AFTER_SEC}
             current_app.logger.debug(
                 "[welcome] channel_check_retry uid=%s attempt=%s err=%s",
                 uid,
@@ -4071,7 +4125,7 @@ def check_channel_subscribed(uid: int) -> bool:
                     uid,
                     attempt,
                 )
-                return False
+                return {"state": "verification_failed", "reason": "rate_limited", "retry_after_sec": CHANNEL_VERIFICATION_RETRY_AFTER_SEC}
             current_app.logger.info("[welcome] channel_check_retry uid=%s attempt=%s status=429", uid, attempt)
             sleep_s = min(2.0, 0.4 * (2 ** (attempt - 1))) + random.uniform(0, 0.15)
             time.sleep(sleep_s)
@@ -4081,52 +4135,74 @@ def check_channel_subscribed(uid: int) -> bool:
 
     if resp is None:
         current_app.logger.warning("[welcome] gate_fail uid=%s reason=channel_check_error attempts=%s", uid, max_attempts)
-        return False
+        return {"state": "verification_failed", "reason": "network_error", "retry_after_sec": CHANNEL_VERIFICATION_RETRY_AFTER_SEC}
 
     if resp.status_code != 200:
         current_app.logger.info("[welcome] gate_fail uid=%s reason=channel_http_%s", uid, resp.status_code)
-        return False
+        return {"state": "verification_failed", "reason": f"http_{resp.status_code}", "retry_after_sec": CHANNEL_VERIFICATION_RETRY_AFTER_SEC}
 
     try:
         data = resp.json()
     except ValueError:
         current_app.logger.info("[welcome] gate_fail uid=%s reason=channel_bad_json", uid)
-        return False
+        return {"state": "verification_failed", "reason": "invalid_response", "retry_after_sec": CHANNEL_VERIFICATION_RETRY_AFTER_SEC}
 
     if not data.get("ok"):
         current_app.logger.info("[welcome] gate_fail uid=%s reason=channel_not_ok err=%s", uid, data)
-        return False
+        return {"state": "verification_failed", "reason": "telegram_not_ok", "retry_after_sec": CHANNEL_VERIFICATION_RETRY_AFTER_SEC}
 
     status = (data.get("result") or {}).get("status")
-    is_subscribed = status in ALLOWED_CHANNEL_STATUSES
     now = now_utc()
-    update_doc = {
-        "$set": {
-            "user_id": uid,
-            "subscribed": is_subscribed,
-            "checked_at": now,
-            "updated_at": now,
-        }
-    }
-    if is_subscribed:
-        expire_at = now + timedelta(days=SUB_CACHE_TTL_DAYS)
-        update_doc["$set"]["expireAt"] = expire_at
-        update_doc["$setOnInsert"] = {"first_subscribed_at_utc": now}
-    try:
-        subscription_cache_col.update_one(
-            {"_id": _subscription_cache_key(uid)},
-            update_doc,
-            upsert=True,
-        )
-    except Exception:
-        pass
 
-    if is_subscribed:
+    if status in ALLOWED_CHANNEL_STATUSES:
+        update_doc = {
+            "$set": {
+                "user_id": uid,
+                "subscribed": True,
+                "checked_at": now,
+                "updated_at": now,
+                "expireAt": now + timedelta(days=SUB_CACHE_TTL_DAYS),
+            },
+            "$setOnInsert": {"first_subscribed_at_utc": now},
+        }
+        try:
+            subscription_cache_col.update_one(
+                {"_id": _subscription_cache_key(uid)},
+                update_doc,
+                upsert=True,
+            )
+        except Exception:
+            pass
         _ensure_durable_first_subscribed_at(uid, observed_at=now)
         current_app.logger.info("[SUB_CACHE][SET] uid=%s ttl_days=%s", uid, SUB_CACHE_TTL_DAYS)
-        return True
+        return {"state": "subscribed"}
 
-    return False
+    if status in CONFIRMED_NOT_SUBSCRIBED_STATUSES:
+        try:
+            subscription_cache_col.update_one(
+                {"_id": _subscription_cache_key(uid)},
+                {"$set": {"user_id": uid, "subscribed": False, "checked_at": now, "updated_at": now}},
+                upsert=True,
+            )
+        except Exception:
+            pass
+        return {"state": "confirmed_not_subscribed", "reason": status}
+
+    current_app.logger.info("[welcome] gate_fail uid=%s reason=channel_unknown_status status=%s", uid, status)
+    return {"state": "verification_failed", "reason": f"unknown_status_{status}", "retry_after_sec": CHANNEL_VERIFICATION_RETRY_AFTER_SEC}
+
+
+def check_channel_subscribed(uid: int) -> bool:
+    """Boolean compatibility wrapper around get_channel_subscription_state().
+
+    Both confirmed_not_subscribed and verification_failed resolve to False
+    here, so existing callers (main.py check-in flow, the welcome-journey
+    new-joiner claim gate) stay exactly as fail-closed as before this
+    refactor. Callers that need to distinguish "confirmed not subscribed"
+    from "verification failed" (the Live Drop pooled-claim channel gate)
+    should call get_channel_subscription_state() directly instead.
+    """
+    return get_channel_subscription_state(uid).get("state") == "subscribed"
 
 
 def check_has_profile_photo(uid: int) -> bool:
@@ -6329,7 +6405,10 @@ def api_claim():
         )
  
     if is_pool_drop and not _is_new_joiner_audience(audience_type):
-        if not check_channel_subscribed(uid):
+        sub_state = get_channel_subscription_state(uid)
+        sub_state_value = sub_state.get("state")
+
+        if sub_state_value == "confirmed_not_subscribed":
             logger.info(
                 "[CLAIM_BLOCK] reason=%s drop_id=%s uid=%s username=%s",
                 "not_subscribed",
@@ -6344,16 +6423,47 @@ def api_claim():
                 drop_id,
                 drop_type,
                 audience_type,
-            )         
+            )
             return jsonify({
                 "status": "error",
                 "code": "not_subscribed",
                 "ok": False,
                 "eligible": False,
+                "subscribed": False,
                 "reason": "not_subscribed",
-                "checks_key": None,             
+                "checks_key": None,
                 "message": "Please subscribe to @advantplayofficial to claim this voucher."
             }), 403
+
+        if sub_state_value == "verification_failed":
+            # Fail-closed: an ambiguous/unavailable Telegram check must never
+            # be treated as "not subscribed" (false gate) nor let a real
+            # claim through (no voucher issued without positive confirmation).
+            logger.info(
+                "[CLAIM_BLOCK] reason=%s drop_id=%s uid=%s username=%s",
+                "verification_failed",
+                drop_id,
+                user_id_str,
+                username,
+            )
+            current_app.logger.warning(
+                "[claim] deny drop=%s uid=%s reason=verification_failed detail=%s",
+                drop_id,
+                uid,
+                sub_state.get("reason"),
+            )
+            return jsonify({
+                "status": "error",
+                "code": "verification_failed",
+                "ok": False,
+                "eligible": False,
+                "subscribed": False,
+                "verified": False,
+                "reason": sub_state.get("reason") or "verification_failed",
+                "retry_after_sec": sub_state.get("retry_after_sec", CHANNEL_VERIFICATION_RETRY_AFTER_SEC),
+                "checks_key": None,
+                "message": "Couldn't verify your channel subscription. Please try again in a few seconds.",
+            }), 503
 
     if is_public_pool(voucher):
         rejoin_check = check_rejoin_buffer_for_pooled_claim(uid, now_ref)

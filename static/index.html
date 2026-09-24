@@ -5511,42 +5511,74 @@
       if (buttonEl) buttonEl.style.display = "none";
     }
 
+    // Live Drop channel-gate contract (3 states, never a silent 4th):
+    //   "subscribed"     — backend positively confirmed membership.
+    //   "not_subscribed" — backend positively confirmed the user left/was
+    //                      kicked (code: "not_subscribed").
+    //   "unverified"     — everything else: 401/429/5xx, code
+    //                      "verification_failed", a network failure, or any
+    //                      response shape we don't recognize. This must
+    //                      NEVER be treated as "not_subscribed" — that was
+    //                      the false-gate bug for already-subscribed users.
+    async function fetchChannelSubscriptionOnce(dropId) {
+      try {
+        const res = await v2Fetch(`${API_V2}/vouchers/claim`, {
+          method: "POST",
+          body: JSON.stringify({
+            dropId,
+            check_only: true,
+            init_data: getLatestInitData() || (tg?.initData || "")
+          })
+        });
+        let data = null;
+        try { data = await res.json(); } catch { /* ignore */ }
+
+        if (res.status === 403 && data?.code === "not_subscribed") {
+          return { state: "not_subscribed", message: data?.message };
+        }
+        // The rejoin buffer (an anti-abuse cooldown for users who recently
+        // left and rejoined the channel) is a claim-eligibility gate, not a
+        // channel membership gate — the user IS subscribed. Treat it as
+        // subscribed so Claim now stays enabled and the real claim attempt
+        // can surface the existing rejoin-buffer countdown UI
+        // (claimErrorToUi/renderClaimError) instead of being blocked before
+        // it's ever submitted.
+        if (res.status === 403 && (data?.code === "rejoin_buffer_active" || data?.reason === "rejoin_buffer_active")) {
+          return { state: "subscribed", rejoinBuffer: true, message: data?.message };
+        }
+        if (res.ok && (data?.status === "ok" || data?.check_only || data?.subscribed === true)) {
+          return { state: "subscribed", message: data?.message };
+        }
+        // 401 / 429 / 5xx / code=verification_failed / any other shape.
+        return {
+          state: "unverified",
+          message: data?.message,
+          retryAfterSec: Number(data?.retry_after_sec) || null,
+        };
+      } catch (err) {
+        // Network failure — never render the false "not subscribed" state.
+        return { state: "unverified", error: err };
+      }
+    }
+
+    // One bounded retry for a transient verification failure (never an
+    // infinite loop): at most 2 network attempts per call.
     async function checkChannelSubscription(dropId) {
-      if (!dropId) return { subscribed: true };
-      const res = await v2Fetch(`${API_V2}/vouchers/claim`, {
-        method: "POST",
-        body: JSON.stringify({
-          dropId,
-          check_only: true,
-          init_data: getLatestInitData() || (tg?.initData || "")
-        })
-      });
-      let data = null;
-      try { data = await res.json(); } catch { /* ignore */ }
-      if (res.status === 403 && data?.code === "not_subscribed") {
-        return { subscribed: false, message: data?.message };
-      }
-      // The rejoin buffer (an anti-abuse cooldown for users who recently left
-      // and rejoined the channel) is a claim-eligibility gate, not a channel
-      // membership gate — the user IS subscribed. Treat it as subscribed so
-      // Claim now stays enabled and the real claim attempt can surface the
-      // existing rejoin-buffer countdown UI (claimErrorToUi/renderClaimError)
-      // instead of being blocked before it's ever submitted.
-      if (res.status === 403 && (data?.code === "rejoin_buffer_active" || data?.reason === "rejoin_buffer_active")) {
-        return { subscribed: true, rejoinBuffer: true, message: data?.message };
-      }
-      if (!res.ok) {
-        throw new Error(data?.error || data?.code || `HTTP ${res.status}`);
-      }
-      return { subscribed: true, message: data?.message };
+      if (!dropId) return { state: "subscribed" };
+      const first = await fetchChannelSubscriptionOnce(dropId);
+      if (first.state !== "unverified") return first;
+      return fetchChannelSubscriptionOnce(dropId);
     }
 
     function applyChannelGate(dropId, messageEl, buttonEl) {
       checkChannelSubscription(dropId)
         .then((state) => {
-          if (!state.subscribed) {
+          if (state.state === "not_subscribed") {
             showChannelGate(messageEl, buttonEl);
           }
+          // "unverified": leave the existing claimable UI in place rather
+          // than falsely gating a possibly-subscribed user — the real claim
+          // attempt still enforces the subscription server-side (fail-closed).
         })
         .catch((err) => {
           console.warn("Channel gate check failed", err);
@@ -6020,24 +6052,41 @@
       if (isPoolCard && dropId) {
         btn.setAttribute("disabled", "disabled");
 
-        const applyChannelState = (subscribed) => {
-          channelRow.dataset.joined = subscribed ? "true" : "false";
+        // Three UI states — CRITICAL: "unverified" (401/429/5xx,
+        // verification_failed, network error, or anything else that isn't a
+        // positive backend confirmation) must never render as "not
+        // subscribed". Only a confirmed "not_subscribed" does that.
+        const applyChannelState = (uiState) => {
+          const isSubscribed = uiState === "subscribed";
+          channelRow.dataset.joined = isSubscribed ? "true" : "false";
+          channelRow.dataset.channelState = uiState;
           channelRow.style.display = "flex";
-          channelRow.disabled = subscribed;
-          channelRow.textContent = subscribed
-            ? "✓ " + t("channel_joined")
-            : "○ " + t("channel_join_required") + " ›";
-          channelRow.onclick = subscribed
-            ? null
-            : () => {
-                if (tg?.openTelegramLink) {
-                  tg.openTelegramLink(OFFICIAL_CHANNEL_LINK);
-                } else {
-                  window.open(OFFICIAL_CHANNEL_LINK, "_blank");
-                }
-              };
-          channelSub.style.display = subscribed ? "none" : "block";
-          if (subscribed) {
+
+          if (uiState === "subscribed") {
+            channelRow.disabled = true;
+            channelRow.textContent = "✓ " + t("channel_joined");
+            channelRow.onclick = null;
+            channelSub.style.display = "none";
+          } else if (uiState === "not_subscribed") {
+            channelRow.disabled = false;
+            channelRow.textContent = "○ " + t("channel_join_required") + " ›";
+            channelRow.onclick = () => {
+              if (tg?.openTelegramLink) {
+                tg.openTelegramLink(OFFICIAL_CHANNEL_LINK);
+              } else {
+                window.open(OFFICIAL_CHANNEL_LINK, "_blank");
+              }
+            };
+            channelSub.style.display = "block";
+          } else {
+            // unverified — offer a manual retry instead of guessing.
+            channelRow.disabled = false;
+            channelRow.textContent = t("channel_checking_status") + " · " + t("retry_label");
+            channelRow.onclick = () => runChannelCheck();
+            channelSub.style.display = "none";
+          }
+
+          if (isSubscribed) {
             btn.removeAttribute("disabled");
           } else {
             btn.setAttribute("disabled", "disabled");
@@ -6046,12 +6095,13 @@
 
         const runChannelCheck = () =>
           checkChannelSubscription(dropId)
-            .then((state) => applyChannelState(!!state.subscribed))
+            .then((state) => applyChannelState(state.state))
             .catch((err) => {
               console.warn("Channel gate check failed", err);
-              // Unverified on error too — the Claim button stays disabled
-              // until a passing check confirms subscription.
-              applyChannelState(false);
+              // Unverified on error too — never falsely render "not
+              // subscribed"; Claim now stays disabled until a passing check
+              // confirms subscription.
+              applyChannelState("unverified");
             });
 
         runChannelCheck();
@@ -6387,7 +6437,37 @@
       }
     }
 
+    // Boot fires two independent code paths that can both call loadVouchers()
+    // for the same page load (checkRegionStatus() when the region is already
+    // locked, followed unconditionally by the top-level window.onload call),
+    // which used to fire two concurrent /vouchers/visible loads and — via
+    // renderCompactVoucherRow's channel-gate probe — two duplicate
+    // getChatMember checks per Live Drop. Collapsing concurrent calls into
+    // the one in-flight promise fixes that without adding any caching that
+    // could let a stale "subscribed" result survive past this single load.
+    let _loadVouchersInFlight = null;
     async function loadVouchers() {
+      if (_loadVouchersInFlight) return _loadVouchersInFlight;
+      _loadVouchersInFlight = _loadVouchersImpl().finally(() => {
+        _loadVouchersInFlight = null;
+      });
+      return _loadVouchersInFlight;
+    }
+
+    // For callers whose state loadVouchers() depends on (e.g. the user's
+    // region) changed AFTER a load may have already started — joining that
+    // in-flight load via loadVouchers() would silently return stale
+    // (pre-state-change) results. Waits for any in-flight load to finish,
+    // then always starts a guaranteed-fresh one — never runs two
+    // /vouchers/visible requests concurrently either way.
+    async function reloadVouchersForUpdatedState() {
+      if (_loadVouchersInFlight) {
+        await _loadVouchersInFlight.catch(() => {});
+      }
+      return loadVouchers();
+    }
+
+    async function _loadVouchersImpl() {
       const section = document.getElementById("voucher-section");
       const messageEl = document.getElementById("campaign-voucher-message");
       if (!section || !messageEl) return;
@@ -7907,6 +7987,14 @@ ${referral}`;
     }
 
     async function checkRegionStatus() {
+      // loadVouchers() is called exactly once per invocation, in `finally`,
+      // regardless of which branch runs or whether the fetch itself fails —
+      // both branches used to call it inline, and window.onload called it
+      // again right after awaiting this function, firing two concurrent
+      // /vouchers/visible loads (and two getChatMember checks per Live Drop)
+      // on every boot. The later refresh inside the auto-region-detection
+      // closure below is a deliberate, separate reload once the region is
+      // actually known — not part of that duplicate.
       try {
         const res = await fetch(`${API_BASE}/api/region-status/${userId}`);
         const data = await res.json();
@@ -7918,8 +8006,6 @@ ${referral}`;
           regionMsg = `✅ Region locked: ${data.region}`;
           setStoredRegion(data.region || "");
           applyRegionGate(data.region || "");
-          loadWelcomeProgress();
-          loadVouchers();
         } else {
           setStoredRegion("");
           // Attempt silent IP-based region detection in background; never block user.
@@ -7940,8 +8026,14 @@ ${referral}`;
                   const lockData = await lockRes.json();
                   if (lockData?.success) {
                     setStoredRegion(lockData.region || guessedRegion);
-                    // Refresh vouchers now that backend has the region saved.
-                    loadVouchers();
+                    // Refresh vouchers now that backend has the region
+                    // saved. The initial (regionless) loadVouchers() call
+                    // may still be in flight when this resolves — join it
+                    // with loadVouchers() and its stale, pre-region-save
+                    // result would just be handed back, silently skipping
+                    // the reload. reloadVouchersForUpdatedState() waits for
+                    // it to finish and then always starts a fresh load.
+                    reloadVouchersForUpdatedState();
                   }
                 }
               } catch (geoErr) {
@@ -7950,12 +8042,12 @@ ${referral}`;
             })();
           }
           applyRegionGate("");
-          loadWelcomeProgress();
-          loadVouchers();
         }
-
+        loadWelcomeProgress();
       } catch (err) {
         console.error("Region check failed:", err);
+      } finally {
+        loadVouchers();
       }
     }
 
@@ -8298,6 +8390,10 @@ ${referral}`;
         return;
       }
 
+      // checkRegionStatus() already calls loadVouchers() exactly once
+      // (in its own finally block) — do not call it again here, or every
+      // boot fires two concurrent /vouchers/visible loads and doubles every
+      // Live Drop's getChatMember check.
       await checkRegionStatus();
       handleAdminAndVoucher();
       loadIdentityCard();
@@ -8305,7 +8401,6 @@ ${referral}`;
       setupReferralSectionViewTracking();
       await loadCheckinStatus();
       loadWelcomeProgress();
-      loadVouchers();
       await loadDailyGame();
 
       let isDropMode = false;
