@@ -123,6 +123,13 @@ class TestAdminInventoryUiCleanup:
     def test_dashboard_js_never_posts_to_undated_pool_upload(self):
         assert "/admin/pools/upload" not in ADMIN_JS.read_text()
 
+    def test_voucher_pools_view_does_not_load_unbounded_batch_history(self):
+        # list_batches has no limit and runs two count_documents per batch;
+        # the monitoring view must stick to live (non-expired) batches.
+        js = ADMIN_JS.read_text()
+        body = js[js.index("function loadAffiliatePools("):js.index("function bindAffiliatePools(")]
+        assert "include_expired" not in body
+
     def test_legacy_tier_options_are_hidden_and_disabled_by_default(self):
         html = ADMIN_HTML.read_text()
         start = html.index('id="ab-pool-id"')

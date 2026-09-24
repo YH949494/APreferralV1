@@ -11063,10 +11063,12 @@
       '</div>';
   }
 
+  var AFF_SOURCE_BATCH_ROW_LIMIT = 50;
+
   function affRenderSourceBatches(items) {
     var rows = (items || []).filter(function (b) { return !affIsLegacyTierPool(b.pool_id); });
     if (!rows.length) {
-      $("#affiliate-pools-batches-body").innerHTML = emptyState("No voucher batches uploaded yet. Upload codes in Voucher Batches.");
+      $("#affiliate-pools-batches-body").innerHTML = emptyState("No live voucher batches. Upload codes in Voucher Batches (expired batches are listed there).");
       return;
     }
     rows.sort(function (a, b) {
@@ -11074,6 +11076,8 @@
       if (pa !== pb) return pa - pb;
       return String(b.starts_at_utc || "").localeCompare(String(a.starts_at_utc || ""));
     });
+    var hiddenCount = Math.max(0, rows.length - AFF_SOURCE_BATCH_ROW_LIMIT);
+    rows = rows.slice(0, AFF_SOURCE_BATCH_ROW_LIMIT);
     $("#affiliate-pools-batches-body").innerHTML = '<table class="data-table"><thead><tr>' +
       '<th>Pool</th><th>Source Batch</th><th>Month / Window</th><th>Status</th><th>Uploaded At</th>' +
       '<th class="num">Available</th><th class="num">Issued</th><th class="num">Total</th>' +
@@ -11091,7 +11095,8 @@
           '<td class="num">' + fmt(b.issued_count) + '</td>' +
           '<td class="num">' + fmt((b.available_count || 0) + (b.issued_count || 0)) + '</td>' +
           '</tr>';
-      }).join("") + '</tbody></table>';
+      }).join("") + '</tbody></table>' +
+      (hiddenCount ? '<div class="note">' + fmt(hiddenCount) + ' more batch(es) not shown — see Voucher Batches.</div>' : '');
   }
 
   function loadAffiliatePools(force) {
@@ -11110,7 +11115,11 @@
         $("#affiliate-pools-summary-body").innerHTML = '<div class="card-grid">' + items.map(affInventoryCard).join("") + '</div>';
       })
       .catch(function (e) { statePanel("affiliate-pools-summary-body", "error", "Failed to load voucher inventory: " + e.message); });
-    fetch("/api/admin/affiliate-voucher-batches?include_expired=1", { credentials: "same-origin", headers: { "Accept": "application/json" } })
+    // Live batches only (active/scheduled/exhausted/disabled/uploading/
+    // failed). Expired history is unbounded and each batch costs two
+    // count_documents on the server, so it stays behind the explicit
+    // "Include expired" filter in Voucher Batches.
+    fetch("/api/admin/affiliate-voucher-batches", { credentials: "same-origin", headers: { "Accept": "application/json" } })
       .then(function (r) {
         if (r.status === 401) { window.location.href = "/static/admin-login.html"; throw new Error("unauthorized"); }
         return r.json();
