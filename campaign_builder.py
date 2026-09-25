@@ -327,7 +327,7 @@ def _build_audience(campaign_doc: dict, db) -> tuple[dict, dict, list[str]]:
 
     Reuses only evaluators vouchers.py already enforces:
       - eligibility.mode="user_id" + allow=[ids]   (restrictive whitelist)
-      - eligibility.mode="tier" + allow=["VIP"]     (existing tier check)
+      - eligibility.mode="tier" + allow=["VIP1"]    (existing tier check)
       - eligibility.mode="admin_only"               (existing admin gate)
       - audience.regions=[...]                      (existing region check)
       - eligibility.mode="public" (default)          (existing default; segment
@@ -363,7 +363,10 @@ def _build_audience(campaign_doc: dict, db) -> tuple[dict, dict, list[str]]:
             warnings.append("Whitelist resolved to 0 users — drop will effectively allow no one until usernames are fixed.")
             eligibility = {"mode": "user_id", "allow": []}
     elif mode == "vip":
-        tier = (params.get("tier") or "VIP").strip() or "VIP"
+        # Users are stored as "VIP1"; "VIP" (the old default) matched nobody.
+        tier = str(params.get("tier") or "VIP1").strip().upper() or "VIP1"
+        if tier == "VIP":
+            tier = "VIP1"
         eligibility = {"mode": "tier", "allow": [tier]}
     elif mode == "region":
         regions = [str(r).strip() for r in (params.get("regions") or []) if str(r).strip()]

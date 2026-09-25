@@ -2799,8 +2799,10 @@ class RejoinBufferClaimEndpointTests(unittest.TestCase):
         orig_sub_state = m.get_channel_subscription_state
         orig_dedup = m._acquire_request_dedup_lock
         orig_rejoin_check = m.check_rejoin_buffer_for_pooled_claim
+        orig_find_existing = m._find_existing_claim_for_drop
 
         try:
+            m._find_existing_claim_for_drop = lambda **kwargs: None
             m.extract_raw_init_data_from_query = lambda req: "ok"
             m.verify_telegram_init_data = lambda init_data: (True, {"user": '{"id": 8413241236, "username": "u8413241236"}'}, "ok")
             m.db = FakeDb([drop], [])
@@ -2845,6 +2847,7 @@ class RejoinBufferClaimEndpointTests(unittest.TestCase):
             m.get_channel_subscription_state = orig_sub_state
             m._acquire_request_dedup_lock = orig_dedup
             m.check_rejoin_buffer_for_pooled_claim = orig_rejoin_check
+            m._find_existing_claim_for_drop = orig_find_existing
 
     def test_check_only_preflight_also_surfaces_rejoin_buffer_block(self):
         # check_only used to short-circuit with a blanket "ok" response before
@@ -3006,6 +3009,7 @@ class LiveDropChannelGateTaxonomyTests(unittest.TestCase):
             "get_channel_subscription_state": m.get_channel_subscription_state,
             "_acquire_request_dedup_lock": m._acquire_request_dedup_lock,
             "_acquire_claim_lock": m._acquire_claim_lock,
+            "_find_existing_claim_for_drop": m._find_existing_claim_for_drop,
         }
 
         def _fail_if_claim_lock_acquired(**kwargs):
@@ -3020,6 +3024,7 @@ class LiveDropChannelGateTaxonomyTests(unittest.TestCase):
         m.is_user_eligible_for_drop = lambda *args, **kwargs: True
         m._acquire_request_dedup_lock = lambda **kwargs: True
         m._acquire_claim_lock = _fail_if_claim_lock_acquired
+        m._find_existing_claim_for_drop = lambda **kwargs: None
         return app, orig
 
     def _restore(self, m, orig):

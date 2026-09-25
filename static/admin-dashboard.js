@@ -4471,7 +4471,7 @@
       });
     } else if (mode === "vip") {
       el.innerHTML = '<label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Tier</label>' +
-        '<input class="filter-input" id="cb-vip-tier" value="' + esc(params.tier || "VIP") + '" style="max-width:200px;" />';
+        '<input class="filter-input" id="cb-vip-tier" value="' + esc(params.tier || "VIP1") + '" style="max-width:200px;" />';
       $("#cb-vip-tier").addEventListener("change", function (e) { cb.campaign.audience_params.tier = e.target.value; });
     } else if (mode === "region") {
       el.innerHTML = '<label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Regions (comma-separated)</label>' +
