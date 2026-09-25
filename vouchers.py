@@ -858,6 +858,14 @@ def ensure_voucher_indexes():
     except Exception:
         logger.warning("[WELCOME_V2][ANALYTICS] telemetry TTL index creation failed (non-fatal)")
     subscription_cache_col.create_index([("expireAt", ASCENDING)], expireAfterSeconds=0)
+    # Supports scheduler.run_invitee_subscription_audit's stale-positive-cache
+    # query (equality on subscribed, range+sort on checked_at, tiebreak on
+    # user_id) — without this, that query collection-scans subscription_cache,
+    # which does not scale as the batch worker runs every SUB_AUDIT_CADENCE_MINUTES.
+    subscription_cache_col.create_index(
+        [("subscribed", ASCENDING), ("checked_at", ASCENDING), ("user_id", ASCENDING)],
+        name="ix_sub_cache_stale_positive",
+    )
     try:
         for legacy_name in ("uniq_user_checks", "uniq_tg_verify_user_id", "uq_tg_verif_user_id_sparse"):
             try:

@@ -1201,17 +1201,45 @@ REFERRAL_CONGRATS_TIERS = [
 REFERRAL_CHANNEL_RETRY_HOURS = 12
 REFERRAL_CHANNEL_EXPIRE_DAYS = 7
 INVITEE_SUB_AUDIT_ENABLED = os.getenv("INVITEE_SUB_AUDIT_ENABLED", "1") == "1"
+# run_invitee_subscription_audit() is a recurring small-batch worker (see
+# main.py: subscription_audit_scheduled, run every SUB_AUDIT_CADENCE_MINUTES),
+# not a once-weekly sweep — SUB_AUDIT_BATCH_SIZE bounds actual Telegram
+# getChatMember calls per run regardless of total user population, so this
+# stays cheap and safe on a ~100K-member community.
+SUB_AUDIT_BATCH_SIZE = int(os.getenv("SUB_AUDIT_BATCH_SIZE", "500"))
+# Secondary candidate sources (recent referrals / recent active Miniapp
+# users) are capped independently at this many DB rows fetched per source —
+# unrelated to how many of them actually get a Telegram call, which is still
+# governed by SUB_AUDIT_BATCH_SIZE and by stale-positive-cache getting first
+# claim on that budget (see run_invitee_subscription_audit).
 MAX_INVITEE_SUB_CHECKS_PER_RUN = int(os.getenv("MAX_INVITEE_SUB_CHECKS_PER_RUN", "800"))
-# The audit runs weekly (see main.py: subscription_audit_scheduled), so the
-# referral/activity lookback must cover a full 7-day gap between runs plus
-# room for one missed/delayed run — a 3-day window let users active only
-# mid-week fall outside every run's candidate query.
+# Lookback window for the secondary candidate sources (recent referrals /
+# recent active Miniapp users) — independent of run cadence; this is a
+# business definition of "recent enough to keep warm," not a scheduling gap.
 INVITEE_SUB_AUDIT_LOOKBACK_DAYS = int(os.getenv("INVITEE_SUB_AUDIT_LOOKBACK_DAYS", "10"))
 SUB_CACHE_TTL_DAYS = int(os.getenv("SUB_CACHE_TTL_DAYS", "14"))
 # Confirmed non-membership is cached only briefly — a user may resubscribe at
 # any time — unlike the 14-day positive TTL above (see run_invitee_subscription_audit).
 SUB_CACHE_NEGATIVE_TTL_SECONDS = int(os.getenv("SUB_CACHE_NEGATIVE_TTL_SECONDS", "600"))
+# How long a confirmed-positive cache entry is left alone before it becomes a
+# candidate for proactive re-verification (source 1 in run_invitee_subscription_audit).
+# Deliberately much larger than RECENT_CHECK_SKIP_HOURS below: this is the
+# "when do we bother refreshing" business threshold (default 5 days, well
+# inside the 14-day hard TTL so the worker gets multiple recurring runs'
+# worth of chances before an entry would otherwise expire), not the
+# anti-thrash floor that protects against re-checking the same uid twice in
+# one run or across two back-to-back runs.
+SUB_AUDIT_POSITIVE_REFRESH_HOURS = int(os.getenv("SUB_AUDIT_POSITIVE_REFRESH_HOURS", "120"))
+# Anti-thrash floor only: never re-check a uid whose cache was touched more
+# recently than this, regardless of source. Intentionally short.
 RECENT_CHECK_SKIP_HOURS = int(os.getenv("RECENT_CHECK_SKIP_HOURS", "6"))
+# Upper bound on one batch's own wall-clock runtime — this is a recurring
+# job, not a one-shot sweep, so a run that's taking too long (slow Telegram
+# responses, a big backlog) stops cleanly, persists what it already did, and
+# lets the next scheduled tick pick up where it left off, rather than
+# tying up the worker or the distributed lock for an unbounded time.
+SUB_AUDIT_MAX_RUNTIME_SECONDS = int(os.getenv("SUB_AUDIT_MAX_RUNTIME_SECONDS", "120"))
+SUB_AUDIT_CADENCE_MINUTES = int(os.getenv("SUB_AUDIT_CADENCE_MINUTES", "30"))
 TG_GETCHATMEMBER_TIMEOUT_SEC = int(os.getenv("TG_GETCHATMEMBER_TIMEOUT_SEC", "5"))
 TG_REQUEST_SLEEP_MS = int(os.getenv("TG_REQUEST_SLEEP_MS", "80"))
 
@@ -2208,7 +2236,31 @@ def _channel_subscribe_verdict(result_dict) -> tuple[bool, str | None, bool | No
     return subscribed, status, is_member
 
 
+def _oldest_stale_positive_checked_at(db_ref, refresh_cutoff):
+    """Cheap single-doc lookup for [SUB_AUDIT] before/after logging only —
+    uses the same (subscribed, checked_at) index as the real candidate
+    query, never a collection scan."""
+    try:
+        doc = db_ref.subscription_cache.find_one(
+            {"subscribed": True, "checked_at": {"$lt": refresh_cutoff}},
+            {"checked_at": 1},
+            sort=[("checked_at", 1)],
+        )
+    except Exception:
+        return None
+    return _coerce_utc((doc or {}).get("checked_at"))
+
+
 def run_invitee_subscription_audit(now_utc_ts=None, db_ref=None) -> dict:
+    """Small recurring batch worker (see main.py: subscription_audit_scheduled,
+    run every SUB_AUDIT_CADENCE_MINUTES under a distributed lock), not a
+    one-shot sweep. Each call processes at most SUB_AUDIT_BATCH_SIZE actual
+    Telegram getChatMember calls, bounded further by SUB_AUDIT_MAX_RUNTIME_SECONDS
+    wall-clock time, and stops immediately on a 429 — so runtime and Telegram
+    load never grow with total user population; a large backlog just takes
+    more recurring runs to drain, continuing from the next-oldest entries
+    each time since a checked uid's checked_at always moves to "now" (never
+    revisited until it's stale again)."""
     db_ref = db_ref or db
     now_utc_ts = now_utc_ts or now_utc()
     started = time.monotonic()
@@ -2230,49 +2282,51 @@ def run_invitee_subscription_audit(now_utc_ts=None, db_ref=None) -> dict:
         return {"skipped": "missing_token"}
 
     scan_start = now_utc_ts - timedelta(days=INVITEE_SUB_AUDIT_LOOKBACK_DAYS)
-    logger.info("[SUB_AUDIT] start scan_start=%s limit=%s", scan_start.isoformat(), MAX_INVITEE_SUB_CHECKS_PER_RUN)
-
-    scanned = checked = subscribed_true = subscribed_false = skipped_recent = errors = 0
     recent_cutoff = now_utc_ts - timedelta(hours=RECENT_CHECK_SKIP_HOURS)
+    refresh_cutoff = now_utc_ts - timedelta(hours=SUB_AUDIT_POSITIVE_REFRESH_HOURS)
     ttl_expire_at = now_utc_ts + timedelta(days=SUB_CACHE_TTL_DAYS)
     neg_ttl_expire_at = now_utc_ts + timedelta(seconds=SUB_CACHE_NEGATIVE_TTL_SECONDS)
 
+    oldest_checked_before = _oldest_stale_positive_checked_at(db_ref, refresh_cutoff)
+    logger.info(
+        "[SUB_AUDIT][START] batch_size=%s refresh_before=%s instance=%s oldest_checked_before=%s",
+        SUB_AUDIT_BATCH_SIZE,
+        refresh_cutoff.isoformat(),
+        INSTANCE_ID,
+        oldest_checked_before.isoformat() if oldest_checked_before else None,
+    )
+
+    scanned = checked = subscribed_true = subscribed_false = skipped_recent = errors = rate_limited = 0
+    stop_reason = None
+
     def _candidate_uids():
-        # Three bounded, independently-capped sources feed one weekly sweep,
-        # but they are NOT equally important: only the stale-positive-cache
-        # source below is what keeps the claim gate's trust window tight, so
-        # it goes FIRST and gets first claim on the shared MAX_INVITEE_SUB_CHECKS_PER_RUN
-        # budget (checked in the per-uid loop below). A prior version of this
-        # function scanned recent-referrals/recent-active-users first — on a
-        # community this size those two sources alone can exceed the whole
-        # per-run budget every single week, which silently starved the
-        # stale-cache source down to zero forever and broke the guarantee
-        # this comment describes. Ordering it first instead gives it a hard,
-        # unconditional per-run floor of min(MAX_INVITEE_SUB_CHECKS_PER_RUN,
-        # its own population), regardless of how large sources 2/3 are.
-        # Each cursor is capped at MAX_INVITEE_SUB_CHECKS_PER_RUN on its own
-        # so this stays a bounded scan, never a full-table sweep.
+        # Three bounded, independently-capped sources feed one small
+        # recurring batch, but they are NOT equally important: only the
+        # stale-positive-cache source below is what keeps the claim gate's
+        # trust window tight, so it goes FIRST and gets first claim on the
+        # shared SUB_AUDIT_BATCH_SIZE budget (checked in the per-uid loop
+        # below). On a community this size, recent-referral/recent-active
+        # volume alone can exceed a whole run's budget — scanning those
+        # first would silently starve the stale-cache source to zero,
+        # forever. Ordering it first instead gives it a hard, unconditional
+        # per-run floor of min(SUB_AUDIT_BATCH_SIZE, its own population),
+        # regardless of how large the other two sources are.
         seen = set()
 
-        # 1) Oldest-verified positive cache entries, regardless of recent
-        #    activity. get_channel_subscription_state() trusts an unexpired
-        #    positive subscription_cache entry at claim time without
-        #    recontacting Telegram (SUB_CACHE_TTL_DAYS = 14) — a user who
-        #    unsubscribes right after being cached, but never shows up in
-        #    sources 2/3 again (no new referral, no Mini App open), would
-        #    otherwise ride that stale "subscribed=true" until it naturally
-        #    expires (a hard cap enforced independently by
-        #    get_cached_subscription()'s own expireAt check — never past 14
-        #    days regardless of this job). Proactively re-verifying the
-        #    longest-untouched positive entries first, every run, is what
-        #    lets most users avoid ever hitting that live-Telegram fallback
-        #    at claim time: at population P and this job's weekly cadence,
-        #    every entry gets refreshed at least once every
-        #    ceil(P / MAX_INVITEE_SUB_CHECKS_PER_RUN) weeks.
+        # 1) Oldest-verified positive cache entries whose last check is
+        #    older than SUB_AUDIT_POSITIVE_REFRESH_HOURS (default 5 days —
+        #    comfortably inside the 14-day SUB_CACHE_TTL_DAYS hard cap, which
+        #    get_cached_subscription() enforces on its own via expireAt
+        #    regardless of whether this job ever reaches a given entry).
+        #    Refreshing the longest-untouched entries first, every run, is
+        #    what lets most claims avoid ever falling back to a live
+        #    Telegram call: at positive-cache population P, every entry gets
+        #    refreshed at least once every ceil(P / SUB_AUDIT_BATCH_SIZE)
+        #    runs of this worker.
         stale_cache_cursor = db_ref.subscription_cache.find(
-            {"subscribed": True, "checked_at": {"$lte": recent_cutoff}},
+            {"subscribed": True, "checked_at": {"$lt": refresh_cutoff}},
             {"user_id": 1},
-        ).sort("checked_at", 1).limit(MAX_INVITEE_SUB_CHECKS_PER_RUN)
+        ).sort([("checked_at", 1), ("user_id", 1)]).limit(SUB_AUDIT_BATCH_SIZE)
         for row in stale_cache_cursor:
             uid = row.get("user_id")
             if isinstance(uid, int) and uid not in seen:
@@ -2311,7 +2365,11 @@ def run_invitee_subscription_audit(now_utc_ts=None, db_ref=None) -> dict:
 
     for uid in _candidate_uids():
         scanned += 1
-        if checked >= MAX_INVITEE_SUB_CHECKS_PER_RUN:
+        if checked >= SUB_AUDIT_BATCH_SIZE:
+            break
+        if (time.monotonic() - started) >= SUB_AUDIT_MAX_RUNTIME_SECONDS:
+            stop_reason = "runtime_limit"
+            logger.warning("[SUB_AUDIT][STOP] reason=runtime_limit")
             break
 
         cache_id = f"sub:{uid}"
@@ -2329,13 +2387,27 @@ def run_invitee_subscription_audit(now_utc_ts=None, db_ref=None) -> dict:
         tg_member_status = None
         tg_is_member = None
         tg_error = None
+        is_rate_limited = False
+        retry_after = None
+        resp = None
         try:
             resp = requests.get(
                 f"{API_BASE}/getChatMember",
                 params={"chat_id": OFFICIAL_CHANNEL_ID, "user_id": uid},
                 timeout=TG_GETCHATMEMBER_TIMEOUT_SEC,
             )
-            if resp.status_code != 200:
+        except RequestException as exc:
+            tg_error = str(exc) or exc.__class__.__name__
+
+        if resp is not None:
+            if resp.status_code == 429:
+                is_rate_limited = True
+                tg_error = "http_429"
+                try:
+                    retry_after = ((resp.json() or {}).get("parameters") or {}).get("retry_after")
+                except ValueError:
+                    retry_after = None
+            elif resp.status_code != 200:
                 tg_error = f"http_{resp.status_code}"
             else:
                 try:
@@ -2348,16 +2420,14 @@ def run_invitee_subscription_audit(now_utc_ts=None, db_ref=None) -> dict:
                         tg_error = f"not_ok:{desc}" if desc else "not_ok"
                     else:
                         subscribed, tg_member_status, tg_is_member = _channel_subscribe_verdict(payload.get("result") or {})
-        except RequestException as exc:
-            tg_error = str(exc) or exc.__class__.__name__
 
         if tg_error:
             errors += 1
-            # A transient Telegram/API failure must never downgrade a
-            # known-good cached positive to subscribed=false (that would be
-            # a false gate for an already-subscribed user). Record the
-            # failed attempt only and leave any existing subscribed/expireAt
-            # value exactly as it was.
+            # A transient Telegram/API failure (429 included) must never
+            # downgrade a known-good cached positive to subscribed=false
+            # (that would be a false gate for an already-subscribed user).
+            # Record the failed attempt only and leave any existing
+            # subscribed/expireAt value exactly as it was.
             db_ref.subscription_cache.update_one(
                 {"_id": cache_id},
                 {
@@ -2369,6 +2439,16 @@ def run_invitee_subscription_audit(now_utc_ts=None, db_ref=None) -> dict:
                 },
                 upsert=True,
             )
+            if is_rate_limited:
+                rate_limited += 1
+                stop_reason = "telegram_429"
+                # Stop this batch now rather than push through it — the next
+                # scheduled tick (SUB_AUDIT_CADENCE_MINUTES away) is already
+                # a far longer wait than any realistic Telegram retry_after,
+                # so simply ending the batch here respects it without
+                # needing to reschedule anything.
+                logger.warning("[SUB_AUDIT][STOP] reason=telegram_429 retry_after=%s", retry_after)
+                break
             time.sleep(max(TG_REQUEST_SLEEP_MS, 0) / 1000.0)
             continue
 
@@ -2388,8 +2468,8 @@ def run_invitee_subscription_audit(now_utc_ts=None, db_ref=None) -> dict:
                 "updated_at": now_utc_ts,
                 "last_check_attempt": now_utc_ts,
                 "last_successful_check": now_utc_ts,
-                # Confirmed members get the long TTL (survive a missed weekly
-                # run); confirmed non-members get a short one since they may
+                # Confirmed members get the long TTL (survive several missed
+                # runs); confirmed non-members get a short one since they may
                 # resubscribe at any time and must not stay falsely gated.
                 "expireAt": ttl_expire_at if subscribed else neg_ttl_expire_at,
             }
@@ -2403,15 +2483,20 @@ def run_invitee_subscription_audit(now_utc_ts=None, db_ref=None) -> dict:
         time.sleep(max(TG_REQUEST_SLEEP_MS, 0) / 1000.0)
 
     duration_ms = int((time.monotonic() - started) * 1000)
+    oldest_checked_after = _oldest_stale_positive_checked_at(db_ref, refresh_cutoff)
     logger.info(
-        "[SUB_AUDIT] done scanned=%s checked=%s subscribed_true=%s subscribed_false=%s skipped_recent=%s errors=%s duration_ms=%s",
+        "[SUB_AUDIT][DONE] candidates=%s checked=%s positive=%s negative=%s errors=%s rate_limited=%s "
+        "runtime_ms=%s oldest_checked_before=%s oldest_checked_after=%s stop_reason=%s",
         scanned,
         checked,
         subscribed_true,
         subscribed_false,
-        skipped_recent,
         errors,
+        rate_limited,
         duration_ms,
+        oldest_checked_before.isoformat() if oldest_checked_before else None,
+        oldest_checked_after.isoformat() if oldest_checked_after else None,
+        stop_reason or "batch_complete",
     )
     return {
         "scanned": scanned,
@@ -2420,7 +2505,9 @@ def run_invitee_subscription_audit(now_utc_ts=None, db_ref=None) -> dict:
         "subscribed_false": subscribed_false,
         "skipped_recent": skipped_recent,
         "errors": errors,
+        "rate_limited": rate_limited,
         "duration_ms": duration_ms,
+        "stop_reason": stop_reason,
     }
 
 
