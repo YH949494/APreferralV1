@@ -526,10 +526,9 @@ def register_for_campaign(campaign_id: str):
         if sub_err == "subscription_check_failed":
             return jsonify({"status": "error", "code": "subscription_check_failed"}), 503
         if sub_err:
-            from subscription_gate import resolve_channel_chat_id
+            from subscription_gate import public_channel_url
 
-            chat_id = resolve_channel_chat_id(campaign.get("telegram"))
-            channel_url = f"https://t.me/{chat_id[1:]}" if isinstance(chat_id, str) and chat_id.startswith("@") else ""
+            channel_url = public_channel_url(campaign.get("telegram"))
             return jsonify({
                 "status": "error", "code": "channel_subscription_required",
                 "channel_username": (campaign.get("telegram") or {}).get("channel_username", ""),

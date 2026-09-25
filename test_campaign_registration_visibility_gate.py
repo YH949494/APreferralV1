@@ -184,6 +184,19 @@ def test_public_card_list_excludes_unlisted_registration_campaign(fake_db):
     assert "unlisted-card" not in ids
 
 
+def test_many_high_priority_unlisted_never_crowd_out_listed_cards(fake_db):
+    ready_dest = {"provider_id": "p1", "open_mode": "telegram_web_app", "path": "", "ready": True}
+    for i in range(55):
+        _insert_campaign(fake_db, campaign_id=f"unlisted-{i}", priority=1000 + i, destination=dict(ready_dest),
+                         registration=_registration(listing="unlisted"))
+    _insert_campaign(fake_db, campaign_id="listed-low", priority=1, destination=dict(ready_dest))
+    with _app().test_client() as client, \
+            patch("campaign_centre.get_provider", return_value={"provider_id": "p1", "active": True,
+                                                                "base_url": "https://example.com"}):
+        cards = client.get("/api/campaigns/active").get_json()["campaigns"]
+    assert [c["campaign_id"] for c in cards] == ["listed-low"]
+
+
 def test_unlisted_direct_link_registration_succeeds(fake_db):
     _insert_campaign(fake_db, registration=_registration(listing="unlisted", require_channel_subscription=True))
     with _app().test_client() as client, _verified(), \
@@ -330,6 +343,17 @@ def test_unverifiable_is_retry_not_unsubscribed_and_writes_nothing(fake_db, labe
     assert r.status_code == 503, (label, r.get_json())
     assert r.get_json()["code"] == "subscription_check_failed"
     assert _rows(fake_db) == 0
+
+
+def test_non_member_gets_join_link_even_when_verifying_by_numeric_channel_id(fake_db):
+    _insert_campaign(fake_db, telegram={"require_subscription": True, "channel_id": -1001234567890,
+                                        "channel_username": "advantplayofficial"})
+    with _app().test_client() as client, _verified(), \
+            patch("subscription_gate.requests.get", return_value=_member("left")) as tg:
+        r = _register(client)
+    assert tg.call_args.kwargs["params"]["chat_id"] == -1001234567890
+    assert r.status_code == 403
+    assert r.get_json()["channel_url"] == "https://t.me/advantplayofficial"
 
 
 def test_missing_bot_token_is_unverifiable(fake_db, monkeypatch):

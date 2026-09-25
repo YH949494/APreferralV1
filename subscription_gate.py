@@ -125,6 +125,20 @@ def resolve_channel_chat_id(telegram_cfg: dict | None):
     return _normalize_channel_username(telegram_cfg.get("channel_username"))
 
 
+def public_channel_url(telegram_cfg: dict | None) -> str:
+    """A t.me join link for the channel, or "" when no public username is
+    configured. Independent of resolve_channel_chat_id(), which prefers a
+    numeric channel_id for verification — a numeric id has no public link,
+    but the sibling channel_username still does."""
+    telegram_cfg = telegram_cfg or {}
+    for raw in (telegram_cfg.get("channel_username"), telegram_cfg.get("channel_id")):
+        if isinstance(raw, str):
+            name = _normalize_channel_username(raw)
+            if name:
+                return f"https://t.me/{name[1:]}"
+    return ""
+
+
 def _normalize_channel_username(raw) -> str | None:
     name = str(raw or "").strip()
     lowered = name.lower()

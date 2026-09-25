@@ -1211,6 +1211,10 @@ def list_active_campaigns():
                 "status": "live",
                 "type": {"$in": CAMPAIGN_TYPES},
                 "$or": [{"mechanic": {"$exists": False}}, {"mechanic": "standard_drop"}],
+                # Excluded in the query (not only post-filtered below) so
+                # unlisted campaigns can never consume the limit and push
+                # lower-priority listed ones out of the list.
+                "registration.listing": {"$ne": "unlisted"},
             },
             sort=[("priority", -1), ("schedule.starts_at", 1)],
             limit=50,
