@@ -33,6 +33,7 @@ from datetime import datetime, timedelta, timezone
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytz  # noqa: E402
+from bson import ObjectId  # noqa: E402
 
 KL = pytz.timezone("Asia/Kuala_Lumpur")
 VIP_XP = 800
@@ -52,8 +53,13 @@ def month_bounds(ref_kl: datetime):
 
 
 def ledger_xp(db, uids, start, end) -> dict:
+    # Same created_at -> ts fallback as main.apply_monthly_tier_update.
+    in_uids = {"$in": list(uids)}
     rows = db.xp_events.aggregate([
-        {"$match": {"user_id": {"$in": list(uids)}, "created_at": {"$gte": start, "$lt": end}, "invalidated": {"$ne": True}}},
+        {"$match": {"invalidated": {"$ne": True}, "$or": [
+            {"user_id": in_uids, "created_at": {"$gte": start, "$lt": end}},
+            {"user_id": in_uids, "created_at": {"$exists": False}, "ts": {"$gte": start, "$lt": end}},
+        ]}},
         {"$group": {"_id": "$user_id", "xp": {"$sum": "$xp"}}},
     ])
     return {r["_id"]: int(r["xp"] or 0) for r in rows}
@@ -82,7 +88,9 @@ def load_uids(args) -> list[int]:
 def tier_drops(db, drop_id, since):
     q = {"eligibility.mode": "tier"}
     if drop_id:
-        q = {"_id": drop_id}
+        # Drops are usually ObjectId-keyed; keep the string for legacy string ids.
+        ids = [drop_id] + ([ObjectId(drop_id)] if ObjectId.is_valid(drop_id) else [])
+        q = {"_id": {"$in": ids}}
     else:
         q["endsAt"] = {"$gte": since}
     return list(db.drops.find(q, {"name": 1, "eligibility": 1, "audience": 1, "startsAt": 1, "endsAt": 1, "status": 1, "type": 1}))
