@@ -44,24 +44,36 @@ def test_subscription_audit_scheduler_registration_is_recurring_interval():
 
 
 def test_vouchers_visible_cache_read_never_calls_telegram():
+    # database.db is a lazy proxy that re-reads the module-level _client/_db
+    # globals on every attribute access (see database.py: LazyCollection),
+    # so swapping them for a private mongomock instance for the duration of
+    # this test — and restoring the originals in finally — is enough; it
+    # must NOT leak a fresh empty db into whatever test runs next in the
+    # same pytest session (a previous version of this test did exactly
+    # that and it silently changed unrelated tests' behavior downstream).
+    original_client, original_db = database._client, database._db
     database._client = mongomock.MongoClient()
     database._db = database._client["referral_bot"]
-    import vouchers
+    try:
+        import vouchers
 
-    uid = 424242
+        uid = 424242
 
-    with mock.patch.object(vouchers.requests, "get", side_effect=AssertionError("must not call Telegram")) as mocked_get:
-        # Cache miss (no doc at all) — the exact state on a fresh Mini App load.
-        assert vouchers.get_cached_subscription(uid) is None
+        with mock.patch.object(vouchers.requests, "get", side_effect=AssertionError("must not call Telegram")) as mocked_get:
+            # Cache miss (no doc at all) — the exact state on a fresh Mini App load.
+            assert vouchers.get_cached_subscription(uid) is None
 
-        # Cache present but expired — still must not fall back to a live call;
-        # that's exactly what a claim-time (not visibility-time) check is for.
-        vouchers.subscription_cache_col.insert_one({
-            "_id": f"sub:{uid}",
-            "user_id": uid,
-            "subscribed": True,
-            "expireAt": vouchers.now_utc() - vouchers.timedelta(seconds=1),
-        })
-        assert vouchers.get_cached_subscription(uid) is None
+            # Cache present but expired — still must not fall back to a live
+            # call; that's exactly what a claim-time (not visibility-time)
+            # check is for.
+            vouchers.subscription_cache_col.insert_one({
+                "_id": f"sub:{uid}",
+                "user_id": uid,
+                "subscribed": True,
+                "expireAt": vouchers.now_utc() - vouchers.timedelta(seconds=1),
+            })
+            assert vouchers.get_cached_subscription(uid) is None
 
-        mocked_get.assert_not_called()
+            mocked_get.assert_not_called()
+    finally:
+        database._client, database._db = original_client, original_db
