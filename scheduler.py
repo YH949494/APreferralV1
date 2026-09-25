@@ -1203,6 +1203,9 @@ REFERRAL_CHANNEL_EXPIRE_DAYS = 7
 INVITEE_SUB_AUDIT_ENABLED = os.getenv("INVITEE_SUB_AUDIT_ENABLED", "1") == "1"
 MAX_INVITEE_SUB_CHECKS_PER_RUN = int(os.getenv("MAX_INVITEE_SUB_CHECKS_PER_RUN", "800"))
 SUB_CACHE_TTL_DAYS = int(os.getenv("SUB_CACHE_TTL_DAYS", "14"))
+# Confirmed non-membership is cached only briefly — a user may resubscribe at
+# any time — unlike the 14-day positive TTL above (see run_invitee_subscription_audit).
+SUB_CACHE_NEGATIVE_TTL_SECONDS = int(os.getenv("SUB_CACHE_NEGATIVE_TTL_SECONDS", "600"))
 RECENT_CHECK_SKIP_HOURS = int(os.getenv("RECENT_CHECK_SKIP_HOURS", "6"))
 TG_GETCHATMEMBER_TIMEOUT_SEC = int(os.getenv("TG_GETCHATMEMBER_TIMEOUT_SEC", "5"))
 TG_REQUEST_SLEEP_MS = int(os.getenv("TG_REQUEST_SLEEP_MS", "80"))
@@ -2227,16 +2230,42 @@ def run_invitee_subscription_audit(now_utc_ts=None, db_ref=None) -> dict:
     scanned = checked = subscribed_true = subscribed_false = skipped_recent = errors = 0
     recent_cutoff = now_utc_ts - timedelta(hours=RECENT_CHECK_SKIP_HOURS)
     ttl_expire_at = now_utc_ts + timedelta(days=SUB_CACHE_TTL_DAYS)
-    cursor = db_ref.pending_referrals.find(
-        {"created_at_utc": {"$gte": scan_start}},
-        {"invitee_user_id": 1, "created_at_utc": 1},
-    ).sort("created_at_utc", -1).limit(MAX_INVITEE_SUB_CHECKS_PER_RUN)
+    neg_ttl_expire_at = now_utc_ts + timedelta(seconds=SUB_CACHE_NEGATIVE_TTL_SECONDS)
 
-    for row in cursor:
+    def _candidate_uids():
+        # Two bounded, independently-capped sources feed one weekly sweep:
+        # recent invitees (referral-attribution audit, the job's original
+        # purpose) and recently-active Miniapp users (the population that
+        # actually drives voucher-card channel gating). Each cursor is
+        # capped at MAX_INVITEE_SUB_CHECKS_PER_RUN on its own so this stays
+        # a bounded scan, never a full-table sweep; the per-uid loop below
+        # additionally stops once actual Telegram calls (``checked``) hit
+        # that same cap.
+        seen = set()
+        referral_cursor = db_ref.pending_referrals.find(
+            {"created_at_utc": {"$gte": scan_start}},
+            {"invitee_user_id": 1},
+        ).sort("created_at_utc", -1).limit(MAX_INVITEE_SUB_CHECKS_PER_RUN)
+        for row in referral_cursor:
+            uid = row.get("invitee_user_id")
+            if isinstance(uid, int) and uid not in seen:
+                seen.add(uid)
+                yield uid
+
+        active_cursor = db_ref.users.find(
+            {"last_visible_at": {"$gte": scan_start}},
+            {"user_id": 1},
+        ).sort("last_visible_at", -1).limit(MAX_INVITEE_SUB_CHECKS_PER_RUN)
+        for row in active_cursor:
+            uid = row.get("user_id")
+            if isinstance(uid, int) and uid not in seen:
+                seen.add(uid)
+                yield uid
+
+    for uid in _candidate_uids():
         scanned += 1
-        uid = row.get("invitee_user_id")
-        if uid is None or not isinstance(uid, int):
-            continue
+        if checked >= MAX_INVITEE_SUB_CHECKS_PER_RUN:
+            break
 
         cache_id = f"sub:{uid}"
         cache_doc = db_ref.subscription_cache.find_one(
@@ -2277,7 +2306,24 @@ def run_invitee_subscription_audit(now_utc_ts=None, db_ref=None) -> dict:
 
         if tg_error:
             errors += 1
-            subscribed = False
+            # A transient Telegram/API failure must never downgrade a
+            # known-good cached positive to subscribed=false (that would be
+            # a false gate for an already-subscribed user). Record the
+            # failed attempt only and leave any existing subscribed/expireAt
+            # value exactly as it was.
+            db_ref.subscription_cache.update_one(
+                {"_id": cache_id},
+                {
+                    "$set": {
+                        "user_id": uid,
+                        "last_check_attempt": now_utc_ts,
+                        "last_error": tg_error,
+                    },
+                },
+                upsert=True,
+            )
+            time.sleep(max(TG_REQUEST_SLEEP_MS, 0) / 1000.0)
+            continue
 
         if subscribed:
             subscribed_true += 1
@@ -2290,10 +2336,15 @@ def run_invitee_subscription_audit(now_utc_ts=None, db_ref=None) -> dict:
                 "subscribed": subscribed,
                 "tg_member_status": tg_member_status,
                 "tg_is_member": tg_is_member,
-                "tg_error": tg_error,
+                "tg_error": None,
                 "checked_at": now_utc_ts,
                 "updated_at": now_utc_ts,
-                "expireAt": ttl_expire_at,
+                "last_check_attempt": now_utc_ts,
+                "last_successful_check": now_utc_ts,
+                # Confirmed members get the long TTL (survive a missed weekly
+                # run); confirmed non-members get a short one since they may
+                # resubscribe at any time and must not stay falsely gated.
+                "expireAt": ttl_expire_at if subscribed else neg_ttl_expire_at,
             }
         }
         if subscribed:

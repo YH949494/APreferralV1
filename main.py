@@ -985,6 +985,34 @@ def process_verification_queue_scheduled(batch_limit: int | None = None) -> None
     )
 
 
+def subscription_audit_scheduled() -> None:
+    """Weekly refresh of subscription_cache (scheduler.run_invitee_subscription_audit).
+
+    Voucher-card channel gating (vouchers.py: get_cached_subscription /
+    get_channel_subscription_state) reads this cache only — this job is what
+    keeps it from going stale, so normal card rendering never needs a live
+    Telegram getChatMember call. A long TTL (900s > the job's own bounded
+    run time) plus the shared scheduler_locks collection make this safe if
+    two Fly.io machines both fire the weekly trigger.
+    """
+    acquired, lock_doc = acquire_scheduler_lock("subscription_audit", ttl_seconds=900)
+    if not acquired:
+        logger.info(
+            "[SUB_AUDIT] lock_not_acquired owner=%s expires_in_s=%s",
+            (lock_doc or {}).get("owner"),
+            expires_in_seconds((lock_doc or {}).get("expireAt")),
+        )
+        return
+    logger.info("[SUB_AUDIT] scheduled_start")
+    start_time = time.time()
+    result = run_invitee_subscription_audit()
+    logger.info(
+        "[SUB_AUDIT] scheduled_done elapsed=%.2fs result=%s",
+        time.time() - start_time,
+        result,
+    )
+
+
 def _record_welcome_run_stats(job_name: str, stats: dict, duration_s: float, now: datetime) -> None:
     """Persist the per-run stats dict so the Welcome Journey Runtime dashboard
     has real numbers instead of just a heartbeat timestamp. Written to
@@ -9825,7 +9853,23 @@ def run_worker():
     )
     logger.info("[MISSION_POOL][SCHEDULER_REGISTERED] interval_seconds=%s", mission_pool_interval)
 
-    # subscription audit disabled — subscription_cache refreshed via claim + check-in events
+    # Weekly, low-traffic-hour refresh of subscription_cache so voucher-card
+    # channel gating (vouchers.py: get_cached_subscription) never needs a live
+    # Telegram getChatMember call during normal Mini App load — see
+    # subscription_audit_scheduled(). Its own scheduler.<job_key>.enabled
+    # toggle (default on) plus INVITEE_SUB_AUDIT_ENABLED inside
+    # run_invitee_subscription_audit() itself both gate this.
+    scheduler.add_job(
+        _guarded_job("subscription_audit", subscription_audit_scheduled),
+        trigger=CronTrigger(day_of_week="tue", hour=4, minute=30, timezone=KL_TZ),
+        id="subscription_audit_weekly",
+        name="Channel Subscription Cache Weekly Audit",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+    logger.info("[SUB_AUDIT][SCHEDULER_REGISTERED] cron=tue_04:30_KL")
+
     try:
         reconcile_drop_statuses()
         logger.info("[DROP_STATUS] startup_reconcile_ok")

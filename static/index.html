@@ -5820,25 +5820,31 @@
 
       card.appendChild(message);
       card.appendChild(btn);
-      const dropType = String(drop?.type || "").toLowerCase();
-      const isPoolCard = dropType === "pooled" || dropType === "";
-      if (!hasClaimed && claimableNow && !publicSoldOut && isPoolCard) {
-        applyChannelGate(dropId, message, btn);
-      }
-
+      // Channel-membership status is never live-probed during card render
+      // (that used to fire a POST /vouchers/claim check_only per card, which
+      // could hit Telegram's getChatMember and block the UI on a "Checking
+      // channel status" retry state on any latency/error). Claim stays
+      // enabled as rendered above; the real claim request is the sole
+      // authoritative subscription gate (see api_claim / get_channel_subscription_state)
+      // and surfaces its own "subscribe to claim" / "verification unavailable,
+      // retry" UI (claimErrorToUi) if it rejects.
       return card;
     }
 
     let _heroCountdownTimer = null;
-    // Set by renderCompactVoucherRow whenever the current primary voucher
-    // requires a channel subscription; re-run on visibilitychange so
-    // returning to the Mini App (e.g. after tapping "Join Official
-    // Channel") refreshes the gate via the same checkChannelSubscription
-    // call the initial render used, rather than a second implementation.
+    // No longer used to trigger a live per-card channel-subscription probe
+    // (that path — check_only against /vouchers/claim — is gone; see
+    // renderCompactVoucherRow). Kept only as the flag renderCompactVoucherRow
+    // still clears on each render, so the reload below can't double-fire
+    // mid-render.
     let _compactVoucherChannelRefresh = null;
     document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "visible" && typeof _compactVoucherChannelRefresh === "function") {
-        _compactVoucherChannelRefresh();
+      // Reopening the Mini App (e.g. after tapping "Join Official Channel")
+      // re-reads /vouchers/visible, which is itself cache-only (no live
+      // Telegram call) — this just picks up whatever the cache says now,
+      // rather than probing Telegram directly.
+      if (document.visibilityState === "visible" && typeof loadVouchers === "function") {
+        loadVouchers();
       }
     });
 
@@ -6044,71 +6050,31 @@
 
       container.appendChild(row);
 
-      // Pooled vouchers require an active channel subscription — mirrors the
-      // same check createCampaignCard already runs (applyChannelGate), just
-      // rendered as a compact status row instead of a hidden Claim button.
+      // Pooled vouchers require an active channel subscription. Status here
+      // is read from drop.channelSubscribed — a cache-only flag the backend
+      // already attached in /vouchers/visible (vouchers.py: user_visible_drops
+      // -> get_cached_subscription(), a plain DB read, never a live Telegram
+      // getChatMember call). This used to be a live POST /vouchers/claim
+      // check_only probe fired on every card render, which could hit
+      // Telegram directly and — on any latency/429/error — block the card on
+      // a "Checking channel status… Retry" state. That probe is gone: Claim
+      // stays enabled by default (a cache miss is NOT "not subscribed", it's
+      // simply unknown here), and the real claim request remains the sole
+      // authoritative gate (api_claim / get_channel_subscription_state),
+      // surfacing its own "subscribe to claim" / "verification unavailable"
+      // UI (claimErrorToUi) if it ever rejects.
       const dropType = String(drop?.type || "").toLowerCase();
       const isPoolCard = dropType === "pooled" || dropType === "";
-      if (isPoolCard && dropId) {
-        btn.setAttribute("disabled", "disabled");
-
-        // Three UI states — CRITICAL: "unverified" (401/429/5xx,
-        // verification_failed, network error, or anything else that isn't a
-        // positive backend confirmation) must never render as "not
-        // subscribed". Only a confirmed "not_subscribed" does that.
-        const applyChannelState = (uiState) => {
-          const isSubscribed = uiState === "subscribed";
-          channelRow.dataset.joined = isSubscribed ? "true" : "false";
-          channelRow.dataset.channelState = uiState;
-          channelRow.style.display = "flex";
-
-          if (uiState === "subscribed") {
-            channelRow.disabled = true;
-            channelRow.textContent = "✓ " + t("channel_joined");
-            channelRow.onclick = null;
-            channelSub.style.display = "none";
-          } else if (uiState === "not_subscribed") {
-            channelRow.disabled = false;
-            channelRow.textContent = "○ " + t("channel_join_required") + " ›";
-            channelRow.onclick = () => {
-              if (tg?.openTelegramLink) {
-                tg.openTelegramLink(OFFICIAL_CHANNEL_LINK);
-              } else {
-                window.open(OFFICIAL_CHANNEL_LINK, "_blank");
-              }
-            };
-            channelSub.style.display = "block";
-          } else {
-            // unverified — offer a manual retry instead of guessing.
-            channelRow.disabled = false;
-            channelRow.textContent = t("channel_checking_status") + " · " + t("retry_label");
-            channelRow.onclick = () => runChannelCheck();
-            channelSub.style.display = "none";
-          }
-
-          if (isSubscribed) {
-            btn.removeAttribute("disabled");
-          } else {
-            btn.setAttribute("disabled", "disabled");
-          }
-        };
-
-        const runChannelCheck = () =>
-          checkChannelSubscription(dropId)
-            .then((state) => applyChannelState(state.state))
-            .catch((err) => {
-              console.warn("Channel gate check failed", err);
-              // Unverified on error too — never falsely render "not
-              // subscribed"; Claim now stays disabled until a passing check
-              // confirms subscription.
-              applyChannelState("unverified");
-            });
-
-        runChannelCheck();
-        _compactVoucherChannelRefresh = runChannelCheck;
-      } else {
-        _compactVoucherChannelRefresh = null;
+      if (isPoolCard && dropId && drop?.channelSubscribed === true) {
+        channelRow.dataset.joined = "true";
+        channelRow.dataset.channelState = "subscribed";
+        channelRow.style.display = "flex";
+        channelRow.disabled = true;
+        channelRow.textContent = "✓ " + t("channel_joined");
+        channelRow.onclick = null;
+        channelSub.style.display = "none";
       }
+      _compactVoucherChannelRefresh = null;
 
       if (moreCount > 0) {
         const link = document.createElement("button");

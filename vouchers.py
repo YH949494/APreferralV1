@@ -3242,7 +3242,13 @@ ALLOWED_CHANNEL_STATUSES = {"member", "administrator", "creator"}
 CONFIRMED_NOT_SUBSCRIBED_STATUSES = {"left", "kicked"}
 CHANNEL_VERIFICATION_RETRY_AFTER_SEC = 3
 SUB_CHECK_TTL_SECONDS = int(os.getenv("SUB_CHECK_TTL_SECONDS", "120"))
-SUB_CACHE_TTL_DAYS = int(os.getenv("SUB_CACHE_TTL_DAYS", "3"))
+# 14 days: long enough to absorb a missed weekly subscription-audit run
+# (scheduler.run_invitee_subscription_audit) without forcing a subscribed
+# user back onto live getChatMember verification.
+SUB_CACHE_TTL_DAYS = int(os.getenv("SUB_CACHE_TTL_DAYS", "14"))
+# Confirmed non-membership is cached only briefly — the user may resubscribe
+# at any time — unlike the 14-day positive TTL above.
+SUB_CACHE_NEGATIVE_TTL_SECONDS = int(os.getenv("SUB_CACHE_NEGATIVE_TTL_SECONDS", "600"))
 
 
 def _get_welcome_eligibility(uid: int) -> dict | None:
@@ -4181,7 +4187,19 @@ def get_channel_subscription_state(uid: int) -> dict:
         try:
             subscription_cache_col.update_one(
                 {"_id": _subscription_cache_key(uid)},
-                {"$set": {"user_id": uid, "subscribed": False, "checked_at": now, "updated_at": now}},
+                {
+                    "$set": {
+                        "user_id": uid,
+                        "subscribed": False,
+                        "checked_at": now,
+                        "updated_at": now,
+                        # Short negative TTL — expires this doc quickly so a
+                        # resubscribe isn't shadowed by a stale confirmed-left
+                        # record, and clears any leftover 14-day positive
+                        # expireAt from a prior subscribed=true cache entry.
+                        "expireAt": now + timedelta(seconds=SUB_CACHE_NEGATIVE_TTL_SECONDS),
+                    }
+                },
                 upsert=True,
             )
         except Exception:
@@ -5107,6 +5125,16 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
                         0,
                         str(claimability.get("reason") or "unknown"),
                     )
+                # Cache-only channel-membership hint for the card UI — a plain
+                # DB read (get_cached_subscription), never a live getChatMember
+                # call. Mirrors the same audience condition api_claim() uses to
+                # decide whether channel membership applies to this drop at all
+                # (see get_channel_subscription_state() there). This is display
+                # only: the real claim request is still the sole authoritative
+                # gate, so a cache miss here (False) must not be read by the
+                # frontend as "confirmed not subscribed".
+                if not _is_new_joiner_audience(audience_type):
+                    base["channelSubscribed"] = get_cached_subscription(ctx_uid) is True
                 pooled_cards.append(base)
 
     # Sort: personalised first; then pooled by priority desc, startsAt asc
