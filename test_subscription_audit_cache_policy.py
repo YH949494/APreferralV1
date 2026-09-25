@@ -158,6 +158,35 @@ def test_candidate_population_includes_recently_active_miniapp_users():
     assert db_ref.subscription_cache.find_one({"_id": f"sub:{active_uid}"}) is not None
 
 
+def test_stale_positive_cache_is_refreshed_without_recent_activity():
+    # Closes the gap a Codex review flagged on this PR: a user cached
+    # subscribed=True (trusted at claim time for up to SUB_CACHE_TTL_DAYS=14
+    # without recontacting Telegram) who then unsubscribes and never shows
+    # up again in pending_referrals or users.last_visible_at must still get
+    # re-verified well before that 14-day trust window elapses.
+    db_ref = _fresh_db()
+    now = datetime(2026, 1, 8, 4, 30, tzinfo=timezone.utc)
+    uid = 9191
+    # No pending_referrals row, no users doc at all — only a stale positive
+    # subscription_cache entry from a week ago.
+    db_ref.subscription_cache.insert_one({
+        "_id": f"sub:{uid}",
+        "user_id": uid,
+        "subscribed": True,
+        "checked_at": now - timedelta(days=7),
+        "expireAt": now + timedelta(days=7),
+    })
+
+    # Telegram now reports they left.
+    with mock.patch.object(scheduler.requests, "get", return_value=_Resp(200, _member_payload("left"))):
+        result = scheduler.run_invitee_subscription_audit(now_utc_ts=now, db_ref=db_ref)
+
+    assert result["checked"] == 1
+    assert result["subscribed_false"] == 1
+    doc = db_ref.subscription_cache.find_one({"_id": f"sub:{uid}"})
+    assert doc["subscribed"] is False
+
+
 def test_recently_checked_uid_is_skipped_not_rechecked():
     db_ref = _fresh_db()
     now = datetime(2026, 1, 8, 4, 30, tzinfo=timezone.utc)

@@ -1202,6 +1202,11 @@ REFERRAL_CHANNEL_RETRY_HOURS = 12
 REFERRAL_CHANNEL_EXPIRE_DAYS = 7
 INVITEE_SUB_AUDIT_ENABLED = os.getenv("INVITEE_SUB_AUDIT_ENABLED", "1") == "1"
 MAX_INVITEE_SUB_CHECKS_PER_RUN = int(os.getenv("MAX_INVITEE_SUB_CHECKS_PER_RUN", "800"))
+# The audit runs weekly (see main.py: subscription_audit_scheduled), so the
+# referral/activity lookback must cover a full 7-day gap between runs plus
+# room for one missed/delayed run — a 3-day window let users active only
+# mid-week fall outside every run's candidate query.
+INVITEE_SUB_AUDIT_LOOKBACK_DAYS = int(os.getenv("INVITEE_SUB_AUDIT_LOOKBACK_DAYS", "10"))
 SUB_CACHE_TTL_DAYS = int(os.getenv("SUB_CACHE_TTL_DAYS", "14"))
 # Confirmed non-membership is cached only briefly — a user may resubscribe at
 # any time — unlike the 14-day positive TTL above (see run_invitee_subscription_audit).
@@ -2224,7 +2229,7 @@ def run_invitee_subscription_audit(now_utc_ts=None, db_ref=None) -> dict:
         logger.warning("[SUB_AUDIT] skip reason=missing_token")
         return {"skipped": "missing_token"}
 
-    scan_start = now_utc_ts - timedelta(days=3)
+    scan_start = now_utc_ts - timedelta(days=INVITEE_SUB_AUDIT_LOOKBACK_DAYS)
     logger.info("[SUB_AUDIT] start scan_start=%s limit=%s", scan_start.isoformat(), MAX_INVITEE_SUB_CHECKS_PER_RUN)
 
     scanned = checked = subscribed_true = subscribed_false = skipped_recent = errors = 0
@@ -2233,15 +2238,15 @@ def run_invitee_subscription_audit(now_utc_ts=None, db_ref=None) -> dict:
     neg_ttl_expire_at = now_utc_ts + timedelta(seconds=SUB_CACHE_NEGATIVE_TTL_SECONDS)
 
     def _candidate_uids():
-        # Two bounded, independently-capped sources feed one weekly sweep:
-        # recent invitees (referral-attribution audit, the job's original
-        # purpose) and recently-active Miniapp users (the population that
-        # actually drives voucher-card channel gating). Each cursor is
-        # capped at MAX_INVITEE_SUB_CHECKS_PER_RUN on its own so this stays
-        # a bounded scan, never a full-table sweep; the per-uid loop below
-        # additionally stops once actual Telegram calls (``checked``) hit
-        # that same cap.
+        # Three bounded, independently-capped sources feed one weekly sweep.
+        # Each cursor is capped at MAX_INVITEE_SUB_CHECKS_PER_RUN on its own
+        # so this stays a bounded scan, never a full-table sweep; the per-uid
+        # loop below additionally stops once actual Telegram calls
+        # (``checked``) hit that same cap.
         seen = set()
+
+        # 1) Recent invitees — referral-attribution audit, the job's
+        #    original purpose.
         referral_cursor = db_ref.pending_referrals.find(
             {"created_at_utc": {"$gte": scan_start}},
             {"invitee_user_id": 1},
@@ -2252,11 +2257,36 @@ def run_invitee_subscription_audit(now_utc_ts=None, db_ref=None) -> dict:
                 seen.add(uid)
                 yield uid
 
+        # 2) Recently-active Miniapp users — the population that actually
+        #    drives voucher-card channel gating.
         active_cursor = db_ref.users.find(
             {"last_visible_at": {"$gte": scan_start}},
             {"user_id": 1},
         ).sort("last_visible_at", -1).limit(MAX_INVITEE_SUB_CHECKS_PER_RUN)
         for row in active_cursor:
+            uid = row.get("user_id")
+            if isinstance(uid, int) and uid not in seen:
+                seen.add(uid)
+                yield uid
+
+        # 3) Oldest-verified positive cache entries, regardless of recent
+        #    activity. get_channel_subscription_state() trusts an unexpired
+        #    positive subscription_cache entry at claim time without
+        #    recontacting Telegram (SUB_CACHE_TTL_DAYS = 14) — a user who
+        #    unsubscribes right after being cached, but never shows up in
+        #    sources 1/2 again (no new referral, no Mini App open), would
+        #    otherwise ride that stale "subscribed=true" all the way to its
+        #    14-day expiry and keep claiming. Proactively re-verifying the
+        #    longest-untouched positive entries first, every run, bounds
+        #    that window to roughly this job's own cadence (weekly) instead
+        #    of the full TTL, for as many entries as MAX_INVITEE_SUB_CHECKS_PER_RUN
+        #    covers per run relative to the size of the actively-cached
+        #    population.
+        stale_cache_cursor = db_ref.subscription_cache.find(
+            {"subscribed": True, "checked_at": {"$lte": recent_cutoff}},
+            {"user_id": 1},
+        ).sort("checked_at", 1).limit(MAX_INVITEE_SUB_CHECKS_PER_RUN)
+        for row in stale_cache_cursor:
             uid = row.get("user_id")
             if isinstance(uid, int) and uid not in seen:
                 seen.add(uid)
