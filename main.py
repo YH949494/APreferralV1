@@ -8136,7 +8136,7 @@ def apply_monthly_tier_update(run_time: datetime | None = None, run_id: str | No
                 "invalidated": {"$ne": True},
                 "$or": [
                     {"user_id": in_uids, "created_at": {"$gte": prev_start_utc, "$lt": prev_end_utc}},
-                    {"user_id": in_uids, "created_at": {"$exists": False}, "ts": {"$gte": prev_start_utc, "$lt": prev_end_utc}},
+                    {"user_id": in_uids, "created_at": None, "ts": {"$gte": prev_start_utc, "$lt": prev_end_utc}},
                 ],
             }},
             {"$group": {"_id": "$user_id", "xp": {"$sum": "$xp"}}},
@@ -8186,7 +8186,6 @@ def apply_monthly_tier_update(run_time: datetime | None = None, run_id: str | No
                         uid = user.get("user_id")
                         if uid is None:
                             continue
-                        last_id = user.get("_id")
                         computed_tier = _tier_from_monthly_xp(monthly_total)
                         current_status = user.get("status", "Normal")
                         existing_month = user.get("vip_month")
@@ -8258,6 +8257,9 @@ def apply_monthly_tier_update(run_time: datetime | None = None, run_id: str | No
                             },
                             context="monthly_tier_update",
                         )
+                        # Advance the resume cursor only after this user is
+                        # written, so an interrupted write is retried, not skipped.
+                        last_id = user.get("_id")
                         processed += 1
                         batch_processed += 1
                         

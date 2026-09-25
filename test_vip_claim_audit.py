@@ -24,6 +24,7 @@ Telegram API failure (503 verification_failed) vs confirmed non-membership
 (403 not_subscribed) vs a normal successful claim.
 """
 import json
+import sys
 import os
 import unittest.mock as mock
 from datetime import datetime, timedelta, timezone
@@ -264,6 +265,165 @@ class TestMonthlyTierUsesLedger:
         main.apply_monthly_tier_update(run_time=OCT1_0000, run_id="t")
         assert main.users_collection.find_one({"user_id": 401})["status"] == "VIP1"
 
+    # --- ledger semantics: boundaries, reversals, timestamps -----------------
+
+    def _run_oct1_and_tier(self, uid):
+        main.apply_monthly_tier_update(run_time=OCT1_0000, run_id="t")
+        hist = main.monthly_xp_history_collection.find_one({"user_id": uid, "month": "2026-10"})
+        return hist["monthly_xp"], main.users_collection.find_one({"user_id": uid})["status"]
+
+    def test_kl_month_boundaries_inclusive_start_exclusive_end(self):
+        kl = main.KL_TZ
+        main.users_collection.insert_one({"user_id": 501, "username": "a", "status": "Normal"})
+        self._xp(501, 100, datetime(2026, 9, 1, 0, 0, 0).replace(tzinfo=kl).astimezone(timezone.utc))   # in (start)
+        self._xp(501, 200, datetime(2026, 9, 30, 23, 59, 59, 999000).replace(tzinfo=kl).astimezone(timezone.utc))  # in
+        self._xp(501, 400, datetime(2026, 8, 31, 23, 59, 59, 999000).replace(tzinfo=kl).astimezone(timezone.utc))  # out
+        self._xp(501, 800, datetime(2026, 10, 1, 0, 0, 0).replace(tzinfo=kl).astimezone(timezone.utc))  # out (end)
+        assert self._run_oct1_and_tier(501) == (300, "Normal")
+
+    def test_utc_dates_are_bucketed_by_kl_month(self):
+        main.users_collection.insert_one({"user_id": 502, "username": "a", "status": "Normal"})
+        # 2026-08-31 16:30Z is Sept 1 00:30 KL -> September.
+        self._xp(502, 500, datetime(2026, 8, 31, 16, 30, tzinfo=timezone.utc))
+        # 2026-09-30 16:30Z is Oct 1 00:30 KL -> October, not September.
+        self._xp(502, 500, datetime(2026, 9, 30, 16, 30, tzinfo=timezone.utc))
+        # Naive datetimes (as pymongo returns them) are UTC.
+        self._xp(502, 300, datetime(2026, 9, 15, 4, 0))
+        assert self._run_oct1_and_tier(502) == (800, "VIP1")
+
+    def test_threshold_is_exactly_800(self):
+        sept = datetime(2026, 9, 10, tzinfo=main.KL_TZ)
+        main.users_collection.insert_many([
+            {"user_id": 503, "username": "a", "status": "Normal"},
+            {"user_id": 504, "username": "b", "status": "VIP1", "vip_tier": "VIP1", "vip_month": "2026-09"},
+        ])
+        self._xp(503, 800, sept)
+        self._xp(504, 799, sept)
+        main.apply_monthly_tier_update(run_time=OCT1_0000, run_id="t")
+        assert main.users_collection.find_one({"user_id": 503})["status"] == "VIP1"
+        assert main.users_collection.find_one({"user_id": 504})["status"] == "Normal"  # new month -> may drop
+
+    def test_null_or_missing_created_at_falls_back_to_ts(self):
+        main.users_collection.insert_one({"user_id": 505, "username": "a", "status": "Normal"})
+        sept = datetime(2026, 9, 10, tzinfo=timezone.utc)
+        main.db["xp_events"].insert_many([
+            {"user_id": 505, "xp": 400, "ts": sept},                       # missing created_at
+            {"user_id": 505, "xp": 400, "created_at": None, "ts": sept},   # null created_at
+            {"user_id": 505, "xp": 400, "created_at": datetime(2026, 8, 1, tzinfo=timezone.utc), "ts": sept},  # created_at wins
+        ])
+        assert self._run_oct1_and_tier(505) == (800, "VIP1")
+
+    def test_reversal_after_counting_is_excluded(self):
+        sept = datetime(2026, 9, 10, tzinfo=main.KL_TZ)
+        main.users_collection.insert_one({"user_id": 506, "username": "a", "status": "Normal"})
+        self._xp(506, 500, sept)
+        # Referral XP counted into monthly_xp, then revoked (flag only; no
+        # negative event is ever written — see rollback_pending_referral_xp).
+        self._xp(506, 500, sept, invalidated=True, xp_counted=True, invalidated_at=datetime(2026, 9, 20, tzinfo=timezone.utc))
+        self._xp(506, 0, sept, invalidated=False)
+        assert self._run_oct1_and_tier(506) == (500, "Normal")
+
+    def test_matches_xp_snapshot_monthly_xp_at_month_end(self):
+        """The ledger sum must equal what the production XP snapshot would have
+        held in users.monthly_xp at the end of September, for sample users."""
+        import xp_snapshot
+        main.db["xp_snapshot_state"].delete_many({})
+        kl = main.KL_TZ
+        samples = {
+            601: [(900, datetime(2026, 9, 3, 12)), (50, datetime(2026, 8, 30, 12))],
+            602: [(300, datetime(2026, 9, 1, 0, 0)), (500, datetime(2026, 9, 30, 23, 59)), (400, datetime(2026, 10, 1, 0, 1))],
+            603: [(799, datetime(2026, 9, 12, 9))],
+            604: [(1000, datetime(2026, 9, 5)), (200, datetime(2026, 9, 6))],
+        }
+        for uid, events in samples.items():
+            main.users_collection.insert_one({"user_id": uid, "username": str(uid), "status": "Normal"})
+            for amt, local in events:
+                # Stored as naive UTC, exactly as pymongo round-trips dates.
+                self._xp(uid, amt, local.replace(tzinfo=kl).astimezone(timezone.utc).replace(tzinfo=None))
+        sept_mid = datetime(2026, 9, 20, 12, tzinfo=timezone.utc)
+        sept_end = datetime(2026, 9, 30, 23, 59, 59, tzinfo=kl).astimezone(timezone.utc)
+        # Production steady state: incremental settler with an existing cursor.
+        main.db["xp_snapshot_state"].insert_one({
+            "_id": xp_snapshot.CURSOR_ID,
+            "last_event_id": None,
+            "last_correction_at": datetime(2026, 9, 2),
+            "week_key": xp_snapshot._week_window_utc(sept_mid)[0].date().isoformat(),
+            "month_key": xp_snapshot._month_window_utc(sept_mid)[0].date().isoformat(),
+        })
+        # 604's 200 XP was revoked before settlement (never counted). The
+        # counted-then-revoked path is covered by
+        # test_reversal_after_counting_is_excluded; the snapshot's own
+        # correction step can't run here (naive/aware compare, see PR notes).
+        main.db["xp_events"].update_one(
+            {"user_id": 604, "xp": 200},
+            {"$set": {"invalidated": True, "invalidated_at": datetime(2026, 9, 1)}},
+        )
+        xp_snapshot.settle_xp_snapshots_incremental(main.db, now_utc_ts=sept_mid)
+        xp_snapshot.settle_xp_snapshots_incremental(main.db, now_utc_ts=sept_end)
+        snapshot = {u["user_id"]: int(u.get("monthly_xp", 0)) for u in main.users_collection.find({"user_id": {"$in": list(samples)}})}
+        main.apply_monthly_tier_update(run_time=OCT1_0000, run_id="t")
+        ledger = {h["user_id"]: h["monthly_xp"] for h in main.monthly_xp_history_collection.find({"month": "2026-10"})}
+        assert ledger == {601: 900, 602: 800, 603: 799, 604: 1000}
+        # Snapshot counts 602's Oct-1 event only after rollover, so on Sept 30
+        # it must agree with the ledger for every sample user.
+        assert ledger == snapshot, (ledger, snapshot)
+
+    # --- resume safety --------------------------------------------------------
+
+    def test_same_month_cursor_resumes_without_reprocessing_earlier_users(self):
+        main.users_collection.insert_many([
+            {"user_id": 701, "username": "a", "status": "Normal"},
+            {"user_id": 702, "username": "b", "status": "Normal"},
+        ])
+        for uid in (701, 702):
+            self._xp(uid, 900, datetime(2026, 9, 10, tzinfo=main.KL_TZ))
+        first = main.users_collection.find_one({"user_id": 701})["_id"]
+        main.admin_cache_col.update_one(
+            {"_id": "vip_monthly:last_id"}, {"$set": {"last_id": first, "month": "2026-10"}}, upsert=True
+        )
+        main.apply_monthly_tier_update(run_time=OCT1_0000, run_id="t")
+        assert main.users_collection.find_one({"user_id": 701})["status"] == "Normal"  # before cursor: skipped
+        assert main.users_collection.find_one({"user_id": 702})["status"] == "VIP1"
+        assert main.admin_cache_col.find_one({"_id": "vip_monthly:last_id"}) is None  # cleared on success
+
+    def test_legacy_cursor_without_month_is_ignored(self):
+        main.users_collection.insert_one({"user_id": 801, "username": "a", "status": "Normal"})
+        self._xp(801, 900, datetime(2026, 9, 10, tzinfo=main.KL_TZ))
+        last = main.users_collection.find_one({"user_id": 801})["_id"]
+        main.admin_cache_col.update_one({"_id": "vip_monthly:last_id"}, {"$set": {"last_id": last}}, upsert=True)
+        main.apply_monthly_tier_update(run_time=OCT1_0000, run_id="t")
+        assert main.users_collection.find_one({"user_id": 801})["status"] == "VIP1"
+
+    def test_cursor_saved_on_interruption_is_tagged_with_run_month(self):
+        from pymongo.errors import CursorNotFound
+        main.users_collection.insert_many([
+            {"user_id": 900, "username": "z", "status": "Normal"},
+            {"user_id": 901, "username": "a", "status": "Normal"},
+        ])
+        self._xp(901, 900, datetime(2026, 9, 10, tzinfo=main.KL_TZ))
+        real_update = main._users_update_one
+        calls = {"n": 0}
+
+        def boom(*a, **k):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return real_update(*a, **k)  # user 900 succeeds
+            raise CursorNotFound("cursor lost")  # user 901's write keeps failing
+
+        with mock.patch.object(main, "_users_update_one", side_effect=boom):
+            with pytest.raises(CursorNotFound):
+                main.apply_monthly_tier_update(run_time=OCT1_0000, run_id="t")
+        doc = main.admin_cache_col.find_one({"_id": "vip_monthly:last_id"})
+        assert doc is not None and doc.get("month") == "2026-10"
+        # Cursor sits on the last SUCCESSFUL user, so 901 is retried, not skipped.
+        assert doc["last_id"] == main.users_collection.find_one({"user_id": 900})["_id"]
+        assert calls["n"] == 4  # 900 once + 901 attempted on each of 3 tries
+        # A later run in a DIFFERENT month must not resume from it...
+        main.apply_monthly_tier_update(run_time=datetime(2026, 11, 1, 0, 0, 5, tzinfo=main.KL_TZ), run_id="t2")
+        u = main.users_collection.find_one({"user_id": 901})
+        assert u["vip_month"] == "2026-11"  # processed from the start, with November's own window
+        assert u["status"] == "Normal"      # October ledger has 0 XP -> not VIP for November
+
 
 # ---------------------------------------------------------------------------
 # End-to-end /vouchers/claim for a VIP tier pooled drop
@@ -389,3 +549,57 @@ class TestVipPooledClaimEndToEnd:
         status2, body2 = self._claim(506)
         assert status2 == 200, body2
         assert body2.get("status") == "already_claimed"
+
+
+# ---------------------------------------------------------------------------
+# scripts/vip_claim_audit.py (read-only diagnostic)
+# ---------------------------------------------------------------------------
+
+def _load_audit_script():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("vip_claim_audit", os.path.join(os.path.dirname(__file__), "scripts", "vip_claim_audit.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class TestVipClaimAuditScript:
+    def _run(self, argv, capsys):
+        mod = _load_audit_script()
+        with mock.patch.object(sys, "argv", ["vip_claim_audit.py", *argv]), \
+             mock.patch.object(database, "init_db", lambda *a, **k: None):
+            mod.main()
+        return capsys.readouterr().out
+
+    def setup_method(self):
+        for name in ("drops", "users", "xp_events", "voucher_claims", "vouchers", "subscription_cache"):
+            database.get_db()[name].delete_many({})
+
+    def test_drop_flag_finds_objectid_keyed_drop_and_ts_only_xp(self, capsys):
+        from bson import ObjectId
+        db = database.get_db()
+        oid = ObjectId()
+        now = datetime.now(timezone.utc)
+        db.drops.insert_one({"_id": oid, "eligibility": {"mode": "tier", "allow": ["VIP1"]}, "audience": {},
+                             "startsAt": now, "endsAt": now + timedelta(hours=1)})
+        cur = datetime.now(main.KL_TZ)
+        prev = (cur.replace(day=1) - timedelta(days=1)).replace(day=15, tzinfo=None)
+        db.users.insert_one({"user_id": 1329748443, "status": "Normal", "vip_tier": "Normal",
+                             "vip_month": cur.strftime("%Y-%m"), "region": "Thailand"})
+        db.xp_events.insert_one({"user_id": 1329748443, "xp": 900, "ts": prev})  # legacy: ts only
+        db.voucher_claims.insert_one({"drop_id": ObjectId(), "user_id": 1329748443, "status": "claimed",
+                                      "voucher_code": "SECRET-CODE-123", "claimed_at": now})
+        out = self._run(["--uids", "1329748443", "--drop", str(oid)], capsys)
+        assert "tier drops (last 30d): 1" in out
+        assert f"drop={oid}" in out
+        assert "13…443" in out and "1329748443" not in out  # masked
+        assert "| 900 |" in out and "monthly_race_demoted" in out
+        assert "SECRET-CODE-123" not in out  # never prints voucher codes
+
+    def test_drop_flag_still_finds_legacy_string_keyed_drop(self, capsys):
+        db = database.get_db()
+        now = datetime.now(timezone.utc)
+        db.drops.insert_one({"_id": "legacy-vip-drop", "eligibility": {"mode": "tier", "allow": ["VIP"]}, "audience": {},
+                             "startsAt": now, "endsAt": now + timedelta(hours=1)})
+        out = self._run(["--drop", "legacy-vip-drop"], capsys)
+        assert "drop=legacy-vip-drop" in out and "ALIAS_VIP" in out

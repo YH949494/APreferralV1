@@ -58,7 +58,7 @@ def ledger_xp(db, uids, start, end) -> dict:
     rows = db.xp_events.aggregate([
         {"$match": {"invalidated": {"$ne": True}, "$or": [
             {"user_id": in_uids, "created_at": {"$gte": start, "$lt": end}},
-            {"user_id": in_uids, "created_at": {"$exists": False}, "ts": {"$gte": start, "$lt": end}},
+            {"user_id": in_uids, "created_at": None, "ts": {"$gte": start, "$lt": end}},
         ]}},
         {"$group": {"_id": "$user_id", "xp": {"$sum": "$xp"}}},
     ])
