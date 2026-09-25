@@ -12,6 +12,14 @@ class _Result:
         self.matched_count = matched_count
 
 
+def _bson(value):
+    # MongoDB compares BSON dates as UTC instants regardless of how the client
+    # tagged them; mirror that so the fake never masks or invents tz errors.
+    if isinstance(value, datetime) and value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
+
+
 def _match_or_clause(doc, clause):
     for key, cond in clause.items():
         if key == "$exists":
@@ -26,13 +34,13 @@ def _match_or_clause(doc, clause):
                 if (key in doc) != val:
                     return False
             elif op == "$lt":
-                if actual is None or not (actual < val):
+                if actual is None or not (_bson(actual) < _bson(val)):
                     return False
             elif op == "$gt":
-                if actual is None or not (actual > val):
+                if actual is None or not (_bson(actual) > _bson(val)):
                     return False
             elif op == "$lte":
-                if actual is None or not (actual <= val):
+                if actual is None or not (_bson(actual) <= _bson(val)):
                     return False
             elif op == "$eq":
                 if actual != val:
@@ -55,13 +63,13 @@ def _matches(doc, filt):
                     if (key in doc) != val:
                         return False
                 elif op == "$lt":
-                    if actual is None or not (actual < val):
+                    if actual is None or not (_bson(actual) < _bson(val)):
                         return False
                 elif op == "$gt":
-                    if actual is None or not (actual > val):
+                    if actual is None or not (_bson(actual) > _bson(val)):
                         return False
                 elif op == "$lte":
-                    if actual is None or not (actual <= val):
+                    if actual is None or not (_bson(actual) <= _bson(val)):
                         return False
                 elif op == "$ne":
                     if actual == val:
@@ -367,6 +375,37 @@ class XPSnapshotIncrementalTests(unittest.TestCase):
         summary2 = snap.settle_xp_snapshots_incremental(self.db, now_utc_ts=self.now + timedelta(minutes=3))
         self.assertEqual(self.db.users.docs[1]["total_xp"], 0)
         self.assertEqual(summary2["corrections_applied"], 0)
+
+    def test_naive_last_correction_at_from_pymongo_does_not_break_corrections(self):
+        # Production MongoClient uses tz_aware=False, so the cursor's
+        # last_correction_at (and invalidated_at) come back naive UTC.
+        ev = self._grant(1, 75, when=self.now)
+        snap.settle_xp_snapshots_incremental(self.db, now_utc_ts=self.now)
+        self.assertEqual(self.db.users.docs[1]["total_xp"], 75)
+        self.assertEqual(self.db.users.docs[1]["monthly_xp"], 75)
+
+        cursor = self.db.xp_snapshot_state.docs[snap.CURSOR_ID]
+        cursor["last_correction_at"] = self.now.replace(tzinfo=None)
+        inv_at = self.now + timedelta(minutes=1)
+        for d in self.db.xp_events.docs:
+            if d["_id"] == ev["_id"]:
+                self.assertTrue(d["xp_counted"])
+                d["invalidated"] = True
+                d["invalidated_at"] = inv_at.replace(tzinfo=None)
+        self.db.admin_cache.docs.clear()
+
+        later = self.now + timedelta(minutes=2)
+        summary = snap.settle_xp_snapshots_incremental(self.db, now_utc_ts=later)
+
+        self.assertEqual(summary["corrections_applied"], 1)
+        self.assertEqual(self.db.users.docs[1]["total_xp"], 0)
+        self.assertEqual(self.db.users.docs[1]["weekly_xp"], 0)
+        self.assertEqual(self.db.users.docs[1]["monthly_xp"], 0)
+        self.assertEqual(cursor["last_correction_at"], inv_at)
+        self.assertEqual(cursor["last_correction_at"].tzinfo, timezone.utc)
+        # Trailing publish touch + heartbeat ran (previously skipped by the TypeError).
+        self.assertEqual(self.db.users.docs[1]["snapshot_published_at"], later)
+        self.assertEqual(self.db.admin_cache.docs["snapshot_heartbeat"]["ts_utc"], later)
 
     def test_weekly_rollover_resets_only_weekly(self):
         self._grant(1, 40, when=self.now)

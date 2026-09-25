@@ -325,7 +325,9 @@ def _apply_invalidation_corrections(
     only currently-invalidated docs, never the full xp_events history.
     """
     cursor = _get_cursor(db) or {}
-    last_correction_at = cursor.get("last_correction_at") or now_utc_ts
+    # pymongo (tz_aware=False) returns naive datetimes; normalize before comparing
+    # against the aware invalidated_at values below.
+    last_correction_at = _coerce_utc(cursor.get("last_correction_at")) or now_utc_ts
 
     correction_docs = list(
         db.xp_events.find(
