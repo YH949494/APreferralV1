@@ -266,7 +266,7 @@ def test_require_channel_subscription_blocks_unsubscribed(fake_db):
     _insert_campaign(fake_db, registration={**cr.default_registration_config(), "enabled": True, "require_channel_subscription": True})
     with _app().test_client() as client, _verified(UID), patch(
         "subscription_gate.verify_campaign_subscription",
-        return_value={"subscribed": False, "reason": "left", "source": "live"},
+        return_value={"subscribed": False, "state": "not_member", "reason": "left", "source": "live"},
     ):
         r = client.post(f"/api/campaign-registration/{CAMPAIGN_ID}/register?init_data=x", json=_valid_payload())
         assert r.status_code == 403
@@ -305,7 +305,7 @@ def test_registration_gated_rejection_returns_the_configured_channel_username(fa
                                 "channel_id": None, "channel_username": "advantplayofficial"})
     with _app().test_client() as client, _verified(UID), patch(
         "subscription_gate.verify_campaign_subscription",
-        return_value={"subscribed": False, "reason": "left", "source": "live"},
+        return_value={"subscribed": False, "state": "not_member", "reason": "left", "source": "live"},
     ):
         r = client.post(f"/api/campaign-registration/{CAMPAIGN_ID}/register?init_data=x", json=_valid_payload())
         assert r.status_code == 403
@@ -349,10 +349,16 @@ def test_repair_legacy_invalid_stored_config_by_setting_a_channel(fake_db):
     reg_app = _app()
     with reg_app.test_client() as client, _verified(UID), patch(
         "subscription_gate.verify_campaign_subscription",
-        return_value={"subscribed": False, "reason": "channel_not_configured", "source": "config"},
+        return_value={"subscribed": False, "state": "unavailable", "reason": "channel_not_configured",
+                      "source": "config"},
     ):
         stuck = client.post(f"/api/campaign-registration/{CAMPAIGN_ID}/register?init_data=x", json=_valid_payload())
-        assert stuck.status_code == 403  # impossible loop: no channel can ever satisfy this
+        # Missing channel config can never be satisfied, but it is OUR
+        # misconfiguration, not a confirmed non-member — never tell the user
+        # to join a channel we can't even check.
+        assert stuck.status_code == 503
+        assert stuck.get_json()["code"] == "subscription_check_failed"
+        assert fake_db[cr.REGISTRATIONS_COLLECTION].count_documents({}) == 0
 
     admin_app = Flask(__name__)
     admin_app.register_blueprint(cc_mod.campaign_centre_bp)
@@ -364,7 +370,7 @@ def test_repair_legacy_invalid_stored_config_by_setting_a_channel(fake_db):
 
     with reg_app.test_client() as client, _verified(UID), patch(
         "subscription_gate.verify_campaign_subscription",
-        return_value={"subscribed": True, "reason": "member"},
+        return_value={"subscribed": True, "state": "member", "reason": "member"},
     ):
         ok = client.post(f"/api/campaign-registration/{CAMPAIGN_ID}/register?init_data=x", json=_valid_payload())
         assert ok.status_code == 201

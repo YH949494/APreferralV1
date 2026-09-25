@@ -6868,6 +6868,7 @@
       ["Destination ready", dest.provider_id ? (dest.ready ? "Yes" : "No") : "Not applicable for this campaign"],
       ["Provider status", provider ? (provider.active ? "Active" : "Inactive") : "—"],
       ["Registration", reg.enabled ? "Enabled (" + (reg.required_fields || []).length + " field(s) collected)" : "Disabled"],
+      ["Registration discovery", !reg.enabled ? "—" : (reg.listing === "unlisted" ? "Unlisted (direct link only)" : "Listed (auto-prompted to all Mini App users)")],
       ["Reward rules", (rc.rules || []).length + " configured"],
       ["Priority", String(campaign.priority == null ? "—" : campaign.priority)],
     ];
@@ -8066,6 +8067,12 @@
       '<strong>Visibility</strong><br/><span class="sub">' +
       (vis.publicly_visible ? "✓ Visible to players" : "Not visible yet") + '</span></div>';
 
+    if (resp.registration_listing) {
+      html += '<div class="sub" style="margin-top:6px;">Registration discovery: ' +
+        (resp.registration_listing === "unlisted"
+          ? "Unlisted — only users with the direct link can open it"
+          : "Listed — auto-prompted to every Mini App user while live") + '</div>';
+    }
     if (!vis.publicly_visible && reasons.length) {
       html += '<ul style="margin:8px 0 0 18px;padding:0;">' +
         reasons.map(function (r) { return '<li class="sub">' + esc(gcVisibilityReasonText(r)) + '</li>'; }).join("") +
@@ -8453,6 +8460,7 @@
         requiredFields: GCW_REGISTRATION_FIELD_ORDER.slice(),
         requireChannelSubscription: false,
         channelUsername: "",
+        listing: "listed",
       },
       destination: { providerId: "", path: "" },
     };
@@ -8559,7 +8567,13 @@
       return '<label style="font-size:13px;display:flex;align-items:center;gap:8px;margin-bottom:8px;">' +
         '<input type="checkbox" class="gcw-reg-field" value="' + esc(key) + '"' + checked + ' /> ' + esc(GCW_REGISTRATION_FIELD_LABELS[key]) + '</label>';
     }).join("");
-    return '<div class="sub" style="margin-bottom:8px;">Registration fields</div>' + boxes +
+    var listingSelect = '<select class="filter-input" id="gcw-reg-listing" style="width:100%;box-sizing:border-box;margin:0;">' +
+      '<option value="listed"' + (reg.listing !== "unlisted" ? " selected" : "") + '>Listed — auto-prompted to every Mini App user once live</option>' +
+      '<option value="unlisted"' + (reg.listing === "unlisted" ? " selected" : "") + '>Unlisted — direct link only (testing / targeted)</option>' +
+      '</select>';
+    return gcwField("Discovery", listingSelect,
+        "Listed campaigns pop up for all Mini App users as soon as they are published. Use Unlisted to test through the direct link first.") +
+      '<div class="sub" style="margin-bottom:8px;">Registration fields</div>' + boxes +
       '<div class="sub" style="margin:10px 0;">Telegram identity is always collected automatically — it never needs a field here.</div>' +
       gcwFieldError("step4") +
       '<label style="font-size:13px;display:flex;align-items:center;gap:8px;margin:14px 0 8px;">' +
@@ -8605,6 +8619,7 @@
     if (d.wizardType === "registration") {
       var fields = d.registration.requiredFields.map(function (f) { return GCW_REGISTRATION_FIELD_LABELS[f]; }).join(", ");
       typeSummary = gcwSummaryRow("Registration", fields || "None selected") +
+        gcwSummaryRow("Discovery", d.registration.listing === "unlisted" ? "Unlisted (direct link only)" : "Listed (auto-prompted to all Mini App users)") +
         (d.registration.requireChannelSubscription ? gcwSummaryRow("Channel", "@" + (d.registration.channelUsername || "(not set)")) : "");
     } else if (d.wizardType === "tournament") {
       typeSummary = gcwSummaryRow("Provider", gcwSelectedProviderLabel(d.destination.providerId) || "Not set (configure later)") +
@@ -8696,6 +8711,7 @@
         d.registration.requiredFields = checked;
         var chEl = $("#gcw-reg-channel"); if (chEl) d.registration.requireChannelSubscription = !!chEl.checked;
         var chuEl = $("#gcw-channel-username"); if (chuEl) d.registration.channelUsername = chuEl.value;
+        var lstEl = $("#gcw-reg-listing"); if (lstEl) d.registration.listing = lstEl.value === "unlisted" ? "unlisted" : "listed";
       } else {
         var provEl = $("#gcw-provider"); if (provEl) d.destination.providerId = provEl.value;
         var pathEl = $("#gcw-path"); if (pathEl) d.destination.path = pathEl.value;
@@ -8779,6 +8795,7 @@
         enabled: true,
         required_fields: d.registration.requiredFields,
         require_channel_subscription: d.registration.requireChannelSubscription,
+        listing: d.registration.listing === "unlisted" ? "unlisted" : "listed",
       };
     }
 
@@ -8903,6 +8920,7 @@
       enabled: $("#cr-cfg-enabled").checked,
       miniapp_visible: $("#cr-cfg-miniapp-visible").checked,
       modal_enabled: $("#cr-cfg-modal-enabled").checked,
+      listing: ($("#cr-cfg-listing") || {}).value === "unlisted" ? "unlisted" : "listed",
       require_channel_subscription: $("#cr-cfg-require-channel").checked,
       reminder_hours: parseInt($("#cr-cfg-reminder-hours").value, 10) || 24,
       base_entries: parseInt($("#cr-cfg-base-entries").value, 10) >= 0 ? parseInt($("#cr-cfg-base-entries").value, 10) : 1,
@@ -8927,6 +8945,10 @@
     $("#cr-cfg-enabled").checked = !!reg.enabled;
     $("#cr-cfg-miniapp-visible").checked = reg.miniapp_visible !== false;
     $("#cr-cfg-modal-enabled").checked = reg.modal_enabled !== false;
+    // Absent on every pre-existing campaign — those stay "listed", exactly
+    // what campaign_registration.registration_listing() resolves them to.
+    var listingEl = $("#cr-cfg-listing");
+    if (listingEl) listingEl.value = reg.listing === "unlisted" ? "unlisted" : "listed";
     $("#cr-cfg-require-channel").checked = !!reg.require_channel_subscription;
     $("#cr-cfg-channel-username").value = telegram.channel_username || "";
     var channelWrap = $("#cr-cfg-channel-wrap");

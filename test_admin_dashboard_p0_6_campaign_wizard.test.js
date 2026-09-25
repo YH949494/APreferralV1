@@ -407,8 +407,33 @@ test("Registration/Giveaway payload: external_website + registration.enabled, no
   assert.equal(body.type, "external_website");
   assert.deepEqual(plain(body.registration), {
     enabled: true, required_fields: ["full_name", "delivery_address"], require_channel_subscription: false,
+    listing: "listed",
   });
   assert.equal(body.destination.provider_id, "");
+});
+
+test("Registration/Giveaway payload: Unlisted discovery is sent explicitly so the campaign is direct-link only", async () => {
+  const w = loadWizard();
+  Object.assign(w.gcw.draft, {
+    wizardType: "registration", name: "Test260925", starts_at: "2026-10-01T09:00",
+    campaignIdManuallyEdited: true, campaignId: "test260925",
+  });
+  w.gcw.draft.registration.listing = "unlisted";
+  await w.gcwSubmit(null);
+  assert.equal(w.apiPostJsonCalls[0].body.registration.listing, "unlisted");
+});
+
+test("Registration/Giveaway wizard: Discovery select defaults to Listed and the review names the choice", () => {
+  const w = loadWizard();
+  const d = w.gcw.draft;
+  d.wizardType = "registration";
+  assert.equal(d.registration.listing, "listed");
+  const step4 = w.gcwStep4Html(d);
+  assert.match(step4, /id="gcw-reg-listing"/);
+  assert.match(step4, /<option value="listed" selected>/);
+  d.registration.listing = "unlisted";
+  assert.match(w.gcwStep4Html(d), /<option value="unlisted" selected>/);
+  assert.match(w.gcwStep5Html(d), /Unlisted \(direct link only\)/);
 });
 
 test("Registration/Giveaway payload: channel subscription carries the channel_username under telegram", async () => {

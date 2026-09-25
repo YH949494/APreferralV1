@@ -1779,6 +1779,13 @@
                   <label style="font-size:12px;display:flex;align-items:center;gap:6px;"><input type="checkbox" id="cr-cfg-enabled" /> Registration enabled</label>
                   <label style="font-size:12px;display:flex;align-items:center;gap:6px;"><input type="checkbox" id="cr-cfg-miniapp-visible" checked /> Mini App visibility</label>
                   <label style="font-size:12px;display:flex;align-items:center;gap:6px;"><input type="checkbox" id="cr-cfg-modal-enabled" checked /> Registration modal</label>
+                  <div>
+                    <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Discovery</label>
+                    <select class="filter-input" id="cr-cfg-listing" style="margin:0;width:100%;box-sizing:border-box;">
+                      <option value="listed">Listed — auto-prompted to every Mini App user once live</option>
+                      <option value="unlisted">Unlisted — direct link only (testing / targeted)</option>
+                    </select>
+                  </div>
                   <label style="font-size:12px;display:flex;align-items:center;gap:6px;"><input type="checkbox" id="cr-cfg-require-channel" /> Require official channel</label>
                   <div id="cr-cfg-channel-wrap" class="hidden" style="margin-top:2px;">
                     <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Channel username</label>

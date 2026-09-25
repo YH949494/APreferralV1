@@ -36,6 +36,7 @@ import re
 from datetime import datetime, timedelta, timezone
 
 from flask import Blueprint, Response, jsonify, request
+from pymongo.errors import DuplicateKeyError
 
 import database
 from time_utils import as_aware_utc
@@ -62,11 +63,22 @@ _FIELD_MIN_LEN = 1
 DEFAULT_REMINDER_HOURS = 24
 DEFAULT_BASE_ENTRIES = 1
 
-# Errors from subscription_gate._get_chat_member that mean "we could not
-# reach Telegram", never "confirmed not subscribed" — must not be shown to
-# the user as a subscription failure.
-_SUBSCRIPTION_SYSTEM_ERROR_PREFIXES = ("network_error", "http_", "rate_limited", "bad_json",
-                                       "max_attempts_exceeded", "missing_bot_token")
+# Discovery ("listing") of a registration campaign, independent of whether
+# it is open for registration:
+#   * listed   — the historical behavior: once live, it is the campaign
+#                GET /api/campaign-registration/active returns to EVERY Mini
+#                App open (auto-opened modal / reminder banner), and it can
+#                appear in /api/campaigns/active.
+#   * unlisted — never returned by any public discovery/listing endpoint;
+#                reachable only through its direct link
+#                (t.me/<bot>?startapp=campaign_<id>) — for testing or
+#                targeted distribution.
+# A stored config without the key (every campaign created before this
+# existed) resolves to "listed", so existing campaigns keep behaving exactly
+# as before until an admin explicitly changes them.
+LISTING_LISTED = "listed"
+LISTING_UNLISTED = "unlisted"
+LISTING_VALUES = (LISTING_LISTED, LISTING_UNLISTED)
 
 
 def _ensure_indexes() -> None:
@@ -103,6 +115,7 @@ def default_registration_config() -> dict:
         "shipping": {"scope": "all", "regions": []},
         "require_channel_subscription": False,
         "base_entries": DEFAULT_BASE_ENTRIES,
+        "listing": LISTING_LISTED,
     }
 
 
@@ -143,6 +156,11 @@ def validate_registration_config(raw: dict | None, *, partial: bool = False) -> 
     cfg["require_channel_subscription"] = bool(
         raw.get("require_channel_subscription", cfg["require_channel_subscription"])
     )
+
+    listing = str(raw.get("listing", cfg["listing"]) or "").strip().lower()
+    if listing not in LISTING_VALUES:
+        return None, "invalid_listing"
+    cfg["listing"] = listing
 
     if "required_fields" in raw:
         fields = raw.get("required_fields") or []
@@ -218,17 +236,35 @@ def registration_is_open(campaign: dict, now: datetime | None = None) -> bool:
     return True
 
 
+def registration_listing(campaign: dict | None) -> str:
+    """LISTING_UNLISTED only when explicitly stored; anything else (including
+    a legacy config with no key) is LISTING_LISTED."""
+    raw = ((campaign or {}).get("registration") or {}).get("listing")
+    return LISTING_UNLISTED if raw == LISTING_UNLISTED else LISTING_LISTED
+
+
+def is_registration_unlisted(campaign: dict | None) -> bool:
+    return registration_listing(campaign) == LISTING_UNLISTED
+
+
 def find_active_registration_campaign(now: datetime | None = None) -> dict | None:
-    """The single campaign (highest priority) currently open for
-    registration, or None. A normal Mini App open with no active campaign
-    costs one indexed query and renders nothing."""
+    """The single LISTED campaign (highest priority) currently open for
+    registration, or None. This is the global discovery path: the Mini App
+    calls it on every open without any campaign reference and auto-prompts
+    the result, so an unlisted campaign must never be returned here — it is
+    reachable only by naming it (see _resolve_campaign_for_active). A normal
+    Mini App open with no active campaign costs one indexed query and
+    renders nothing."""
     now = now or datetime.now(timezone.utc)
     docs = database.db["gc_campaigns"].find(
-        {"status": "live", "registration.enabled": True, "registration.miniapp_visible": True},
+        {"status": "live", "registration.enabled": True, "registration.miniapp_visible": True,
+         "registration.listing": {"$ne": LISTING_UNLISTED}},
         sort=[("priority", -1), ("schedule.starts_at", 1)],
         limit=20,
     )
     for doc in docs:
+        if is_registration_unlisted(doc):
+            continue
         if registration_is_open(doc, now):
             return doc
     return None
@@ -237,6 +273,21 @@ def find_active_registration_campaign(now: datetime | None = None) -> dict | Non
 # ---------------------------------------------------------------------------
 # Registration / dismissal state helpers
 # ---------------------------------------------------------------------------
+
+def registration_doc_id(campaign_id: str, telegram_user_id: int) -> str:
+    return f"{campaign_id}:{int(telegram_user_id)}"
+
+
+def _config_base_entries(reg_cfg: dict) -> int:
+    """The validated config value (validate_registration_config bounds it to
+    0..1000); anything unreadable falls back to the default rather than
+    persisting a non-integer entry count."""
+    try:
+        value = int(reg_cfg.get("base_entries", DEFAULT_BASE_ENTRIES))
+    except (TypeError, ValueError):
+        return DEFAULT_BASE_ENTRIES
+    return value if 0 <= value <= 1000 else DEFAULT_BASE_ENTRIES
+
 
 def get_registration(campaign_id: str, telegram_user_id: int) -> dict | None:
     return database.db[REGISTRATIONS_COLLECTION].find_one(
@@ -268,19 +319,37 @@ def _validate_registration_fields(body: dict, required_fields: list[str]) -> tup
 
 
 def _subscription_check(campaign: dict, telegram_user_id: int) -> tuple[bool, str | None]:
-    """Returns (ok, error_code). error_code is only set for a genuine
-    blocking failure — a transient Telegram/network error is distinguished
-    from a confirmed non-subscription so callers never tell a user they are
-    "not subscribed" because of a system error."""
-    from subscription_gate import verify_campaign_subscription
+    """Returns (ok, error_code). Three outcomes, driven only by a live
+    server-side getChatMember call against the campaign's configured channel
+    for the initData-verified user id (never a client-supplied flag, never
+    the short-lived positive cache — registration is once per user, so it
+    always pays for one fresh check):
 
-    gate = verify_campaign_subscription(campaign, telegram_user_id)
-    if gate.get("subscribed"):
-        return True, None
-    reason = str(gate.get("reason") or "")
-    if gate.get("source") == "live" and reason.startswith(_SUBSCRIPTION_SYSTEM_ERROR_PREFIXES):
+      * confirmed member/administrator/creator  -> (True, None)
+      * confirmed left/kicked                   -> (False, "channel_subscription_required")
+      * anything else (timeout, 429, Telegram/API error, invalid response,
+        unknown status, missing channel/bot-token config)
+                                                -> (False, "subscription_check_failed")
+
+    Only an explicit ``state`` of not_member may tell a user to join the
+    channel; a result without a recognised state is treated as unverifiable."""
+    from subscription_gate import STATE_MEMBER, STATE_NOT_MEMBER, verify_campaign_subscription
+
+    try:
+        gate = verify_campaign_subscription(campaign, telegram_user_id, force_refresh=True)
+    except Exception:
+        logger.exception("[CAMPAIGN_REGISTRATION] subscription_check_raised campaign=%s uid=%s",
+                         campaign.get("campaign_id"), telegram_user_id)
         return False, "subscription_check_failed"
-    return False, "channel_subscription_required"
+    gate = gate or {}
+    state = gate.get("state")
+    if state == STATE_MEMBER and gate.get("subscribed"):
+        return True, None
+    if state == STATE_NOT_MEMBER:
+        return False, "channel_subscription_required"
+    logger.warning("[CAMPAIGN_REGISTRATION] subscription_unverifiable campaign=%s uid=%s reason=%s source=%s",
+                   campaign.get("campaign_id"), telegram_user_id, gate.get("reason"), gate.get("source"))
+    return False, "subscription_check_failed"
 
 
 def _serialize_registration(doc: dict) -> dict:
@@ -316,6 +385,7 @@ def _public_campaign_fields(campaign: dict) -> dict:
         # regardless of the stored setting (there is no other public field
         # that carries it).
         "modal_enabled": reg.get("modal_enabled", True) is not False,
+        "listing": registration_listing(campaign),
     }
 
 
@@ -345,7 +415,10 @@ def _resolve_campaign_for_active(campaign_ref: str | None) -> dict | None:
     lower-priority one must not silently open the other one (an
     authenticated user can only ever resolve a campaign that is itself
     currently open for registration — this is a navigation hint, not a
-    privilege escalation)."""
+    privilege escalation).
+
+    This named lookup is also the ONLY way an unlisted campaign is ever
+    resolved; the no-reference fallback below is listed-only."""
     if campaign_ref and _TELEGRAM_START_PARAM_SAFE.match(campaign_ref):
         from campaign_centre import get_campaign
 
@@ -403,16 +476,25 @@ def register_for_campaign(campaign_id: str):
     from campaign_centre import get_campaign, log_funnel_event
 
     campaign = get_campaign(campaign_id)
-    if not campaign or not registration_is_open(campaign):
+    if not campaign:
         return jsonify({"status": "error", "code": "registration_unavailable"}), 404
 
     # Idempotent retry: an already-successful registration for this user is
     # returned as a success, never a duplicate/error, so a client retry after
-    # a dropped response cannot surface a false failure.
+    # a dropped response cannot surface a false failure. Checked before the
+    # open/closed gate so a registrant still sees their own (unchanged) row
+    # after the campaign is paused/archived — this never writes anything.
     existing = get_registration(campaign_id, uid)
     if existing:
         return jsonify({"status": "ok", "already_registered": True,
                          "registration": _serialize_registration(existing)})
+
+    # New registrations only while live + enabled + miniapp_visible + inside
+    # the schedule window. Draft/scheduled/paused/ended/archived are all
+    # rejected here, listed or unlisted alike — "unlisted" only hides a
+    # campaign from discovery, it never opens a closed one.
+    if not registration_is_open(campaign):
+        return jsonify({"status": "error", "code": "registration_unavailable"}), 404
 
     body = request.get_json(force=True, silent=True) or {}
     reg_cfg = campaign.get("registration") or {}
@@ -444,9 +526,14 @@ def register_for_campaign(campaign_id: str):
         if sub_err == "subscription_check_failed":
             return jsonify({"status": "error", "code": "subscription_check_failed"}), 503
         if sub_err:
+            from subscription_gate import resolve_channel_chat_id
+
+            chat_id = resolve_channel_chat_id(campaign.get("telegram"))
+            channel_url = f"https://t.me/{chat_id[1:]}" if isinstance(chat_id, str) and chat_id.startswith("@") else ""
             return jsonify({
                 "status": "error", "code": "channel_subscription_required",
                 "channel_username": (campaign.get("telegram") or {}).get("channel_username", ""),
+                "channel_url": channel_url,
             }), 403
         channel_verified = ok
 
@@ -456,13 +543,27 @@ def register_for_campaign(campaign_id: str):
         username = ""
 
     now = datetime.now(timezone.utc)
+    # The registration row IS the base-entry ledger: there is no second
+    # collection or counter to keep in sync, so the entry grant and the
+    # registration commit together in one single-document insert (atomic in
+    # MongoDB) — a failed/rejected request can never leave a registration
+    # without its entries or entries without a registration. base_entries is
+    # snapshotted from the campaign config at insert time and never
+    # incremented afterwards.
+    #
+    # Deterministic _id: _id is always uniquely indexed, so exactly-once per
+    # (campaign_id, telegram_user_id) holds even if the secondary
+    # ux_campaign_registrations_campaign_user index failed to build
+    # (_ensure_indexes only logs on failure). Legacy rows keep their
+    # ObjectId; the compound unique index still covers them.
     doc = {
+        "_id": registration_doc_id(campaign_id, uid),
         "campaign_id": campaign_id,
         "telegram_user_id": uid,
         "telegram_username": username,
         **fields,
         "channel_verified": channel_verified,
-        "base_entries": reg_cfg.get("base_entries", DEFAULT_BASE_ENTRIES),
+        "base_entries": _config_base_entries(reg_cfg),
         "shipping_eligible": shipping_eligible,
         "status": "registered",
         "registered_at": now,
@@ -470,21 +571,34 @@ def register_for_campaign(campaign_id: str):
     }
     try:
         database.db[REGISTRATIONS_COLLECTION].insert_one(doc)
-    except Exception as exc:
-        if "duplicate" in str(exc).lower():
-            # A concurrent request won the race; the unique index is the
-            # authority, so this is a success from the caller's perspective.
-            existing = get_registration(campaign_id, uid)
+    except DuplicateKeyError:
+        # A concurrent/repeated request won the race; the unique index is
+        # the authority, so return the winner's row unchanged — never a
+        # second row, never a second entry grant.
+        existing = get_registration(campaign_id, uid)
+        if existing:
             return jsonify({"status": "ok", "already_registered": True,
-                             "registration": _serialize_registration(existing)}) if existing else \
-                (jsonify({"status": "error", "code": "internal_error"}), 500)
+                             "registration": _serialize_registration(existing)})
+        logger.error("[CAMPAIGN_REGISTRATION] duplicate_key_without_row campaign=%s uid=%s", campaign_id, uid)
+        return jsonify({"status": "error", "code": "internal_error"}), 500
+    except Exception:
         logger.exception("[CAMPAIGN_REGISTRATION] insert_failed")
         return jsonify({"status": "error", "code": "internal_error"}), 500
 
-    # Registering permanently clears any dismissal suppression state.
-    database.db[STATE_COLLECTION].delete_one({"campaign_id": campaign_id, "telegram_user_id": uid})
-
-    log_funnel_event("registration_completed", campaign_id=campaign_id, user_id=uid, source="miniapp")
+    # Post-commit side effects are best-effort: the registration (and its
+    # entries) is already durable, so a failure here must not turn a real
+    # success into a 500 the client would retry.
+    try:
+        # Registering permanently clears any dismissal suppression state.
+        database.db[STATE_COLLECTION].delete_one({"campaign_id": campaign_id, "telegram_user_id": uid})
+    except Exception:
+        logger.warning("[CAMPAIGN_REGISTRATION] dismissal_state_cleanup_failed campaign=%s uid=%s",
+                       campaign_id, uid, exc_info=True)
+    try:
+        log_funnel_event("registration_completed", campaign_id=campaign_id, user_id=uid, source="miniapp")
+    except Exception:
+        logger.warning("[CAMPAIGN_REGISTRATION] funnel_event_failed campaign=%s uid=%s",
+                       campaign_id, uid, exc_info=True)
 
     return jsonify({
         "status": "ok",
