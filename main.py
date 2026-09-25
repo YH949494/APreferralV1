@@ -65,7 +65,7 @@ from vouchers import (
 from admin_auth import admin_auth_bp, configure_admin_session
 from referral_rules import calc_referral_progress, REFERRAL_XP_PER_SUCCESS, REFERRAL_BONUS_INTERVAL, REFERRAL_BONUS_XP, build_public_referral_status
 from referral_ledger import with_not_invalidated
-from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots, evaluate_affiliate_simulated_ledgers, compute_affiliate_daily_kpi_yesterday, run_invitee_subscription_audit, reconcile_drop_statuses, post_growth_leaderboard_weekly, publish_weekly_referral_post, process_welcome_voucher_lifecycle, process_welcome_reminders, trigger_welcome_unlock_push, retry_pending_affiliate_milestone_congrats
+from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots, evaluate_affiliate_simulated_ledgers, compute_affiliate_daily_kpi_yesterday, run_invitee_subscription_audit, SUB_AUDIT_CADENCE_MINUTES, reconcile_drop_statuses, post_growth_leaderboard_weekly, publish_weekly_referral_post, process_welcome_voucher_lifecycle, process_welcome_reminders, trigger_welcome_unlock_push, retry_pending_affiliate_milestone_congrats
 from affiliate_dashboard_export import run_affiliate_dashboard_export_monthly_scheduled
 from referral_rate_limit import consume_referral_rate_limits
 from affiliate_leaderboard import (
@@ -982,6 +982,40 @@ def process_verification_queue_scheduled(batch_limit: int | None = None) -> None
     logger.info(
         "[SCHEDULER][VERIFY] done elapsed=%.2fs",
         time.time() - start_time,
+    )
+
+
+def subscription_audit_scheduled() -> None:
+    """Small recurring batch worker for subscription_cache
+    (scheduler.run_invitee_subscription_audit), run every
+    SUB_AUDIT_CADENCE_MINUTES — not a once-weekly sweep. Each call is bounded
+    to SUB_AUDIT_BATCH_SIZE Telegram calls and SUB_AUDIT_MAX_RUNTIME_SECONDS
+    wall-clock time, so it stays cheap regardless of total user population;
+    the lock TTL (600s) is comfortably above that bounded runtime but well
+    under the cadence, so a crashed worker's lock clears before the next
+    scheduled tick instead of blocking it.
+
+    Voucher-card channel gating (vouchers.py: get_cached_subscription /
+    get_channel_subscription_state) reads this cache only — this job is what
+    keeps it from going stale, so normal card rendering never needs a live
+    Telegram getChatMember call. The shared scheduler_locks collection makes
+    this safe if multiple Fly.io machines all fire the same trigger.
+    """
+    acquired, lock_doc = acquire_scheduler_lock("subscription_audit", ttl_seconds=600)
+    if not acquired:
+        logger.info(
+            "[SUB_AUDIT] lock_not_acquired owner=%s expires_in_s=%s",
+            (lock_doc or {}).get("owner"),
+            expires_in_seconds((lock_doc or {}).get("expireAt")),
+        )
+        return
+    logger.info("[SUB_AUDIT] scheduled_start")
+    start_time = time.time()
+    result = run_invitee_subscription_audit()
+    logger.info(
+        "[SUB_AUDIT] scheduled_done elapsed=%.2fs result=%s",
+        time.time() - start_time,
+        result,
     )
 
 
@@ -9825,7 +9859,33 @@ def run_worker():
     )
     logger.info("[MISSION_POOL][SCHEDULER_REGISTERED] interval_seconds=%s", mission_pool_interval)
 
-    # subscription audit disabled — subscription_cache refreshed via claim + check-in events
+    # Small recurring batch refresh of subscription_cache — every
+    # SUB_AUDIT_CADENCE_MINUTES (default 30), not once a week — so
+    # voucher-card channel gating (vouchers.py: get_cached_subscription)
+    # never needs a live Telegram getChatMember call during normal Mini App
+    # load, and a ~100K-member community's positive-cache backlog drains
+    # incrementally instead of in one large weekly sweep. See
+    # subscription_audit_scheduled() for the per-run bounds (batch size,
+    # runtime, 429 backoff) that keep each tick cheap regardless of
+    # population size. This scheduler.<job_key>.enabled toggle (default on)
+    # plus INVITEE_SUB_AUDIT_ENABLED inside run_invitee_subscription_audit()
+    # itself both gate this. BackgroundScheduler here uses the default
+    # in-memory jobstore (not persisted across restarts), so replacing the
+    # old once-weekly "subscription_audit_weekly" job id with this one on
+    # deploy is enough — there is no leftover job to separately remove.
+    scheduler.add_job(
+        _guarded_job("subscription_audit", subscription_audit_scheduled),
+        trigger="interval",
+        minutes=SUB_AUDIT_CADENCE_MINUTES,
+        next_run_time=datetime.now(timezone.utc) + timedelta(seconds=90),
+        id="subscription_audit_batch",
+        name="Channel Subscription Cache Batch Refresh",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+    logger.info("[SUB_AUDIT][SCHEDULER_REGISTERED] cadence_minutes=%s", SUB_AUDIT_CADENCE_MINUTES)
+
     try:
         reconcile_drop_statuses()
         logger.info("[DROP_STATUS] startup_reconcile_ok")
