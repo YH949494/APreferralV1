@@ -187,6 +187,45 @@ def test_stale_positive_cache_is_refreshed_without_recent_activity():
     assert doc["subscribed"] is False
 
 
+def test_stale_positive_cache_is_not_starved_by_large_referral_volume():
+    # Regression for the exact scenario a pre-deploy audit flagged: on a
+    # large community, recent-referral + recent-active-user volume alone can
+    # exceed MAX_INVITEE_SUB_CHECKS_PER_RUN every week. If those sources were
+    # scanned before the stale-positive-cache source, they could consume the
+    # entire per-run budget and starve it to zero forever, silently breaking
+    # the "positive cache gets refreshed before it goes stale" property this
+    # whole mechanism exists for. The stale-cache source must always get
+    # first claim on the budget.
+    db_ref = _fresh_db()
+    now = datetime(2026, 1, 8, 4, 30, tzinfo=timezone.utc)
+    stale_uid = 9292
+
+    db_ref.subscription_cache.insert_one({
+        "_id": f"sub:{stale_uid}",
+        "user_id": stale_uid,
+        "subscribed": True,
+        "checked_at": now - timedelta(days=7),
+        "expireAt": now + timedelta(days=7),
+    })
+    # Far more recent-referral candidates than the per-run budget.
+    for i in range(20):
+        db_ref.pending_referrals.insert_one({
+            "invitee_user_id": 10_000 + i,
+            "created_at_utc": now - timedelta(hours=1, minutes=i),
+        })
+
+    with mock.patch.object(scheduler, "MAX_INVITEE_SUB_CHECKS_PER_RUN", 3), \
+         mock.patch.object(scheduler.requests, "get", return_value=_Resp(200, _member_payload("member"))) as mocked_get:
+        result = scheduler.run_invitee_subscription_audit(now_utc_ts=now, db_ref=db_ref)
+
+    assert result["checked"] == 3
+    assert mocked_get.call_count == 3
+    # The stale positive entry must be among the (budget-limited) uids
+    # actually checked this run, not crowded out by the 20 referral rows.
+    doc = db_ref.subscription_cache.find_one({"_id": f"sub:{stale_uid}"})
+    assert _aware(doc["checked_at"]) == now
+
+
 def test_recently_checked_uid_is_skipped_not_rechecked():
     db_ref = _fresh_db()
     now = datetime(2026, 1, 8, 4, 30, tzinfo=timezone.utc)
