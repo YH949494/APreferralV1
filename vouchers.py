@@ -1,6 +1,7 @@
 from flask import Blueprint, request, jsonify, current_app, has_app_context
 import logging
 import math
+import re
 from pymongo import ASCENDING, DESCENDING, ReturnDocument
 from pymongo.errors import OperationFailure, PyMongoError, DuplicateKeyError, BulkWriteError
 from bson.objectid import ObjectId
@@ -1783,6 +1784,8 @@ def load_user_context(*, uid=None, username: str | None = None, username_lower: 
         "user_id": uid_int,
         "usernameLower": username_lower,
         "status": "",
+        "vip_tier": "",
+        "vip_month": "",
         "region": "",
         "monthly_xp": 0,
         "weekly_xp": 0,
@@ -1794,6 +1797,8 @@ def load_user_context(*, uid=None, username: str | None = None, username_lower: 
             "user_id": doc.get("user_id", ctx["user_id"]),
             "usernameLower": norm_username(doc.get("usernameLower") or doc.get("username") or ctx["usernameLower"]),
             "status": doc.get("status", ctx["status"]),
+            "vip_tier": doc.get("vip_tier", ctx["vip_tier"]),
+            "vip_month": doc.get("vip_month", ctx["vip_month"]),
             "region": doc.get("region", ctx["region"]),
             "monthly_xp": doc.get("monthly_xp", ctx["monthly_xp"]),
             "weekly_xp": doc.get("weekly_xp", ctx["weekly_xp"]),
@@ -2218,7 +2223,19 @@ def _acquire_request_dedup_lock(*, drop_id: str, uid: int | None, ttl_seconds: i
         upsert=True,
         return_document=ReturnDocument.BEFORE,
     )
-    return existing is None
+    if existing is None:
+        return True
+    # Mongo's TTL monitor only sweeps every ~60s, so an expired lock can linger
+    # far past ttl_seconds; honour expiresAt ourselves. Compare-and-swap on the
+    # stored expiresAt so only one concurrent retry wins the takeover.
+    existing_expires = _as_aware_utc(existing.get("expiresAt"))
+    if existing_expires and existing_expires > now:
+        return False
+    taken = request_dedup_col.update_one(
+        {"_id": dedup_key, "expiresAt": existing.get("expiresAt")},
+        {"$set": {"createdAt": now, "expiresAt": now + timedelta(seconds=ttl_seconds)}},
+    )
+    return taken.modified_count == 1
 
 
 def _parse_ipv4(value: str) -> list[int] | None:
@@ -4380,8 +4397,7 @@ def is_drop_allowed(drop: dict, tg_uid, tg_uname_lower: str, user_ctx: dict | No
         return True
 
     statuses = audience.get("statuses") or []
-    user_status = user_ctx.get("status") or ""
-    if statuses and user_status not in statuses:
+    if statuses and not _user_tiers(user_ctx) & {_normalize_tier_value(s) for s in statuses}:
         print(f"[audience] blocked drop_id={drop_id} uid={uid} reason=statuses")
         return False
 
@@ -4433,11 +4449,14 @@ def is_user_eligible_for_drop(user_doc: dict, tg_user: dict, drop: dict) -> bool
 
     user_region = (user_doc or {}).get("region")
     user_status = (user_doc or {}).get("status") or ""
+    user_vip_tier = (user_doc or {}).get("vip_tier") or ""
+    user_vip_month = (user_doc or {}).get("vip_month") or ""
 
     def _log(result: bool, reason: str):
         print(
             f"[elig] drop={drop_id} mode={mode} uid={uid} "
-            f"region={user_region} status={user_status} => "
+            f"region={user_region} status={user_status} "
+            f"vip_tier={user_vip_tier} vip_month={user_vip_month} => "
             f"{'allow' if result else 'deny'} reason={reason}"
         )
 
@@ -4469,7 +4488,7 @@ def is_user_eligible_for_drop(user_doc: dict, tg_user: dict, drop: dict) -> bool
             norm = _normalize_tier_value(item)
             if norm:
                 normalized_allow.append(norm)
-        if not normalized_allow or _normalize_tier_value(user_status) not in normalized_allow:
+        if not normalized_allow or not _user_tiers(user_doc) & set(normalized_allow):
             _log(False, "tier_mismatch")
             return False
     elif mode == "user_id":
@@ -4513,9 +4532,35 @@ def _extract_admin_secret() -> str:
 
     return ""
 
+# The only VIP tier the monthly job/onboarding ever write is "VIP1"; Campaign
+# Builder's VIP audience historically compiled allow=["VIP"], which matched
+# nobody. Map that alias (and "VIP 1"/"VIP-1" spellings) onto VIP1.
+_TIER_ALIASES = {"VIP": "VIP1"}
+
+
 def _normalize_tier_value(value) -> str:
-    # Tier normalization is intentionally strict and minimal: trim + uppercase only.
-    return (str(value) if value is not None else "").strip().upper()
+    # Trim + uppercase, drop inner spacing/separators, then canonicalize aliases.
+    raw = (str(value) if value is not None else "").strip().upper()
+    raw = re.sub(r"[\s_\-]+", "", raw)
+    return _TIER_ALIASES.get(raw, raw)
+
+
+def _user_tiers(user_doc: dict | None) -> set:
+    """Normalized tiers a user currently holds.
+
+    users.status is authoritative. users.vip_tier (what the Mini App crown
+    shows) also counts, but only when vip_month is the current KL month, so a
+    stale vip_tier from a previous month can never grant tier access.
+    """
+    doc = user_doc or {}
+    tiers = set()
+    status = _normalize_tier_value(doc.get("status"))
+    if status:
+        tiers.add(status)
+    vip_tier = _normalize_tier_value(doc.get("vip_tier"))
+    if vip_tier and str(doc.get("vip_month") or "") == now_kl().strftime("%Y-%m"):
+        tiers.add(vip_tier)
+    return tiers
 
 
 def _normalize_codes(codes):
@@ -6440,6 +6485,24 @@ def api_claim():
             client_subnet,
         )
  
+    # Owner re-tap (lost response, double tap, reopened app): hand back the
+    # already-issued code before the subscription / sold-out / cooldown gates,
+    # which would otherwise render a successful claim as a failure.
+    if not check_only:
+        existing_claim = _find_existing_claim_for_drop(drop_id=_coerce_id(drop_id), telegram_uid=uid, internal_user_id=user_id)
+        idempotent_payload = _build_idempotent_claim_response(existing_claim, enforce_welcome_visibility=_is_new_joiner_audience(audience_type), ref=now_utc())
+        if idempotent_payload:
+            guide_payload = _welcome_claim_guide_payload(audience_type)
+            if guide_payload:
+                idempotent_payload["claim_guide"] = guide_payload
+            idempotent_payload["platform_finder"] = _platform_finder_payload(user_region)
+            current_app.logger.info(
+                "[claim][IDEMPOTENT_RETURN] drop=%s uid=%s",
+                drop_id,
+                uid,
+            )
+            return jsonify(idempotent_payload), 200
+
     if is_pool_drop and not _is_new_joiner_audience(audience_type):
         sub_state = get_channel_subscription_state(uid)
         sub_state_value = sub_state.get("state")
@@ -6580,20 +6643,6 @@ def api_claim():
     if claim_user_id is None:
         return jsonify({"status": "error", "code": "not_eligible", "reason": "missing_uid"}), 403
     pooled_claim_key = f"uid:{claim_user_id}"
-    existing_claim = _find_existing_claim_for_drop(drop_id=claim_drop_id, telegram_uid=uid, internal_user_id=user_id)
-    idempotent_payload = _build_idempotent_claim_response(existing_claim, enforce_welcome_visibility=_is_new_joiner_audience(audience_type), ref=now_utc())
-    if idempotent_payload:
-        guide_payload = _welcome_claim_guide_payload(audience_type)
-        if guide_payload:
-            idempotent_payload["claim_guide"] = guide_payload
-        idempotent_payload["platform_finder"] = _platform_finder_payload(user_region)
-        current_app.logger.info(
-            "[claim][IDEMPOTENT_RETURN] drop=%s uid=%s code=%s",
-            drop_id,
-            uid,
-            (existing_claim or {}).get("voucher_code"),
-        )
-        return jsonify(idempotent_payload), 200
 
     kill_ok, kill_reason, kill_retry = _check_kill_switch(
         ip=client_ip,

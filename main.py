@@ -8118,6 +8118,31 @@ def apply_monthly_tier_update(run_time: datetime | None = None, run_id: str | No
         if isinstance(value, str):
             return tier_rank.get(value, 0)
         return 0    
+    # The tier for month M is earned by XP in month M-1. Sum it from the
+    # immutable xp_events ledger rather than live users.monthly_xp: this job
+    # fires at 00:00 KL on the 1st, the same instant tick_5min's XP snapshot
+    # rolls monthly_xp to 0, and the snapshot also lags up to 5 min behind the
+    # ledger — either way genuine VIP1 users were read as 0 XP and demoted.
+    prev_start_local = (start_local - timedelta(days=1)).replace(day=1)
+    prev_start_utc = prev_start_local.astimezone(timezone.utc)
+    prev_end_utc = start_utc
+
+    def _prev_month_ledger_xp(uids: list) -> dict:
+        if not uids:
+            return {}
+        in_uids = {"$in": uids}
+        pipeline = [
+            {"$match": {
+                "invalidated": {"$ne": True},
+                "$or": [
+                    {"user_id": in_uids, "created_at": {"$gte": prev_start_utc, "$lt": prev_end_utc}},
+                    {"user_id": in_uids, "created_at": {"$exists": False}, "ts": {"$gte": prev_start_utc, "$lt": prev_end_utc}},
+                ],
+            }},
+            {"$group": {"_id": "$user_id", "xp": {"$sum": "$xp"}}},
+        ]
+        return {row["_id"]: int(row.get("xp") or 0) for row in xp_events_collection.aggregate(pipeline)}
+
     def iter_users_paged(projection: dict, batch_size: int = 500, start_after=None):
         last_id = start_after
         while True:
@@ -8129,8 +8154,9 @@ def apply_monthly_tier_update(run_time: datetime | None = None, run_id: str | No
             )
             if not batch:
                 break
+            ledger_xp = _prev_month_ledger_xp([d.get("user_id") for d in batch if d.get("user_id") is not None])
             for doc in batch:
-                yield doc
+                yield doc, ledger_xp.get(doc.get("user_id"), 0)
             last_id = batch[-1].get("_id")
 
     projection = {
@@ -8143,8 +8169,11 @@ def apply_monthly_tier_update(run_time: datetime | None = None, run_id: str | No
     }
     batch_size = 500
     cache_key = "vip_monthly:last_id"
-    cached_state = admin_cache_col.find_one({"_id": cache_key}, {"last_id": 1}) or {}
-    last_id = cached_state.get("last_id")
+    cached_state = admin_cache_col.find_one({"_id": cache_key}, {"last_id": 1, "month": 1}) or {}
+    # Only resume a cursor left by an interrupted run for THIS month; a stale
+    # cursor from an earlier failed month would silently skip every user
+    # before it and leave their tier stale.
+    last_id = cached_state.get("last_id") if cached_state.get("month") == month_key else None
     retries = 0
     batch_processed = 0
 
@@ -8153,13 +8182,11 @@ def apply_monthly_tier_update(run_time: datetime | None = None, run_id: str | No
         with JobTimer() as total_timer:
             while retries < 3:
                 try:
-                    for user in iter_users_paged(projection, batch_size=batch_size, start_after=last_id):
+                    for user, monthly_total in iter_users_paged(projection, batch_size=batch_size, start_after=last_id):
                         uid = user.get("user_id")
                         if uid is None:
                             continue
                         last_id = user.get("_id")
-                        monthly_total = int(user.get("monthly_xp", 0))
-                        # monthly_xp derived from snapshot ledger settles
                         computed_tier = _tier_from_monthly_xp(monthly_total)
                         current_status = user.get("status", "Normal")
                         existing_month = user.get("vip_month")
@@ -8223,7 +8250,6 @@ def apply_monthly_tier_update(run_time: datetime | None = None, run_id: str | No
                                 "$set": {
                                     "status": final_tier,
                                     "last_status_update": run_at_local,
-                                    "monthly_xp": monthly_total,
                                     "vip_month": month_key,
                                     "vip_tier": final_tier,
                                     "vip_updated_at": now_utc,
@@ -8251,7 +8277,7 @@ def apply_monthly_tier_update(run_time: datetime | None = None, run_id: str | No
                             )
                             admin_cache_col.update_one(
                                 {"_id": cache_key},
-                                {"$set": {"last_id": last_id, "updated_at": now_utc}},
+                                {"$set": {"last_id": last_id, "month": month_key, "updated_at": now_utc}},
                                 upsert=True,
                             )
                             batch_processed = 0
@@ -8271,7 +8297,7 @@ def apply_monthly_tier_update(run_time: datetime | None = None, run_id: str | No
                         )
                         admin_cache_col.update_one(
                             {"_id": cache_key},
-                            {"$set": {"last_id": last_id, "updated_at": now_utc}},
+                            {"$set": {"last_id": last_id, "month": month_key, "updated_at": now_utc}},
                             upsert=True,
                         )
                     admin_cache_col.delete_one({"_id": cache_key})
@@ -8294,7 +8320,7 @@ def apply_monthly_tier_update(run_time: datetime | None = None, run_id: str | No
                     if last_id is not None:
                         admin_cache_col.update_one(
                             {"_id": cache_key},
-                            {"$set": {"last_id": last_id, "updated_at": now_utc}},
+                            {"$set": {"last_id": last_id, "month": month_key, "updated_at": now_utc}},
                             upsert=True,
                         )
                     if retries >= 3:
