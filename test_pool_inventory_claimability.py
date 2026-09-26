@@ -277,3 +277,45 @@ class TestSuccessfulRetryClearsStaleInventoryFlagOnly:
 
         assert retried["status"] == "ISSUED"
         assert "pool_empty" not in (retried.get("risk_flags") or [])
+
+
+class TestLegacyAllocationScopeExcludedFromClaimableCount:
+    """_available_pool_count's legacy-fallback branch must apply the same
+    allocation_scope exclusion _claim_legacy_voucher already enforces —
+    otherwise a pool holding only Campaign-Centre-owned rows (allocation_scope
+    campaign_rewards/welcome_rewards/etc.) can report nonzero claimable
+    inventory that every actual claim attempt then rejects.
+    """
+
+    def test_non_affiliate_scoped_rows_are_not_claimable(self):
+        db = _db()
+        for i in range(5):
+            db.voucher_pools.insert_one({
+                "pool_id": "T3", "code": f"CAMPAIGN-{i}", "status": "available",
+                "allocation_scope": "campaign_rewards",
+            })
+
+        inv = ar.get_claimable_pool_inventory(db, pool_id="T3", now_utc=AUG_MID)
+
+        assert inv["raw_available"] == 5
+        assert inv["claimable_available"] == 0
+        assert inv["blocking_reason"] == "pool_empty"
+
+        voucher = ar._claim_voucher_from_pool(
+            db, pool_id="T3", ledger_id="dummy", user_id=1, now_utc=AUG_MID,
+        )
+        assert voucher is None
+
+    def test_mixed_scope_counts_only_affiliate_eligible_rows(self):
+        db = _db()
+        _legacy_stock(db, "T3", ["A1", "A2"])
+        db.voucher_pools.insert_one({
+            "pool_id": "T3", "code": "CAMPAIGN-1", "status": "available",
+            "allocation_scope": "campaign_rewards",
+        })
+
+        inv = ar.get_claimable_pool_inventory(db, pool_id="T3", now_utc=AUG_MID)
+
+        assert inv["raw_available"] == 3
+        assert inv["claimable_available"] == 2
+        assert inv["blocking_reason"] is None
