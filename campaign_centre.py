@@ -457,7 +457,15 @@ def _validate_body(
     if "registration" in body:
         import campaign_registration
 
-        registration, code = campaign_registration.validate_registration_config(body.get("registration"))
+        raw_registration = body.get("registration")
+        # `listing` is carried over from the stored block when a save omits
+        # it (e.g. an Admin Dashboard build cached from before the field
+        # existed): the block is otherwise rebuilt from defaults, which would
+        # silently flip an explicitly unlisted campaign back to listed.
+        if (isinstance(raw_registration, dict) and "listing" not in raw_registration
+                and existing is not None and (existing.get("registration") or {}).get("listing")):
+            raw_registration = {**raw_registration, "listing": existing["registration"]["listing"]}
+        registration, code = campaign_registration.validate_registration_config(raw_registration)
         if code:
             return None, code
         updates["registration"] = registration
@@ -1154,12 +1162,20 @@ def preview_campaign(campaign_id: str):
         badges.append("provider_base_url_required")
 
     log_funnel_event("campaign_previewed", campaign_id=campaign_id, campaign_type=doc.get("type"), source="admin")
-    return jsonify({
+    response = {
         "status": "ok",
         "card": card,
         "admin_badges": badges,
         "effective_visibility": explanation,
-    })
+    }
+    if (doc.get("registration") or {}).get("enabled"):
+        # Informational, never a visibility "reason": an unlisted campaign
+        # is still fully open through its direct link, it just is not
+        # auto-prompted to every Mini App user.
+        import campaign_registration
+
+        response["registration_listing"] = campaign_registration.registration_listing(doc)
+    return jsonify(response)
 
 
 # ---------------------------------------------------------------------------
@@ -1195,13 +1211,24 @@ def list_active_campaigns():
                 "status": "live",
                 "type": {"$in": CAMPAIGN_TYPES},
                 "$or": [{"mechanic": {"$exists": False}}, {"mechanic": "standard_drop"}],
+                # Excluded in the query (not only post-filtered below) so
+                # unlisted campaigns can never consume the limit and push
+                # lower-priority listed ones out of the list.
+                "registration.listing": {"$ne": "unlisted"},
             },
             sort=[("priority", -1), ("schedule.starts_at", 1)],
             limit=50,
         )
     )
+    import campaign_registration
+
     active = []
     for d in docs:
+        # An unlisted registration campaign is reachable only by its direct
+        # link — never a public card, even if it also has a ready
+        # destination.
+        if campaign_registration.is_registration_unlisted(d):
+            continue
         provider = get_provider((d.get("destination") or {}).get("provider_id") or "")
         if is_publicly_active(d, provider, now):
             active.append(_public_card(d))

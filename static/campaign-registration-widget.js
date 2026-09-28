@@ -391,6 +391,22 @@
         }
         msg.className = "cr-msg cr-msg-error";
         msg.textContent = errorText(code);
+        // Only a server-CONFIRMED non-member gets a join link; an
+        // unverifiable check (subscription_check_failed) is a retry, never
+        // a "you're not subscribed".
+        if (code === "channel_subscription_required" && typeof data.channel_url === "string" &&
+            data.channel_url.indexOf("https://t.me/") === 0) {
+          msg.appendChild(document.createTextNode(" "));
+          var joinLink = el("a", { href: data.channel_url, target: "_blank", rel: "noopener", text: "Join channel" });
+          joinLink.addEventListener("click", function (e) {
+            var tg = tgApp();
+            if (tg && typeof tg.openTelegramLink === "function") {
+              e.preventDefault();
+              try { tg.openTelegramLink(data.channel_url); } catch (err) {}
+            }
+          });
+          msg.appendChild(joinLink);
+        }
         msg.style.display = "block";
         submitBtn.disabled = false;
         submitBtn.textContent = submitLabelFor(view);

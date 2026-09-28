@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import os
 import random
+import re
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -26,6 +27,19 @@ logger = logging.getLogger(__name__)
 
 SUBSCRIBED_STATUSES = {"member", "administrator", "creator"}
 NOT_SUBSCRIBED_STATUSES = {"left", "kicked", "restricted"}
+
+# Tri-state membership outcome carried on every verify_campaign_subscription
+# result as ``state``. Only STATE_NOT_MEMBER is a positive Telegram
+# confirmation that the user is outside the channel; every ambiguous case
+# (missing config, network error, 429, non-200, bad JSON, unknown status)
+# is STATE_UNAVAILABLE so callers never tell a user "not subscribed" because
+# Telegram (or our own config) failed.
+STATE_MEMBER = "member"
+STATE_NOT_MEMBER = "not_member"
+STATE_UNAVAILABLE = "unavailable"
+
+_CHANNEL_USERNAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{3,31}$")
+_CHANNEL_LINK_PREFIXES = ("https://", "http://", "t.me/", "telegram.me/")
 
 DEFAULT_CACHE_TTL_S = int(os.getenv("CAMPAIGN_SUBSCRIPTION_CACHE_TTL_S", "300"))
 
@@ -88,8 +102,74 @@ def _log_event(*, campaign_id: str, user_id: int, channel_id, result: str, tg_st
     )
 
 
-def _get_chat_member(channel_id, user_id: int) -> tuple[str | None, str | None]:
-    """Returns (status, error). Handles 429 with bounded retries."""
+def resolve_channel_chat_id(telegram_cfg: dict | None):
+    """The ``chat_id`` to send to getChatMember for a campaign's telegram
+    block, or None when nothing usable is configured.
+
+    A numeric ``channel_id`` wins. Otherwise ``channel_username`` is
+    normalized to Telegram's ``@username`` form: the admin wizard stores it
+    bare (placeholder "mychannel"), and Telegram rejects a bare username
+    with HTTP 400 "chat not found" — which previously surfaced to every user
+    as "We couldn't verify your channel subscription". A pasted t.me link or
+    a leading "@" is accepted too."""
+    telegram_cfg = telegram_cfg or {}
+    channel_id = telegram_cfg.get("channel_id")
+    if isinstance(channel_id, int) and not isinstance(channel_id, bool) and channel_id:
+        return channel_id
+    if isinstance(channel_id, str) and channel_id.strip():
+        raw_id = channel_id.strip()
+        if raw_id.lstrip("-").isdigit():
+            return raw_id
+        # A username typed into the id field — normalize it like one.
+        return _normalize_channel_username(raw_id)
+    return _normalize_channel_username(telegram_cfg.get("channel_username"))
+
+
+def public_channel_url(telegram_cfg: dict | None) -> str:
+    """A t.me join link for the channel, or "" when no public username is
+    configured. Independent of resolve_channel_chat_id(), which prefers a
+    numeric channel_id for verification — a numeric id has no public link,
+    but the sibling channel_username still does."""
+    telegram_cfg = telegram_cfg or {}
+    for raw in (telegram_cfg.get("channel_username"), telegram_cfg.get("channel_id")):
+        if isinstance(raw, str):
+            name = _normalize_channel_username(raw)
+            if name:
+                return f"https://t.me/{name[1:]}"
+    return ""
+
+
+def _normalize_channel_username(raw) -> str | None:
+    name = str(raw or "").strip()
+    lowered = name.lower()
+    for prefix in _CHANNEL_LINK_PREFIXES:
+        if lowered.startswith(prefix):
+            name = name[len(prefix):]
+            lowered = name.lower()
+    name = name.lstrip("@").split("/", 1)[0].split("?", 1)[0].strip()
+    if not _CHANNEL_USERNAME_RE.match(name):
+        return None
+    return "@" + name
+
+
+def _classify_member(member: dict | None) -> str:
+    """Maps a getChatMember ``result`` object to a tri-state outcome.
+    ``restricted`` is a real member unless Telegram says ``is_member`` is
+    false (a restricted user who has since left the chat)."""
+    member = member or {}
+    status = member.get("status")
+    if status in SUBSCRIBED_STATUSES:
+        return STATE_MEMBER
+    if status == "restricted":
+        return STATE_MEMBER if member.get("is_member") is True else STATE_NOT_MEMBER
+    if status in ("left", "kicked"):
+        return STATE_NOT_MEMBER
+    return STATE_UNAVAILABLE
+
+
+def _get_chat_member_result(channel_id, user_id: int) -> tuple[dict | None, str | None]:
+    """Returns (getChatMember result object, error). Handles 429 with
+    bounded retries."""
     token = os.environ.get("BOT_TOKEN", "")
     if not token:
         return None, "missing_bot_token"
@@ -114,14 +194,29 @@ def _get_chat_member(channel_id, user_id: int) -> tuple[str | None, str | None]:
             continue
 
         if resp.status_code != 200:
-            return None, f"http_{resp.status_code}"
+            # Keep Telegram's description (e.g. "Bad Request: chat not
+            # found") on the logged reason — it is the only thing that tells
+            # a misconfigured channel apart from a Telegram outage.
+            description = ""
+            try:
+                body = resp.json()
+                if isinstance(body, dict):
+                    description = str(body.get("description") or "")[:120]
+            except Exception:
+                description = ""
+            return None, f"http_{resp.status_code}" + (f":{description}" if description else "")
         try:
             data = resp.json()
         except ValueError:
             return None, "bad_json"
+        if not isinstance(data, dict):
+            return None, "bad_json"
         if not data.get("ok"):
             return None, str(data.get("description") or "not_ok")
-        return (data.get("result") or {}).get("status"), None
+        result = data.get("result")
+        if not isinstance(result, dict):
+            return None, "bad_json"
+        return result, None
 
     return None, "max_attempts_exceeded"
 
@@ -134,33 +229,41 @@ def verify_campaign_subscription(
 ) -> dict:
     """Confirm the given verified Telegram user id subscribes to a campaign's
     configured official channel. Returns a structured result dict; never
-    raises for transient Telegram errors (fails closed to not_subscribed)."""
+    raises for transient Telegram errors (fails closed to not_subscribed).
+
+    ``subscribed`` stays the pass/fail boolean existing callers use;
+    ``state`` (STATE_MEMBER / STATE_NOT_MEMBER / STATE_UNAVAILABLE) lets a
+    caller distinguish a confirmed non-member from "could not verify"."""
     campaign_id = campaign.get("campaign_id", "")
-    telegram_cfg = campaign.get("telegram") or {}
-    channel_id = telegram_cfg.get("channel_id") or telegram_cfg.get("channel_username")
+    channel_id = resolve_channel_chat_id(campaign.get("telegram"))
 
     if not channel_id:
-        return {"subscribed": False, "reason": "channel_not_configured", "source": "config"}
+        return {"subscribed": False, "state": STATE_UNAVAILABLE,
+                "reason": "channel_not_configured", "source": "config"}
 
     if not force_refresh:
         cached = _cache_get(channel_id, telegram_user_id)
         if cached is not None:
             _log_event(campaign_id=campaign_id, user_id=telegram_user_id, channel_id=channel_id,
                        result="pass" if cached else "fail", tg_status=None, source="cache", latency_ms=0)
-            return {"subscribed": cached, "reason": "cache", "source": "cache"}
+            return {"subscribed": cached, "state": STATE_MEMBER if cached else STATE_NOT_MEMBER,
+                    "reason": "cache", "source": "cache"}
 
     started = time.perf_counter()
-    status, error = _get_chat_member(channel_id, telegram_user_id)
+    member, error = _get_chat_member_result(channel_id, telegram_user_id)
     latency_ms = int((time.perf_counter() - started) * 1000)
+    status = (member or {}).get("status")
 
     if error:
         _log_event(campaign_id=campaign_id, user_id=telegram_user_id, channel_id=channel_id,
                    result="fail", tg_status=status, source="live", latency_ms=latency_ms, error=error)
-        return {"subscribed": False, "reason": error, "source": "live"}
+        return {"subscribed": False, "state": STATE_UNAVAILABLE, "reason": error, "source": "live"}
 
-    subscribed = status in SUBSCRIBED_STATUSES
+    state = _classify_member(member)
+    subscribed = state == STATE_MEMBER
     if subscribed:
         _cache_set(channel_id, telegram_user_id, True, DEFAULT_CACHE_TTL_S)
     _log_event(campaign_id=campaign_id, user_id=telegram_user_id, channel_id=channel_id,
-               result="pass" if subscribed else "fail", tg_status=status, source="live", latency_ms=latency_ms)
-    return {"subscribed": subscribed, "reason": status or "unknown", "source": "live"}
+               result="pass" if subscribed else "fail", tg_status=status, source="live", latency_ms=latency_ms,
+               error=None if state != STATE_UNAVAILABLE else f"unknown_status:{status}")
+    return {"subscribed": subscribed, "state": state, "reason": status or "unknown", "source": "live"}
