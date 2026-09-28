@@ -121,7 +121,7 @@ def test_valid_authenticated_impression_is_recorded(fake_db):
     assert doc["selection_date_kl"] == selection["date_kl"]
     assert doc["tracking_key"] == selection["tracking_key"]
     assert doc["surface"] == lg.TRACKING_SURFACE
-    assert doc["destination"] == lg.LUCKY_GAME_DESTINATION_URL
+    assert doc["destination"] == "https://advantplay.com/"
     assert doc["created_at_utc"] is not None
 
 
@@ -166,6 +166,7 @@ def test_same_user_clicking_twice_creates_two_raw_clicks_but_one_unique_clicker(
     click_docs = list(fake_db[lg.EVENTS_COLLECTION].find({"event_type": "click"}))
     assert len(click_docs) == 2
     assert {d["user_id"] for d in click_docs} == {222}
+    assert {d["destination"] for d in click_docs} == {"https://advantplay.com/"}
 
 
 def test_different_users_count_as_distinct_clickers_and_viewers(fake_db):
