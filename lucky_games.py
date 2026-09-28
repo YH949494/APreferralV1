@@ -62,14 +62,10 @@ _EDITABLE_FIELDS = (
 # is_published, created_at/updated_at — never leaves this module.
 _PUBLIC_FIELDS = ("name", "label", "volatility", "max_win", "image_url", "game_url", "provider")
 
-# Click-tracking: the Lucky Game card always points at the same AdvantPlay
-# games page, tagged for attribution. Not admin-configurable — this is a
-# fixed marketing destination, not part of the per-game catalogue.
+# Click-tracking: the Lucky Game card points to the AdvantPlay homepage.
+# This fixed marketing destination is not part of the per-game catalogue.
 TRACKING_SURFACE = "miniapp_lucky_game"
-LUCKY_GAME_DESTINATION_URL = (
-    "https://advantplay.com/our-games.html"
-    "?utm_source=telegram&utm_medium=miniapp&utm_campaign=lucky_game"
-)
+LUCKY_GAME_DESTINATION_URL = "https://advantplay.com/"
 ALLOWED_TRACK_EVENTS = ("impression", "click")
 MAX_TRACKING_KEY_LEN = 200
 ANALYTICS_DEFAULT_DAYS = 7
