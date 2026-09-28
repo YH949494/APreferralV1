@@ -228,9 +228,10 @@ EARNED_SEP = datetime(2026, 9, 28, 4, 0, tzinfo=timezone.utc)   # 12:00 KL
 ISSUED_OCT = datetime(2026, 10, 5, 4, 0, tzinfo=timezone.utc)   # 12:00 KL
 
 
-def _seed_entitlement(fake_db, uid, tier_label, *, year_month, status="ISSUED", issued_at=None, voucher_code="AFFCODE"):
+def _seed_entitlement(fake_db, uid, tier_label, *, year_month, status="ISSUED", issued_at=None, voucher_code="AFFCODE", **extra):
     fake_db["affiliate_ledger"].insert_one(
         {
+            **extra,
             "ledger_type": "AFFILIATE_MONTHLY",
             "user_id": uid,
             "year_month": year_month,
@@ -256,7 +257,10 @@ def _capture_posts(monkeypatch):
 
 def test_previous_month_milestone_issued_next_month_announced_once(fake_db, monkeypatch):
     _seed_referrals(fake_db, 601, 10, now=EARNED_SEP)
-    _seed_entitlement(fake_db, 601, "T1", year_month="202609", status="PENDING_RETENTION", voucher_code=None)
+    _seed_entitlement(
+        fake_db, 601, "T1", year_month="202609", status="PENDING_RETENTION", voucher_code=None,
+        retention_required_seconds=7 * 86400,
+    )
     posts = _capture_posts(monkeypatch)
 
     # Sep 28: tier reached, but the reward is held for retention -> no post.
@@ -275,6 +279,7 @@ def test_previous_month_milestone_issued_next_month_announced_once(fake_db, monk
     assert "this month" not in posts[0]
     # September is closed: no "Next:" nudge toward an unreachable tier.
     assert "Next:" not in posts[0]
+    assert "Held the Official Channel for 7 days" in posts[0]
 
     claim = fake_db["referral_tier_congrats"].find_one({"user_id": 601, "tier": 10})
     assert claim["month_key"] == "2026-09-01"
@@ -333,3 +338,53 @@ def test_previous_month_rows_outside_late_window_are_not_swept(fake_db, monkeypa
 
     assert result == {"scanned": 0, "attempted": 0}
     assert posts == []
+
+
+@pytest.mark.parametrize(
+    "retention_seconds, expected",
+    [
+        (86400, "Held the Official Channel for 1 day to unlock it"),
+        (3 * 86400, "Held the Official Channel for 3 days to unlock it"),
+        (None, "Reward unlocked"),  # late for another reason (e.g. restock): no invented hold
+    ],
+)
+def test_late_announcement_quotes_the_ledgers_frozen_hold(fake_db, monkeypatch, retention_seconds, expected):
+    fake_db["users"].insert_one({"user_id": 605, "username": "user605"})
+    extra = {"retention_required_seconds": retention_seconds} if retention_seconds else {}
+    _seed_entitlement(fake_db, 605, "T1", year_month="202609", issued_at=ISSUED_OCT, **extra)
+    posts = _capture_posts(monkeypatch)
+
+    scheduler.retry_pending_affiliate_milestone_congrats(now_utc_ts=ISSUED_OCT)
+
+    assert len(posts) == 1
+    assert expected in posts[0]
+    if retention_seconds is None:
+        assert "Held the Official Channel" not in posts[0]
+
+
+def test_batch_limit_does_not_starve_behind_already_announced_rows(fake_db, monkeypatch):
+    # Announced rows stay ISSUED forever; if the limit were applied before
+    # dropping them, every run would get the same done prefix and a late
+    # previous-month row would age out of its window unannounced.
+    for uid in (606, 607, 608):
+        fake_db["users"].insert_one({"user_id": uid, "username": f"user{uid}"})
+        _seed_entitlement(fake_db, uid, "T1", year_month="202610", issued_at=ISSUED_OCT)
+    fake_db["users"].insert_one({"user_id": 609, "username": "user609"})
+    _seed_entitlement(fake_db, 609, "T1", year_month="202609", issued_at=ISSUED_OCT)
+    posts = _capture_posts(monkeypatch)
+
+    first = scheduler.retry_pending_affiliate_milestone_congrats(now_utc_ts=ISSUED_OCT, batch_limit=1)
+    # The expiring previous-month row goes first.
+    assert first["attempted"] == 1
+    assert "in September" in posts[0]
+
+    for _ in range(3):
+        scheduler.retry_pending_affiliate_milestone_congrats(now_utc_ts=ISSUED_OCT, batch_limit=1)
+    assert len(posts) == 4
+    assert fake_db["referral_tier_congrats"].count_documents({}) == 4
+
+    # Nothing left: a further run scans nothing and posts nothing.
+    assert scheduler.retry_pending_affiliate_milestone_congrats(now_utc_ts=ISSUED_OCT, batch_limit=1) == {
+        "scanned": 0, "attempted": 0,
+    }
+    assert len(posts) == 4

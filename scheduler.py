@@ -3522,6 +3522,7 @@ def _affiliate_ledger_issued_for_congrats(user_id: int, year_month: str, tier_la
             "entitlement_month": 1,
             "year_month": 1,
             "reward_plan": 1,
+            "retention_required_seconds": 1,
         },
     )
     if not ledger:
@@ -3535,6 +3536,27 @@ def _affiliate_ledger_issued_for_congrats(user_id: int, year_month: str, tier_la
         logger.warning("[AFF_CONGRATS][SKIP] uid=%s tier=%s reason=missing_voucher_code", user_id, tier_label)
         return None
     return ledger
+
+
+def _late_congrats_tail(retention_required_seconds) -> str:
+    """Tail for a milestone announced after its entitlement month closed.
+    Quotes the hold the ledger actually froze at creation (the retention
+    period is configurable and each entitlement keeps its own); a late row
+    with no retention hold (e.g. issued late after a restock) gets neutral
+    copy rather than an invented period."""
+    try:
+        seconds = int(retention_required_seconds or 0)
+    except (TypeError, ValueError):
+        seconds = 0
+    if seconds <= 0:
+        return "Reward unlocked 🔓"
+    if seconds % 86400 == 0:
+        days = seconds // 86400
+        period = f"{days} day{'s' if days != 1 else ''}"
+    else:
+        hours = max(1, round(seconds / 3600))
+        period = f"{hours} hour{'s' if hours != 1 else ''}"
+    return f"Held the Official Channel for {period} to unlock it 🔓"
 
 
 def _attempt_affiliate_milestone_congrats(
@@ -3634,7 +3656,7 @@ def _attempt_affiliate_milestone_congrats(
     elif is_late:
         # The entitlement month has closed, so the next tier can no longer
         # be reached in it — a "Next:" nudge would advertise a dead target.
-        tail = "Held the Official Channel for 7 days to unlock it 🔓"
+        tail = _late_congrats_tail(issued_ledger.get("retention_required_seconds"))
     else:
         next_tier, next_tier_label = REFERRAL_CONGRATS_TIER_THRESHOLDS[tier_idx + 1]
         # The NEXT milestone is earned in the same entitlement month, so it
@@ -3742,7 +3764,7 @@ def retry_pending_affiliate_milestone_congrats(now_utc_ts: datetime | None = Non
     voucher_by_threshold = dict(REFERRAL_CONGRATS_TIERS)
 
     scanned = attempted = 0
-    candidates = list(
+    issued_rows = list(
         db.affiliate_ledger.find(
             {
                 "ledger_type": "AFFILIATE_MONTHLY",
@@ -3755,6 +3777,35 @@ def retry_pending_affiliate_milestone_congrats(now_utc_ts: datetime | None = Non
             },
             projection={"user_id": 1, "tier": 1, "year_month": 1, "entitlement_month": 1},
         )
+    )
+    # Drop already-announced milestones BEFORE applying batch_limit: they
+    # stay ISSUED forever, so limiting first would hand every run the same
+    # done prefix and starve the rest — fatal for previous-month rows, which
+    # age out of the late window. One indexed read covers the whole set.
+    announced = set()
+    uids = sorted({int(r["user_id"]) for r in issued_rows if r.get("user_id") is not None})
+    if uids:
+        month_keys = [f"{ym[:4]}-{ym[4:]}-01" for ym in (year_month, previous_year_month)]
+        for row in db.referral_tier_congrats.find(
+            {"user_id": {"$in": uids}, "month_key": {"$in": month_keys}},
+            projection={"user_id": 1, "month_key": 1, "tier": 1},
+        ):
+            announced.add((row.get("user_id"), row.get("month_key"), row.get("tier")))
+
+    def _pending(ledger: dict) -> bool:
+        ym = str(ledger.get("year_month") or "")
+        uid = ledger.get("user_id")
+        key = (
+            int(uid) if uid is not None else None,
+            f"{ym[:4]}-{ym[4:]}-01",
+            threshold_by_tier.get(ledger.get("tier")),
+        )
+        return key not in announced
+
+    # Previous-month rows first: they are the ones on a clock.
+    candidates = sorted(
+        (r for r in issued_rows if _pending(r)),
+        key=lambda r: r.get("year_month") != previous_year_month,
     )[: max(1, int(batch_limit))]
     for ledger in candidates:
         scanned += 1
