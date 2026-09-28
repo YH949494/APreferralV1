@@ -1,7 +1,7 @@
 /**
  * Tests for the Lucky Game card's click/impression tracking (static/index.html)
  * — making the existing daily-pick tile (#daily-game-section) clickable to
- * https://advantplay.com/our-games.html with UTM params, plus best-effort,
+ * https://advantplay.com/, plus best-effort,
  * non-blocking, attribution-correct analytics.
  *
  * Two layers:
@@ -69,12 +69,12 @@ test("20. Enter/Space keyboard activation is wired on the card", () => {
   );
 });
 
-test("18. destination URL carries the required UTM parameters", () => {
+test("18. destination URL points to the AdvantPlay homepage", () => {
   const html = readHtml();
   assert.match(
     html,
-    /LUCKY_GAME_DESTINATION_URL\s*=\s*\n?\s*"https:\/\/advantplay\.com\/our-games\.html\?utm_source=telegram&utm_medium=miniapp&utm_campaign=lucky_game"/,
-    "destination URL must be the AdvantPlay games page tagged for miniapp/lucky_game attribution"
+    /LUCKY_GAME_DESTINATION_URL\s*=\s*\n?\s*"https:\/\/advantplay\.com\/"/,
+    "destination URL must be the AdvantPlay homepage"
   );
 });
 
@@ -188,7 +188,7 @@ test("9. handleLuckyGameClick() opens via Telegram.WebApp.openLink when availabl
   context.window.Telegram = { WebApp: { openLink: (url) => { opened = url; } } };
   context.handleLuckyGameClick();
   assert.ok(opened, "openLink should have been called");
-  assert.ok(opened.includes("advantplay.com/our-games.html"));
+  assert.ok(opened === "https://advantplay.com/");
   assert.equal(calls.opened.length, 0, "window.open fallback must not fire when openLink succeeded");
 });
 
@@ -196,7 +196,7 @@ test("9. falls back to window.open when Telegram.WebApp.openLink is unavailable"
   const { context, calls } = makeContext();
   context.handleLuckyGameClick();
   assert.equal(calls.opened.length, 1);
-  assert.ok(calls.opened[0].includes("advantplay.com/our-games.html"));
+  assert.ok(calls.opened[0] === "https://advantplay.com/");
 });
 
 test("21. one physical interaction cannot double-fire (re-entrancy guard)", () => {
