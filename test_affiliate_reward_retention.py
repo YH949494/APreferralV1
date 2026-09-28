@@ -120,9 +120,11 @@ class Checker:
     def __init__(self, state=rr.MEMBERSHIP_MEMBER, reason=None, retry_after=None):
         self.state, self.reason, self.retry_after = state, reason, retry_after
         self.calls = []
+        self.chats = []
 
-    def __call__(self, uid):
+    def __call__(self, uid, chat_id=None):
         self.calls.append(uid)
+        self.chats.append(chat_id)
         return self.state, self.reason, self.retry_after
 
 
@@ -132,23 +134,23 @@ def _run(db, at, checker=None, **kwargs):
     )
 
 
-def _leave(db, at, uid=UID):
+def _leave(db, at, uid=UID, chat_id=None):
     """What main.member_update_handler records on an Official Channel leave."""
     db.users.update_one(
         {"user_id": uid},
         {"$set": {"left_official_channel_at": at, "official_channel_currently_subscribed": False}},
         upsert=True,
     )
-    return rr.on_official_channel_leave(db, user_id=uid, event_at=at, now_utc=at)
+    return rr.on_official_channel_leave(db, user_id=uid, event_at=at, now_utc=at, chat_id=chat_id)
 
 
-def _rejoin(db, at, uid=UID, *, processed_at=None):
+def _rejoin(db, at, uid=UID, *, processed_at=None, chat_id=None):
     db.users.update_one(
         {"user_id": uid},
         {"$set": {"rejoined_official_channel_at": processed_at or at, "official_channel_currently_subscribed": True}},
         upsert=True,
     )
-    return rr.on_official_channel_join(db, user_id=uid, event_at=at, now_utc=processed_at or at)
+    return rr.on_official_channel_join(db, user_id=uid, event_at=at, now_utc=processed_at or at, chat_id=chat_id)
 
 
 # ---------------------------------------------------------------------------
@@ -665,7 +667,7 @@ class TestConcurrency:
         db = _LockedDb(raw)
         barrier = threading.Barrier(2, timeout=10)
 
-        def checker(uid):
+        def checker(uid, chat_id=None):
             barrier.wait()  # both workers have passed every pre-check
             return rr.MEMBERSHIP_MEMBER, None, None
 
@@ -775,6 +777,40 @@ class TestEventIdempotency:
         assert row["status"] == ar.RETENTION_PENDING_STATUS
         assert _aware(row["unlock_at"]) == SEP_28 + 13 * DAY
 
+    def test_stale_leave_delivered_after_rejoin_does_not_strand_the_reward(self):
+        """Codex P2: main.py stamps users.left_official_channel_at with
+        PROCESSING time, so a stale Day-5 leave delivered after the Day-6
+        rejoin leaves the users record saying "left" at Day 6+. The hook
+        ignores it on its event time and records that it adjudicated it, so
+        the users-record backstop must not re-judge it at unlock."""
+        db = _db()
+        _stock(db)
+        _user(db)
+        _earn(db, total=10)
+        _leave(db, SEP_28 + 5 * DAY)
+        _rejoin(db, SEP_28 + 6 * DAY)
+        processed = SEP_28 + 6 * DAY + timedelta(minutes=3)
+        db.users.update_one(
+            {"user_id": UID},
+            {"$set": {"left_official_channel_at": processed, "official_channel_currently_subscribed": False}},
+        )
+        rr.on_official_channel_leave(db, user_id=UID, event_at=SEP_28 + 5 * DAY, now_utc=processed)
+        assert _ledger(db, "T1")["status"] == ar.RETENTION_PENDING_STATUS
+        stats = _run(db, SEP_28 + 13 * DAY)
+        assert stats["issued"] == 1 and stats["broken"] == 0
+
+    def test_backstop_still_catches_a_leave_the_hook_never_saw(self):
+        db = _db()
+        _stock(db)
+        _user(db)
+        _earn(db, total=10)
+        _leave(db, SEP_28 + 2 * DAY)
+        _rejoin(db, SEP_28 + 3 * DAY)
+        # A later leave recorded only on the users doc (hook lost).
+        db.users.update_one({"user_id": UID}, {"$set": {"left_official_channel_at": SEP_28 + 8 * DAY}})
+        assert _run(db, SEP_28 + 10 * DAY, Checker())["issued"] == 0
+        assert _ledger(db, "T1")["status"] == ar.RETENTION_BROKEN_STATUS
+
     def test_join_during_open_window_restarts_it(self):
         # A became-member transition means the user was absent before it,
         # even if that leave was never recorded.
@@ -783,6 +819,66 @@ class TestEventIdempotency:
         _earn(db, total=10)
         _rejoin(db, SEP_28 + 6 * DAY)
         assert _aware(_ledger(db, "T1")["unlock_at"]) == SEP_28 + 13 * DAY
+
+
+# ---------------------------------------------------------------------------
+# Retention channel = the configured referral destination (Codex P1)
+# ---------------------------------------------------------------------------
+
+class TestRetentionChannel:
+    OVERRIDE = -1009990001
+
+    def _override(self, monkeypatch):
+        monkeypatch.setenv("REFERRAL_DESTINATION_MODE", "official_channel")
+        monkeypatch.setenv("REFERRAL_DESTINATION_CHAT_ID", str(self.OVERRIDE))
+
+    def test_override_destination_is_frozen_and_checked(self, monkeypatch):
+        self._override(monkeypatch)
+        db = _db()
+        _stock(db)
+        _user(db)
+        _earn(db, total=10)
+        assert _ledger(db, "T1")["retention_chat_id"] == self.OVERRIDE
+        # Config changing mid-window never moves an existing entitlement.
+        monkeypatch.delenv("REFERRAL_DESTINATION_CHAT_ID")
+        checker = Checker()
+        assert _run(db, SEP_28 + 7 * DAY, checker)["issued"] == 1
+        assert checker.chats == [self.OVERRIDE]
+
+    def test_default_destination_is_the_official_channel(self, monkeypatch):
+        import referral_destination
+
+        monkeypatch.delenv("REFERRAL_DESTINATION_CHAT_ID", raising=False)
+        monkeypatch.setenv("REFERRAL_DESTINATION_MODE", "community_group")
+        db = _db()
+        _user(db)
+        _earn(db, total=10)
+        assert _ledger(db, "T1")["retention_chat_id"] == referral_destination.OFFICIAL_CHANNEL_ID
+
+    def test_real_checker_queries_the_frozen_chat(self, telegram):
+        telegram["outcome"] = _Resp(200, {"ok": True, "result": {"status": "member"}})
+        assert rr.official_channel_membership_state(UID, self.OVERRIDE)[0] == rr.MEMBERSHIP_MEMBER
+        assert telegram["calls"][0][1]["chat_id"] == self.OVERRIDE
+
+    def test_leave_or_join_on_another_chat_never_moves_the_window(self, monkeypatch):
+        self._override(monkeypatch)
+        db = _db()
+        _stock(db)
+        _user(db)
+        _earn(db, total=10)
+        other = -1001234
+        assert _leave(db, SEP_28 + 2 * DAY, chat_id=other) == 0
+        assert _rejoin(db, SEP_28 + 3 * DAY, chat_id=other) == 0
+        row = _ledger(db, "T1")
+        assert row["status"] == ar.RETENTION_PENDING_STATUS
+        assert _aware(row["unlock_at"]) == SEP_28 + 7 * DAY
+        assert _run(db, SEP_28 + 7 * DAY)["issued"] == 1
+        # ...while a leave on the retention chat still breaks it.
+        db2 = _db()
+        _stock(db2)
+        _user(db2)
+        _earn(db2, total=10)
+        assert _leave(db2, SEP_28 + 2 * DAY, chat_id=self.OVERRIDE) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -804,7 +900,11 @@ class _NullLogger:
         return lambda *a, **k: None
 
 
-CHANNEL_ID, GROUP_ID = -100777, -100888
+# The handler's OFFICIAL_CHANNEL_ID is the same referral_destination constant
+# the entitlement freezes as its retention chat.
+import referral_destination  # noqa: E402
+
+CHANNEL_ID, GROUP_ID = referral_destination.OFFICIAL_CHANNEL_ID, -100888
 
 
 def _handler(db, clock):

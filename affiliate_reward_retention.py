@@ -136,18 +136,21 @@ def _required_seconds(ledger: dict) -> int:
 # Membership (tri-state)
 # ---------------------------------------------------------------------------
 
-def official_channel_membership_state(user_id: int) -> tuple[str, str | None, int | None]:
+def official_channel_membership_state(user_id: int, chat_id: int | None = None) -> tuple[str, str | None, int | None]:
     """``(state, reason, retry_after_seconds)`` from the canonical scheduler
-    getChatMember check. Only a definitive left/kicked is NOT_MEMBER; every
-    timeout, 429, 5xx, malformed/not-ok response, missing config or unknown
-    status is UNKNOWN — a Telegram failure must never cost a user their
-    retention streak."""
+    getChatMember check, against the entitlement's frozen ``chat_id`` (the
+    scheduler defaults to OFFICIAL_CHANNEL_ID when it is ``None``). Only a
+    definitive left/kicked is NOT_MEMBER; every timeout, 429, 5xx,
+    malformed/not-ok response, missing config or unknown status is UNKNOWN —
+    a Telegram failure must never cost a user their retention streak."""
     try:
         import scheduler
     except Exception as exc:  # pragma: no cover - import failure is environmental
         return MEMBERSHIP_UNKNOWN, f"checker_unavailable_{exc.__class__.__name__}", None
     try:
-        status = scheduler._get_official_channel_member_status(int(user_id))
+        status = scheduler._get_official_channel_member_status(
+            int(user_id), chat_id=int(chat_id) if chat_id is not None else None,
+        )
     except scheduler.ReferralRetryableError as exc:
         message = str(exc)
         if "rate_limited" in message:
@@ -173,7 +176,8 @@ def official_channel_membership_state(user_id: int) -> tuple[str, str | None, in
 # State transitions (every one is conditional on the exact state it read)
 # ---------------------------------------------------------------------------
 
-def _break_retention(db, ledger: dict, *, leave_at: datetime, reason: str, now_utc: datetime) -> bool:
+def _break_retention(db, ledger: dict, *, leave_at: datetime, reason: str, now_utc: datetime,
+                     extra_set: dict | None = None) -> bool:
     """PENDING_RETENTION -> RETENTION_BROKEN. The entitlement is kept (never
     REJECTED, no inventory touched); only a later rejoin restarts the window."""
     res = db.affiliate_ledger.update_one(
@@ -190,6 +194,7 @@ def _break_retention(db, ledger: dict, *, leave_at: datetime, reason: str, now_u
                 "retention_broken_reason": reason,
                 "retention_broken_at": now_utc,
                 "updated_at": now_utc,
+                **(extra_set or {}),
             },
             "$unset": {"retention_next_check_at": ""},
             "$inc": {"retention_break_count": 1},
@@ -255,39 +260,59 @@ def _held_rows_for_user(db, user_id: int) -> list[dict]:
 # Official Channel leave / rejoin hooks (called from main.member_update_handler)
 # ---------------------------------------------------------------------------
 
-def on_official_channel_leave(db, *, user_id: int, event_at=None, now_utc: datetime | None = None) -> int:
+def _for_retention_chat(row: dict, chat_id) -> bool:
+    """Whether a membership event on ``chat_id`` concerns this entitlement.
+    Rows without a frozen chat, or events without a chat id, always match."""
+    frozen = row.get("retention_chat_id")
+    return frozen is None or chat_id is None or int(frozen) == int(chat_id)
+
+
+def on_official_channel_leave(db, *, user_id: int, event_at=None, now_utc: datetime | None = None,
+                              chat_id: int | None = None) -> int:
     """Break every open retention window this leave falls inside.
 
+    ``now_utc`` must be the same instant main.member_update_handler just
+    wrote to ``users.left_official_channel_at``: it is recorded on every held
+    row as ``retention_leave_seen_at`` so the worker's users-record backstop
+    never re-judges a leave this hook already adjudicated (e.g. a stale
+    Day-5 leave delivered after the Day-6 rejoin, which is ignored here).
+
     Idempotent: a duplicate delivery finds the row already broken and at
-    most re-asserts the same ``last_leave_at``. A stale/out-of-order leave
-    that predates the current window (e.g. a Day-5 leave processed after the
-    Day-6 rejoin) is ignored. Returns the number of windows broken.
+    most re-asserts the same ``last_leave_at``. Returns windows broken.
     """
     now = _now(now_utc)
     ts = _event_ts(event_at, now)
     broken = 0
     for row in _held_rows_for_user(db, user_id):
+        seen = {"retention_leave_seen_at": now}
+        applies = _for_retention_chat(row, chat_id)
         if row.get("status") == RETENTION_PENDING_STATUS:
             start = _as_aware_utc(row.get("retention_started_at"))
-            if start is not None and ts < start:
+            if not applies or (start is not None and ts < start):
+                db.affiliate_ledger.update_one(
+                    {"_id": row["_id"], "status": RETENTION_PENDING_STATUS}, {"$set": seen},
+                )
                 continue
             logger.info(
                 "%s uid=%s tier=%s year_month=%s action=leave_detected leave_at=%s",
                 LOG_TAG, user_id, row.get("tier"), row.get("year_month"), ts.isoformat(),
             )
-            if _break_retention(db, row, leave_at=ts, reason="left_channel", now_utc=now):
+            if _break_retention(db, row, leave_at=ts, reason="left_channel", now_utc=now, extra_set=seen):
                 broken += 1
         else:
             last_leave = _as_aware_utc(row.get("last_leave_at"))
-            if last_leave is None or ts > last_leave:
-                db.affiliate_ledger.update_one(
-                    {"_id": row["_id"], "status": RETENTION_BROKEN_STATUS, "last_leave_at": row.get("last_leave_at")},
-                    {"$set": {"last_leave_at": ts, "updated_at": now}},
-                )
+            update = dict(seen)
+            if applies and (last_leave is None or ts > last_leave):
+                update.update({"last_leave_at": ts, "updated_at": now})
+            db.affiliate_ledger.update_one(
+                {"_id": row["_id"], "status": RETENTION_BROKEN_STATUS, "last_leave_at": row.get("last_leave_at")},
+                {"$set": update},
+            )
     return broken
 
 
-def on_official_channel_join(db, *, user_id: int, event_at=None, now_utc: datetime | None = None) -> int:
+def on_official_channel_join(db, *, user_id: int, event_at=None, now_utc: datetime | None = None,
+                             chat_id: int | None = None) -> int:
     """(Re)start the continuous window for every held entitlement.
 
     * RETENTION_BROKEN: restarts when the join is later than the recorded
@@ -307,6 +332,8 @@ def on_official_channel_join(db, *, user_id: int, event_at=None, now_utc: dateti
     ts = _event_ts(event_at, now)
     restarted = 0
     for row in _held_rows_for_user(db, user_id):
+        if not _for_retention_chat(row, chat_id):
+            continue
         start = _as_aware_utc(row.get("retention_started_at"))
         last_leave = _as_aware_utc(row.get("last_leave_at"))
         if row.get("status") == RETENTION_PENDING_STATUS:
@@ -337,12 +364,20 @@ def _retry_delay_seconds(failures: int, retry_after: int | None) -> int:
 
 
 def _recorded_leave_after(user_doc: dict, ledger: dict, start: datetime) -> datetime | None:
-    """A recorded Official Channel leave strictly after the window start,
-    from the canonical users record or the ledger's own hook-written field."""
-    for value in (user_doc.get("left_official_channel_at"), ledger.get("last_leave_at")):
-        leave_at = _as_aware_utc(value)
-        if leave_at is not None and leave_at > start:
-            return leave_at
+    """A recorded Official Channel leave strictly after the window start.
+
+    The ledger's own ``last_leave_at`` (Telegram event time, written by the
+    hook) always counts. The users record is a BACKSTOP for a leave the hook
+    never processed: it stores processing time, so it is only trusted when
+    it is newer than the last leave the hook adjudicated for this row
+    (``retention_leave_seen_at``, the same instant the handler wrote)."""
+    ledger_leave = _as_aware_utc(ledger.get("last_leave_at"))
+    if ledger_leave is not None and ledger_leave > start:
+        return ledger_leave
+    users_leave = _as_aware_utc(user_doc.get("left_official_channel_at"))
+    seen = _as_aware_utc(ledger.get("retention_leave_seen_at"))
+    if users_leave is not None and users_leave > start and (seen is None or users_leave > seen):
+        return users_leave
     return None
 
 
@@ -451,7 +486,7 @@ def _process_matured_row(db, row: dict, *, now_utc: datetime, checker, stats: di
         return
 
     # (2) Final live membership check.
-    state, reason, retry_after = checker(int(uid))
+    state, reason, retry_after = checker(int(uid), ledger.get("retention_chat_id"))
     if state == MEMBERSHIP_NOT_MEMBER:
         if _break_retention(db, ledger, leave_at=now_utc, reason=f"not_member_at_unlock_{reason}", now_utc=now_utc):
             stats["broken"] += 1
@@ -506,7 +541,9 @@ def _process_matured_row(db, row: dict, *, now_utc: datetime, checker, stats: di
 
     # Close the window between the history read above and the acquisition:
     # a leave the handler recorded in the meantime still wins.
-    late_leave = _recorded_leave_after(_membership_user_doc(db, uid), ledger, start)
+    late_leave = _recorded_leave_after(
+        _membership_user_doc(db, uid), db.affiliate_ledger.find_one({"_id": ledger["_id"]}) or ledger, start,
+    )
     if late_leave is not None and _revert_release(db, ledger["_id"], token=token, leave_at=late_leave, now_utc=now_utc):
         stats["broken"] += 1
         logger.info("%s uid=%s tier=%s action=retention_broken reason=leave_recorded_during_release", LOG_TAG, uid, tier)

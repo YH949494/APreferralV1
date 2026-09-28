@@ -128,6 +128,25 @@ def affiliate_retention_period() -> timedelta | None:
     return timedelta(days=days)
 
 
+def _retention_chat_id() -> int | None:
+    """The Official Channel an affiliate's retention is measured against —
+    the same chat ``main.member_update_handler`` treats as the official
+    channel: a ``REFERRAL_DESTINATION_CHAT_ID`` override when the referral
+    destination is an official channel, else ``OFFICIAL_CHANNEL_ID``.
+    Frozen on each entitlement so a later config change cannot move the
+    goalposts of a window already in progress."""
+    import referral_destination
+
+    try:
+        chat_id, dest_type = referral_destination.get_referral_destination()
+    except Exception:
+        chat_id, dest_type = None, None
+    if dest_type == referral_destination.OFFICIAL_CHANNEL and chat_id is not None:
+        return int(chat_id)
+    official = referral_destination.OFFICIAL_CHANNEL_ID
+    return int(official) if official is not None else None
+
+
 def _initial_retention_state(db, *, user_id: int, now_utc: datetime) -> dict | None:
     """Retention fields for a brand-new AFFILIATE_MONTHLY entitlement, or
     ``None`` when the gate is disabled (legacy immediate issuance).
@@ -148,6 +167,7 @@ def _initial_retention_state(db, *, user_id: int, now_utc: datetime) -> dict | N
         "earned_at": now_utc,
         "retention_started_at": now_utc,
         "retention_required_seconds": int(period.total_seconds()),
+        "retention_chat_id": _retention_chat_id(),
         "last_leave_at": None,
         "last_rejoin_at": None,
     }

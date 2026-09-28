@@ -8980,6 +8980,7 @@ async def member_update_handler(update: Update, context: ContextTypes.DEFAULT_TY
         try:
             affiliate_retention_on_channel_leave(
                 db, user_id=user.id, event_at=getattr(member, "date", None), now_utc=now,
+                chat_id=chat_id,
             )
         except Exception:
             logger.exception("[AFF_REWARD_RETENTION] uid=%s action=leave_hook_failed", user.id)
@@ -9059,6 +9060,7 @@ async def member_update_handler(update: Update, context: ContextTypes.DEFAULT_TY
         try:
             affiliate_retention_on_channel_join(
                 db, user_id=user.id, event_at=getattr(member, "date", None), now_utc=now,
+                chat_id=chat_id,
             )
         except Exception:
             logger.exception("[AFF_REWARD_RETENTION] uid=%s action=join_hook_failed", user.id)
