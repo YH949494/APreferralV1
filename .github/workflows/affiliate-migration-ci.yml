@@ -23,6 +23,7 @@ on:
   pull_request:
     paths:
       - "affiliate_rewards.py"
+      - "affiliate_reward_retention.py"
       - "affiliate_reward_plans.py"
       - "affiliate_voucher_batches.py"
       - "vouchers.py"
@@ -65,6 +66,8 @@ env:
     test_affiliate_ci_gate.py
     test_affiliate_query_plan_checklist.py
     test_affiliate_surplus_sweep_index_hint.py
+    test_affiliate_reward_retention.py
+    test_affiliate_my_stats_api.py
 
 jobs:
   migration-tests:

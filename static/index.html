@@ -7266,6 +7266,49 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
         </table>`;
     }
 
+    function formatAffiliateUnlockRemaining(seconds) {
+      const total = Math.max(0, Math.floor(Number(seconds) || 0));
+      const days = Math.floor(total / 86400);
+      const hours = Math.floor((total % 86400) / 3600);
+      if (days > 0) return `${days}d ${hours}h`;
+      const minutes = Math.floor((total % 3600) / 60);
+      return hours > 0 ? `${hours}h ${minutes}m` : `${Math.max(1, minutes)}m`;
+    }
+
+    // Affiliate tier rewards are issued only after continuous Official
+    // Channel retention; the backend owns every state and timestamp here.
+    function renderAffiliateRewardEntitlements(entitlements) {
+      const rows = Array.isArray(entitlements) ? entitlements : [];
+      return rows.map((item) => {
+        const tier = escapeHtml(String(item?.tier || ""));
+        const value = `$${Number(item?.reward_value) || 0}`;
+        const days = Number(item?.retention_days) || 7;
+        const state = String(item?.retention_state || "");
+        const remaining = item?.remaining_seconds;
+        let statusText;
+        if (state === "pending_retention") {
+          // Fresh (never restarted) window: explain the rule; after a
+          // rejoin, or once time has passed, show the live countdown.
+          const justEarned = !item?.window_restarted && remaining !== null && remaining !== undefined
+            && Number(remaining) >= (days * 86400) - 3600;
+          if (justEarned) statusText = `Unlocks after ${days} continuous days subscribed`;
+          else if (Number(remaining) > 0) statusText = `Unlocks in ${formatAffiliateUnlockRemaining(remaining)}`;
+          else statusText = "Unlocking soon";
+        } else if (state === "retention_broken") {
+          statusText = `Retention reset<br>Rejoin the Official Channel to restart the ${days}-day unlock`;
+        } else if (state === "issued") {
+          statusText = "Issued";
+        } else if (state === "under_review") {
+          statusText = "Under review";
+        } else if (state === "rejected") {
+          statusText = "Not eligible";
+        } else {
+          statusText = "Processing";
+        }
+        return `<div class="summary-row"><span>${tier} Reward<br>${escapeHtml(value)}</span><strong>${statusText}</strong></div>`;
+      }).join("");
+    }
+
     async function loadAffiliateSnapshot(weekKey) {
       const target = document.getElementById("affiliate-leaderboard-output");
       if (!target || !weekKey) return;
@@ -7328,22 +7371,27 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
         const monthLabel = data?.month_key
           ? `${data.month_key.slice(0, 4)}-${data.month_key.slice(4, 6)}`
           : "";
-        const resetDate = data?.month_reset_at_utc ? new Date(data.month_reset_at_utc) : null;
-        const resetLabel = resetDate && !Number.isNaN(resetDate.getTime())
-          ? resetDate.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric", timeZone: "Asia/Kuala_Lumpur" })
-          : "";
-        const myConversionDisplay = my && (my.conversion_month === null || my.conversion_month === undefined)
+        // Tier progress comes entirely from the backend (next_tier /
+        // qualified_left / next_reward_value / max_tier_reached) so tier
+        // thresholds and reward values are never restated here.
+        const myMaxTier = Boolean(my?.max_tier_reached);
+        const myNextTier = myMaxTier ? "MAX" : (my?.next_tier || "—");
+        const myLeftDisplay = myMaxTier || my?.qualified_left === null || my?.qualified_left === undefined
           ? "—"
-          : `${(Number(my?.conversion_month || 0) * 100).toFixed(1)}%`;
+          : String(Math.max(0, Number(my.qualified_left) || 0));
+        const myRewardDisplay = my?.next_reward_value === null || my?.next_reward_value === undefined
+          ? "—"
+          : `$${Number(my.next_reward_value) || 0}`;
         const myCard = my ? `
           <div class="leaderboard-summary" style="margin-bottom:10px;">
             <div class="summary-title">My Stats (This Month)</div>
             ${monthLabel ? `<div class="summary-row"><span>Month</span><strong>${escapeHtml(monthLabel)}</strong></div>` : ""}
-            ${resetLabel ? `<div class="summary-row"><span>Resets</span><strong>${escapeHtml(resetLabel)} (Asia/Kuala Lumpur)</strong></div>` : ""}
             <div class="summary-row"><span>Qualified</span><strong>${Number(my.qualified_month || 0)}</strong></div>
+            <div class="summary-row"><span>Left to Next Tier</span><strong>${escapeHtml(myLeftDisplay)}</strong></div>
             <div class="summary-row"><span>Joins</span><strong>${Number(my.joins_month || 0)}</strong></div>
-            <div class="summary-row"><span>Conversion</span><strong>${myConversionDisplay}</strong></div>
-            ${isAdmin ? `<div class="summary-row"><span>Flag</span><strong>${String(my.quality_flag || "new")}</strong></div>` : ""}
+            <div class="summary-row"><span>Next Tier</span><strong>${escapeHtml(String(myNextTier))}</strong></div>
+            <div class="summary-row"><span>Reward</span><strong>${escapeHtml(myRewardDisplay)}</strong></div>
+            ${renderAffiliateRewardEntitlements(my.reward_entitlements)}
           </div>
         ` : `<div class="leaderboard-empty">${t("login_affiliate_stats")}</div>`;
         const campaignBanner = campaignActive

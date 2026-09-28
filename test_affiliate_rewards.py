@@ -38,6 +38,30 @@ def _set_dotted(doc, dotted_key, value):
     cursor[parts[-1]] = value
 
 
+# These suites exercise the issuance MECHANICS (pool claims, bundles, plan
+# recipes, reconciliation, concurrency) that run once an entitlement is
+# released. They pin AFFILIATE_REWARD_RETENTION_DAYS=0 — the documented
+# "release immediately" configuration — so each call to the evaluator still
+# drives straight through issuance. The continuous-retention gate that
+# production runs by default (7 days) is covered end to end in
+# test_affiliate_reward_retention.py, which reuses these same mechanics.
+_RETENTION_ENV = "AFFILIATE_REWARD_RETENTION_DAYS"
+_saved_retention_env = None
+
+
+def setUpModule():
+    global _saved_retention_env
+    _saved_retention_env = os.environ.get(_RETENTION_ENV)
+    os.environ[_RETENTION_ENV] = "0"
+
+
+def tearDownModule():
+    if _saved_retention_env is None:
+        os.environ.pop(_RETENTION_ENV, None)
+    else:
+        os.environ[_RETENTION_ENV] = _saved_retention_env
+
+
 class _UpdateResult:
     def __init__(self, matched_count, modified_count=None):
         self.matched_count = matched_count

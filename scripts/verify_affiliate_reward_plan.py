@@ -467,6 +467,30 @@ def _query_plan_specs(month: str | None):
             ar.SURPLUS_SWEEP_INDEX_NAME,
         ),
         (
+            "retention release sweep / matured PENDING_RETENTION",
+            "affiliate_ledger",
+            {
+                "ledger_type": "AFFILIATE_MONTHLY",
+                "status": ar.RETENTION_PENDING_STATUS,
+                "unlock_at": {"$lte": now},
+                "$or": [
+                    {"retention_next_check_at": None},
+                    {"retention_next_check_at": {"$lte": now}},
+                ],
+            },
+            [("unlock_at", 1)],
+            "affiliate_type_status_unlock_at",
+            None,
+        ),
+        (
+            "retention recovery sweep / RETENTION_BROKEN",
+            "affiliate_ledger",
+            {"ledger_type": "AFFILIATE_MONTHLY", "status": ar.RETENTION_BROKEN_STATUS},
+            [("retention_checked_at", 1), ("_id", 1)],
+            "affiliate_type_status_retention_checked",
+            None,
+        ),
+        (
             "Databot tier funnel / entitlement_month",
             "affiliate_ledger",
             {"ledger_type": "AFFILIATE_MONTHLY", "entitlement_month": entitlement},

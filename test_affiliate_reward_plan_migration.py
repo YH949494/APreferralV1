@@ -17,6 +17,7 @@ Business rules under test (confirmed):
 from __future__ import annotations
 
 import collections
+import os
 import threading
 from datetime import datetime, timedelta, timezone
 
@@ -25,6 +26,30 @@ import pytest
 import affiliate_rewards as ar
 import affiliate_reward_plans as arp
 from fake_mongo import FakeDb
+
+# These suites exercise the issuance MECHANICS (pool claims, bundles, plan
+# recipes, reconciliation, concurrency) that run once an entitlement is
+# released. They pin AFFILIATE_REWARD_RETENTION_DAYS=0 — the documented
+# "release immediately" configuration — so each call to the evaluator still
+# drives straight through issuance. The continuous-retention gate that
+# production runs by default (7 days) is covered end to end in
+# test_affiliate_reward_retention.py, which reuses these same mechanics.
+_RETENTION_ENV = "AFFILIATE_REWARD_RETENTION_DAYS"
+_saved_retention_env = None
+
+
+def setUpModule():
+    global _saved_retention_env
+    _saved_retention_env = os.environ.get(_RETENTION_ENV)
+    os.environ[_RETENTION_ENV] = "0"
+
+
+def tearDownModule():
+    if _saved_retention_env is None:
+        os.environ.pop(_RETENTION_ENV, None)
+    else:
+        os.environ[_RETENTION_ENV] = _saved_retention_env
+
 
 # 12:00 KL on the 10th, expressed in UTC (KL = UTC+8).
 AUG = datetime(2026, 8, 10, 4, 0, 0, tzinfo=timezone.utc)
