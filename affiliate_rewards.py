@@ -24,6 +24,7 @@ from affiliate_reward_plans import (
     tier_thresholds,
     recipe_value_by_pool,
     resolve_plan_id,
+    reward_value,
     tier_recipe,
 )
 
@@ -33,6 +34,19 @@ TIERS = ("T1", "T2", "T3", "T4", "T5")
 POOL_IDS = ("WELCOME",) + TIERS + DENOMINATION_POOL_IDS
 FINAL_STATUSES = {"ISSUED", "OUT_OF_STOCK", "REJECTED"}
 SETTLING_STATUS = "SETTLING"
+# Affiliate tier-reward RETENTION gate (AFFILIATE_MONTHLY only — never
+# WELCOME, weekly, or any other voucher system). The entitlement is earned
+# the moment the tier is reached; the voucher is only issued once the
+# referrer has stayed subscribed to the Official Channel for a continuous
+# retention period (see affiliate_reward_retention.py for the worker and
+# the leave/rejoin hooks). Both statuses are non-final and are deliberately
+# absent from every status list an issuance path settles from, so no
+# existing path (evaluator, admin approve, retry sweep, month-end settle)
+# can issue a held entitlement early.
+RETENTION_PENDING_STATUS = "PENDING_RETENTION"
+RETENTION_BROKEN_STATUS = "RETENTION_BROKEN"
+RETENTION_HOLD_STATUSES = frozenset({RETENTION_PENDING_STATUS, RETENTION_BROKEN_STATUS})
+AFFILIATE_RETENTION_DEFAULT_DAYS = 7
 AFFILIATE_BUNDLE_REWARD_TYPE = "affiliate_bundle"
 # The surplus sweep's own index (see ensure_affiliate_indexes / Q2 below).
 # Created via plain create_index (never _ensure_equivalent_index), so this
@@ -93,6 +107,97 @@ logger.info(
     "[AFFILIATE][TIER_CONFIG] thresholds=%s",
     {"T1": T1_THRESHOLD, "T2": T2_THRESHOLD, "T3": T3_THRESHOLD, "T4": T4_THRESHOLD, "T5": T5_THRESHOLD},
 )
+
+
+def affiliate_retention_period() -> timedelta | None:
+    """Continuous Official Channel subscription required before a NEW
+    affiliate tier entitlement may be issued. ``None`` disables the gate.
+
+    Read at call time from ``AFFILIATE_REWARD_RETENTION_DAYS`` (default 7).
+    Only entitlement CREATION consults this: each ledger freezes its own
+    ``retention_required_seconds``, so changing the setting never
+    re-times, releases, or re-gates an entitlement that already exists.
+    """
+    raw = os.getenv("AFFILIATE_REWARD_RETENTION_DAYS")
+    try:
+        days = float(raw) if raw not in (None, "") else float(AFFILIATE_RETENTION_DEFAULT_DAYS)
+    except (TypeError, ValueError):
+        days = float(AFFILIATE_RETENTION_DEFAULT_DAYS)
+    if days <= 0:
+        return None
+    return timedelta(days=days)
+
+
+def _initial_retention_state(db, *, user_id: int, now_utc: datetime) -> dict | None:
+    """Retention fields for a brand-new AFFILIATE_MONTHLY entitlement, or
+    ``None`` when the gate is disabled (legacy immediate issuance).
+
+    The timer starts at earning time. A referrer the canonical membership
+    record (main.py member_update_handler) already shows as OUT of the
+    Official Channel starts in RETENTION_BROKEN instead: there is no
+    continuous subscription to count, and the next rejoin starts the window.
+    """
+    period = affiliate_retention_period()
+    if period is None:
+        return None
+    user_doc = db.users.find_one(
+        {"user_id": int(user_id)},
+        {"official_channel_currently_subscribed": 1, "left_official_channel_at": 1},
+    ) or {}
+    state = {
+        "earned_at": now_utc,
+        "retention_started_at": now_utc,
+        "retention_required_seconds": int(period.total_seconds()),
+        "last_leave_at": None,
+        "last_rejoin_at": None,
+    }
+    if user_doc.get("official_channel_currently_subscribed") is False:
+        state.update(
+            {
+                "status": RETENTION_BROKEN_STATUS,
+                "unlock_at": None,
+                "last_leave_at": _as_aware_utc(user_doc.get("left_official_channel_at")) or now_utc,
+                "retention_broken_reason": "not_subscribed_at_earn",
+            }
+        )
+    else:
+        state.update({"status": RETENTION_PENDING_STATUS, "unlock_at": now_utc + period})
+    return state
+
+
+def affiliate_next_tier_progress(qualified_count, *, entitlement_month) -> dict:
+    """"Left to Next Tier" / "Next Tier" / "Reward" for My Stats.
+
+    Thresholds are the evaluator's own (``_tier_for_count``), and the reward
+    is the plan-versioned value for ``entitlement_month`` — so this can never
+    disagree with what the reward system actually grants. A tier whose
+    threshold equals the count is REACHED (``>=``), so the next tier advances.
+    """
+    try:
+        qualified = max(0, int(qualified_count or 0))
+    except (TypeError, ValueError):
+        qualified = 0
+    thresholds = {"T1": T1_THRESHOLD, "T2": T2_THRESHOLD, "T3": T3_THRESHOLD, "T4": T4_THRESHOLD, "T5": T5_THRESHOLD}
+    current_tier = _tier_for_count(qualified)
+    for tier in TIERS:
+        threshold = int(thresholds[tier])
+        if qualified < threshold:
+            return {
+                "current_tier": current_tier,
+                "next_tier": tier,
+                "next_tier_threshold": threshold,
+                "qualified_left": max(0, threshold - qualified),
+                "next_reward_value": reward_value(entitlement_month, tier),
+                "max_tier_reached": False,
+            }
+    return {
+        "current_tier": current_tier,
+        "next_tier": "MAX",
+        "next_tier_threshold": None,
+        "qualified_left": None,
+        "next_reward_value": reward_value(entitlement_month, TIERS[-1]),
+        "max_tier_reached": True,
+    }
 
 
 def _is_official_channel_subscribed(user_id: int) -> bool:
@@ -222,6 +327,29 @@ def ensure_affiliate_indexes(db):
         [("ledger_type", ASCENDING), ("status", ASCENDING),
          ("retry_checked_at", ASCENDING), ("_id", ASCENDING)],
         name="affiliate_type_status_retry_checked",
+    )
+    # Q5  Retention release sweep (affiliate_reward_retention):
+    #       {ledger_type, status: "PENDING_RETENTION", unlock_at: {$lte: now}}
+    #       sort: unlock_at ASC   limit: batch_limit
+    #     ESR: both equalities lead, then the range/sort key, so the sweep
+    #     walks only matured rows in unlock order and stops at the limit.
+    #     No existing index leads (ledger_type, status, unlock_at).
+    _ensure_equivalent_index(
+        db.affiliate_ledger,
+        [("ledger_type", ASCENDING), ("status", ASCENDING), ("unlock_at", ASCENDING)],
+        name="affiliate_type_status_unlock_at",
+    )
+    # Q6  Retention-broken recovery sweep (same module):
+    #       {ledger_type, status: "RETENTION_BROKEN"}
+    #       sort: (retention_checked_at ASC, _id ASC)   limit: batch_limit
+    #     RETENTION_BROKEN rows are recoverable forever, so this population
+    #     only grows; without the sort keys in the index every tick would sort
+    #     the whole set in memory. Non-sparse for the same reason as Q3.
+    _ensure_equivalent_index(
+        db.affiliate_ledger,
+        [("ledger_type", ASCENDING), ("status", ASCENDING),
+         ("retention_checked_at", ASCENDING), ("_id", ASCENDING)],
+        name="affiliate_type_status_retention_checked",
     )
     db.affiliate_ledger.create_index(
         [("user_id", ASCENDING), ("invitee_user_id", ASCENDING), ("gate_day", ASCENDING), ("tier", ASCENDING), ("created_at", ASCENDING)],
@@ -2420,7 +2548,15 @@ def _issue_denomination_bundle(db, *, ledger, recipe: dict, now_utc: datetime):
                 if not target:
                     shortage_reasons[pool_id] = reason or "pool_empty"
                     continue
-                allow_expired_pinned = already_pinned and target.get("mode") == "batch"
+                # A retention-released entitlement was earned inside its
+                # month but is, by design, issued up to a retention period
+                # later — so a Sep 28 T2 is legitimately first allocated in
+                # October. `target` here is always that entitlement month's
+                # OWN batch (full-containment match on the stored
+                # entitlement_month), so this is the same narrow exception as
+                # an already-pinned continuation, not a drift onto later stock.
+                retention_released = working.get("retention_completed_at") is not None
+                allow_expired_pinned = (already_pinned or retention_released) and target.get("mode") == "batch"
                 if allow_expired_pinned:
                     window_end = _as_aware_utc(target.get("window_end"))
                     if window_end and now_utc >= window_end:
@@ -2559,6 +2695,17 @@ def _issue_affiliate_ledger_from_pool(db, ledger, now_utc: datetime):
     user_id = ledger.get("user_id")
     tier = str(ledger.get("tier") or "").strip().upper()
     pool_id = str(ledger.get("pool_id") or tier or "").strip().upper()
+    if ledger.get("status") in RETENTION_HOLD_STATUSES:
+        # Every issuance path funnels through here. A retention-held
+        # entitlement is released ONLY by the retention worker's atomic
+        # PENDING_RETENTION -> SETTLING transition; any other caller that
+        # reaches this point with a held row gets it back untouched, before
+        # any inventory is read or consumed.
+        logger.info(
+            "[AFF_REWARD_RETENTION] uid=%s tier=%s action=issue_blocked_held status=%s ledger_id=%s",
+            user_id, tier, ledger.get("status"), ledger_id,
+        )
+        return ledger
     if not user_id or not pool_id:
         _mark_missing_pool_config(db, ledger_id=ledger_id, now_utc=now_utc)
         return db.affiliate_ledger.find_one({"_id": ledger_id})
@@ -3307,6 +3454,15 @@ def evaluate_monthly_affiliate_reward(db, *, referrer_id: int, now_utc: datetime
         # fulfilled until months later. `$setOnInsert` guarantees a
         # re-evaluation never rewrites an existing ledger's obligation.
         frozen_recipe = tier_recipe(yyyymm, eligible_tier)
+        # Retention state is part of the insert only: an existing ledger
+        # (including every pre-deploy row) is never re-gated or re-timed.
+        # Built only when this tier has no ledger yet, so a re-evaluation of
+        # an existing entitlement costs no extra read.
+        insert_fields = {"status": "APPROVED"}
+        if existing_ledger is None:
+            retention_state = _initial_retention_state(db, user_id=int(referrer_id), now_utc=now_utc)
+            if retention_state:
+                insert_fields = retention_state
         try:
             db.affiliate_ledger.update_one(
                 {"dedup_key": dedup_key},
@@ -3322,7 +3478,7 @@ def evaluate_monthly_affiliate_reward(db, *, referrer_id: int, now_utc: datetime
                     "reward_value": int((frozen_recipe or {}).get("reward_value") or 0),
                     "tier": eligible_tier,
                     "pool_id": eligible_tier,
-                    "status": "APPROVED",
+                    **insert_fields,
                     "dedup_key": dedup_key,
                     "voucher_code": None,
                     "created_at": now_utc,
@@ -3372,6 +3528,21 @@ def evaluate_monthly_affiliate_reward(db, *, referrer_id: int, now_utc: datetime
             last_ledger = ledger
             continue
 
+        # Held for continuous Official Channel retention: the entitlement
+        # exists (tier progress is immediate), but only the retention worker
+        # may release it for issuance. Checked BEFORE the simulate branch so
+        # a held row is never rewritten to SIMULATED_PENDING, which the
+        # month-end settle would otherwise issue without retention.
+        if status in RETENTION_HOLD_STATUSES:
+            if existing_ledger is None:
+                logger.info(
+                    "[AFF_REWARD_RETENTION] uid=%s tier=%s year_month=%s action=created status=%s unlock_at=%s",
+                    int(referrer_id), eligible_tier, yyyymm, status,
+                    _as_aware_utc(ledger.get("unlock_at")).isoformat() if ledger.get("unlock_at") else None,
+                )
+            last_ledger = ledger
+            continue
+
         if _affiliate_simulate_enabled():
             db.affiliate_ledger.update_one(
                 {"_id": ledger["_id"]},
@@ -3404,9 +3575,11 @@ def evaluate_monthly_affiliate_reward(db, *, referrer_id: int, now_utc: datetime
             # Pool claim didn't complete — fall through to claim below
 
         # Transition any non-final, non-settling status to SETTLING before claiming.
+        # Retention-held statuses are excluded here too: a concurrent create
+        # that raced the read above must still never be settled early.
         if status != SETTLING_STATUS:
             settle_res = db.affiliate_ledger.update_one(
-                {"_id": ledger["_id"], "status": {"$nin": list(FINAL_STATUSES)}, **_no_voucher_filter()},
+                {"_id": ledger["_id"], "status": {"$nin": list(FINAL_STATUSES | RETENTION_HOLD_STATUSES)}, **_no_voucher_filter()},
                 {"$set": {"status": SETTLING_STATUS, "updated_at": now_utc}},
             )
             if settle_res.modified_count == 0:

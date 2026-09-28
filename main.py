@@ -105,6 +105,14 @@ from affiliate_rewards import (
     catch_up_missing_current_month_affiliate_ledgers,
     reconcile_surplus_denomination_allocations,
     welcome_reward_visibility,
+    affiliate_next_tier_progress,
+    _month_window_utc as _affiliate_month_window_utc,
+)
+from affiliate_reward_retention import (
+    affiliate_reward_retention_view,
+    on_official_channel_join as affiliate_retention_on_channel_join,
+    on_official_channel_leave as affiliate_retention_on_channel_leave,
+    process_affiliate_retention_entitlements,
 )
 from telegram_utils import safe_reply_text, safe_send_message
 from channel_reactivation import set_campaign_active, campaign_summary as channel_reactivation_summary, process_reactivation_campaign, verify_reactivation_claim, check_official_channel_subscribed, VERIFY_CALLBACK_DATA
@@ -850,6 +858,21 @@ def tick_5min() -> None:
                             now_utc=datetime.now(timezone.utc),
                             batch_limit=AFFILIATE_CURRENT_MONTH_BATCH_LIMIT,
                         )
+                        # Release affiliate tier entitlements that completed
+                        # their continuous Official Channel retention period.
+                        # Isolated so a Telegram/DB failure here can never skip
+                        # the retry/reconciliation passes below. Bounded by
+                        # AFFILIATE_RETENTION_BATCH_LIMIT and
+                        # AFFILIATE_RETENTION_MAX_RUNTIME_SECONDS.
+                        try:
+                            process_affiliate_retention_entitlements(
+                                db, now_utc=datetime.now(timezone.utc),
+                            )
+                        except Exception as exc:
+                            logger.exception(
+                                "[JOB][5MIN] step_error name=affiliate_retention_release run_id=%s err=%s",
+                                run_id, exc,
+                            )
                         retry_current_month_pending_manual_ledgers(
                             db,
                             now_utc=datetime.now(timezone.utc),
@@ -6814,6 +6837,21 @@ def get_affiliate_leaderboard_week():
         if isinstance(my_stats, dict):
             my_stats.pop("quality_flag", None)
 
+    if isinstance(my_stats, dict):
+        # Tier progress is computed here, from the evaluator's own thresholds
+        # and the plan-versioned reward for this month, so the Mini App never
+        # restates tier config. conversion_month / quality_flag are kept for
+        # existing consumers even though the compact card no longer shows them.
+        progress_month = snapshot.get("month_key") or _affiliate_month_window_utc()[2]
+        my_stats.update(
+            affiliate_next_tier_progress(my_stats.get("qualified_month"), entitlement_month=progress_month)
+        )
+        try:
+            my_stats["reward_entitlements"] = affiliate_reward_retention_view(db, user_id=current_user_id)
+        except Exception:
+            logger.exception("[AFF_REWARD_RETENTION] uid=%s action=status_view_failed", current_user_id)
+            my_stats["reward_entitlements"] = []
+
     month_start_utc = snapshot.get("month_start_utc")
     month_end_utc = snapshot.get("month_end_utc")
 
@@ -8937,6 +8975,14 @@ async def member_update_handler(update: Update, context: ContextTypes.DEFAULT_TY
             upsert=True,
         )
         logger.info("[CHANNEL][LEAVE] uid=%s chat_id=%s", user.id, chat_id)
+        # Affiliate tier-reward retention: a leave breaks any open continuous
+        # retention window. Only affiliate reward timers are touched.
+        try:
+            affiliate_retention_on_channel_leave(
+                db, user_id=user.id, event_at=getattr(member, "date", None), now_utc=now,
+            )
+        except Exception:
+            logger.exception("[AFF_REWARD_RETENTION] uid=%s action=leave_hook_failed", user.id)
         return
 
     if not became_member:
@@ -9007,6 +9053,15 @@ async def member_update_handler(update: Update, context: ContextTypes.DEFAULT_TY
             )
         elif is_first_subscribe:
             logger.info("[CHANNEL][FIRST_JOIN] uid=%s chat_id=%s", user.id, chat_id)
+        # Affiliate tier-reward retention: a (re)join restarts the continuous
+        # retention window for held affiliate entitlements only. Keyed on the
+        # Telegram update's own date so a duplicate delivery is a no-op.
+        try:
+            affiliate_retention_on_channel_join(
+                db, user_id=user.id, event_at=getattr(member, "date", None), now_utc=now,
+            )
+        except Exception:
+            logger.exception("[AFF_REWARD_RETENTION] uid=%s action=join_hook_failed", user.id)
 
     # 1) 先记录 join（保持你原本逻辑：哪个 chat 触发就记录哪个 chat）
     # handle_user_join() is group-only (it early-returns for any other
