@@ -1,3 +1,4 @@
+import calendar
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 import logging
@@ -22,7 +23,7 @@ from affiliate_rewards import (
     T5_THRESHOLD as _AFF_T5_THRESHOLD,
     mark_invitee_qualified,
 )
-from affiliate_reward_plans import reward_value as _plan_reward_value
+from affiliate_reward_plans import normalize_month as _normalize_month, reward_value as _plan_reward_value
 from affiliate_group_access import maybe_unlock_affiliate_group
 import referral_invitee_lock
 from referral_ledger import with_not_invalidated
@@ -1156,6 +1157,12 @@ def _referral_hold_hours() -> int:
     return int(_referral_setting("qualify_hold_hours", REFERRAL_HOLD_HOURS))
 
 AFFILIATE_CONGRATS_CHANNEL_ID = int(os.getenv("AFFILIATE_CONGRATS_CHANNEL_ID", "-1003820861717"))
+# How recently a previous-month milestone must have been ISSUED for the
+# congrats sweep to still announce it (see
+# retry_pending_affiliate_milestone_congrats). Comfortably above the 5-min
+# sweep cadence plus a scheduler outage; low enough that a deploy never
+# posts weeks-old milestones.
+AFFILIATE_CONGRATS_LATE_MAX_AGE_HOURS = int(os.getenv("AFFILIATE_CONGRATS_LATE_MAX_AGE_HOURS", "72"))
 
 # Any month before the denomination plan's first month resolves to the legacy
 # plan; used only to render the historical (threshold, amount) compatibility
@@ -3515,6 +3522,7 @@ def _affiliate_ledger_issued_for_congrats(user_id: int, year_month: str, tier_la
             "entitlement_month": 1,
             "year_month": 1,
             "reward_plan": 1,
+            "retention_required_seconds": 1,
         },
     )
     if not ledger:
@@ -3530,7 +3538,35 @@ def _affiliate_ledger_issued_for_congrats(user_id: int, year_month: str, tier_la
     return ledger
 
 
-def _attempt_affiliate_milestone_congrats(inviter_user_id: int, threshold: int, voucher: int, now_utc_ts: datetime) -> None:
+def _late_congrats_tail(retention_required_seconds) -> str:
+    """Tail for a milestone announced after its entitlement month closed.
+    Quotes the hold the ledger actually froze at creation (the retention
+    period is configurable and each entitlement keeps its own); a late row
+    with no retention hold (e.g. issued late after a restock) gets neutral
+    copy rather than an invented period."""
+    try:
+        seconds = int(retention_required_seconds or 0)
+    except (TypeError, ValueError):
+        seconds = 0
+    if seconds <= 0:
+        return "Reward unlocked 🔓"
+    if seconds % 86400 == 0:
+        days = seconds // 86400
+        period = f"{days} day{'s' if days != 1 else ''}"
+    else:
+        hours = max(1, round(seconds / 3600))
+        period = f"{hours} hour{'s' if hours != 1 else ''}"
+    return f"Held the Official Channel for {period} to unlock it 🔓"
+
+
+def _attempt_affiliate_milestone_congrats(
+    inviter_user_id: int,
+    threshold: int,
+    voucher: int,
+    now_utc_ts: datetime,
+    *,
+    entitlement_month: str | None = None,
+) -> None:
     """Send the public Money Room milestone announcement for one
     (inviter, threshold) pair, but only once the matching affiliate_ledger
     row is confirmed ISSUED with a real voucher_code — never on referral
@@ -3541,6 +3577,14 @@ def _attempt_affiliate_milestone_congrats(inviter_user_id: int, threshold: int, 
     returns without recording anything, so a later re-evaluation — once
     reconciliation actually issues the voucher — can pick it up and post
     exactly once.
+
+    ``entitlement_month`` (``YYYYMM``) is the month the milestone was EARNED
+    in. The ledger lookup and the (user_id, month_key, tier) dedup key are
+    both keyed on it, so a retention-gated milestone earned Sep 28 but
+    issued Oct 5 is announced under September — the same slot the eager
+    settle-time path would have claimed. Omitted, it defaults to the KL
+    month of ``now_utc_ts`` (the eager path, where earned == now). Only the
+    lookup keys move; ``sent_at`` stays on real now.
     """
     from html import escape as html_escape
 
@@ -3548,7 +3592,10 @@ def _attempt_affiliate_milestone_congrats(inviter_user_id: int, threshold: int, 
     if not tier_label:
         return
 
-    month_key = _month_start_kl(now_utc_ts).date().isoformat()
+    current_year_month = _month_start_kl(now_utc_ts).strftime("%Y%m")
+    year_month = _normalize_month(entitlement_month) or current_year_month
+    is_late = year_month != current_year_month
+    month_key = f"{year_month[:4]}-{year_month[4:]}-01"
 
     # Cheap pre-check so a repeat sweep over an already-announced milestone
     # never even reaches the ledger lookup/logging below.
@@ -3557,7 +3604,6 @@ def _attempt_affiliate_milestone_congrats(inviter_user_id: int, threshold: int, 
     ):
         return
 
-    year_month = _month_start_kl(now_utc_ts).strftime("%Y%m")
     issued_ledger = _affiliate_ledger_issued_for_congrats(inviter_user_id, year_month, tier_label)
     if not issued_ledger:
         return
@@ -3605,20 +3651,31 @@ def _attempt_affiliate_milestone_congrats(inviter_user_id: int, threshold: int, 
         i for i, (t, _) in enumerate(REFERRAL_CONGRATS_TIER_THRESHOLDS) if t == threshold
     )
     is_last = tier_idx == len(REFERRAL_CONGRATS_TIER_THRESHOLDS) - 1
-    if not is_last:
+    if is_last:
+        tail = "Absolute legend! 🏆"
+    elif is_late:
+        # The entitlement month has closed, so the next tier can no longer
+        # be reached in it — a "Next:" nudge would advertise a dead target.
+        tail = _late_congrats_tail(issued_ledger.get("retention_required_seconds"))
+    else:
         next_tier, next_tier_label = REFERRAL_CONGRATS_TIER_THRESHOLDS[tier_idx + 1]
         # The NEXT milestone is earned in the same entitlement month, so it
         # must be priced on that month's plan too.
         next_voucher = _plan_reward_value(entitlement_month, next_tier_label)
         tail = f"Next: {next_tier} refs = ${next_voucher}! 💪"
-    else:
-        tail = "Absolute legend! 🏆"
 
     mention = html_escape(public_affiliate_announcement_name(user_doc))
-    text = (
-        f"🎉 {mention} just hit <b>{threshold} valid referrals</b> this month "
-        f"— <b>${voucher} voucher issued!</b> {tail}"
-    )
+    if is_late:
+        month_name = calendar.month_name[int(year_month[4:])]
+        text = (
+            f"🎉 {mention} hit <b>{threshold} valid referrals</b> in {month_name} "
+            f"— <b>${voucher} voucher issued!</b> {tail}"
+        )
+    else:
+        text = (
+            f"🎉 {mention} just hit <b>{threshold} valid referrals</b> this month "
+            f"— <b>${voucher} voucher issued!</b> {tail}"
+        )
     try:
         resp = requests.post(
             f"{API_BASE}/sendMessage",
@@ -3640,7 +3697,10 @@ def _attempt_affiliate_milestone_congrats(inviter_user_id: int, threshold: int, 
         return
 
     db.referral_tier_congrats.update_one({"_id": claim_id}, {"$set": {"sent_at": now_utc_ts}})
-    logger.info("[AFF_CONGRATS][SENT] uid=%s tier=%s year_month=%s", inviter_user_id, tier_label, year_month)
+    logger.info(
+        "[AFF_CONGRATS][SENT] uid=%s tier=%s year_month=%s late=%s",
+        inviter_user_id, tier_label, year_month, is_late,
+    )
 
 
 def maybe_shout_referral_congrats(inviter_user_id: int, now_utc_ts: datetime) -> None:
@@ -3675,27 +3735,77 @@ def retry_pending_affiliate_milestone_congrats(now_utc_ts: datetime | None = Non
     became ISSUED gets its (still-pending) announcement sent on this same
     pass, exactly once.
 
-    Scans this month's ISSUED AFFILIATE_MONTHLY ledger rows for a tier this
-    module announces; each candidate is cheap to skip (an indexed dedup
-    lookup) once already announced, so repeated sweeps stay quiet and do
-    not re-log anything for rows that are done.
+    Scans ISSUED AFFILIATE_MONTHLY ledger rows for a tier this module
+    announces, from this KL month plus the previous one: a retention-gated
+    milestone earned late in month M unlocks ~7 days later, i.e. in M+1,
+    still filed under ``year_month=M``. Each row is announced against its
+    own entitlement month (see ``_attempt_affiliate_milestone_congrats``),
+    so it dedups against the same slot the settle-time path would use.
+
+    Previous-month rows are only picked up when they were issued in the
+    current month AND within ``AFFILIATE_CONGRATS_LATE_MAX_AGE_HOURS``: that
+    is exactly the "issued after its month closed" case, and it bounds the
+    first sweep after deploy so a backlog of old, never-announced rows is
+    not dumped onto the public channel as stale news.
+
+    Each candidate is cheap to skip (an indexed dedup lookup) once already
+    announced, so repeated sweeps stay quiet and do not re-log anything
+    for rows that are done.
     """
     now_utc_ts = now_utc_ts or now_utc()
-    year_month = _month_start_kl(now_utc_ts).strftime("%Y%m")
+    current_start = _month_start_kl(now_utc_ts)
+    year_month = current_start.strftime("%Y%m")
+    previous_year_month = _month_start_kl(current_start - timedelta(seconds=1)).strftime("%Y%m")
+    late_issued_cutoff = max(
+        current_start.astimezone(timezone.utc),
+        now_utc_ts - timedelta(hours=AFFILIATE_CONGRATS_LATE_MAX_AGE_HOURS),
+    )
     threshold_by_tier = {label: threshold for threshold, label in REFERRAL_CONGRATS_TIER_LABEL.items()}
     voucher_by_threshold = dict(REFERRAL_CONGRATS_TIERS)
 
     scanned = attempted = 0
-    candidates = list(
+    issued_rows = list(
         db.affiliate_ledger.find(
             {
                 "ledger_type": "AFFILIATE_MONTHLY",
-                "year_month": year_month,
                 "tier": {"$in": list(threshold_by_tier.keys())},
                 "status": "ISSUED",
+                "$or": [
+                    {"year_month": year_month},
+                    {"year_month": previous_year_month, "issued_at": {"$gte": late_issued_cutoff}},
+                ],
             },
-            projection={"user_id": 1, "tier": 1},
+            projection={"user_id": 1, "tier": 1, "year_month": 1, "entitlement_month": 1},
         )
+    )
+    # Drop already-announced milestones BEFORE applying batch_limit: they
+    # stay ISSUED forever, so limiting first would hand every run the same
+    # done prefix and starve the rest — fatal for previous-month rows, which
+    # age out of the late window. One indexed read covers the whole set.
+    announced = set()
+    uids = sorted({int(r["user_id"]) for r in issued_rows if r.get("user_id") is not None})
+    if uids:
+        month_keys = [f"{ym[:4]}-{ym[4:]}-01" for ym in (year_month, previous_year_month)]
+        for row in db.referral_tier_congrats.find(
+            {"user_id": {"$in": uids}, "month_key": {"$in": month_keys}},
+            projection={"user_id": 1, "month_key": 1, "tier": 1},
+        ):
+            announced.add((row.get("user_id"), row.get("month_key"), row.get("tier")))
+
+    def _pending(ledger: dict) -> bool:
+        ym = str(ledger.get("year_month") or "")
+        uid = ledger.get("user_id")
+        key = (
+            int(uid) if uid is not None else None,
+            f"{ym[:4]}-{ym[4:]}-01",
+            threshold_by_tier.get(ledger.get("tier")),
+        )
+        return key not in announced
+
+    # Previous-month rows first: they are the ones on a clock.
+    candidates = sorted(
+        (r for r in issued_rows if _pending(r)),
+        key=lambda r: r.get("year_month") != previous_year_month,
     )[: max(1, int(batch_limit))]
     for ledger in candidates:
         scanned += 1
@@ -3706,7 +3816,16 @@ def retry_pending_affiliate_milestone_congrats(now_utc_ts: datetime | None = Non
         if not threshold or uid is None or voucher is None:
             continue
         attempted += 1
-        _attempt_affiliate_milestone_congrats(int(uid), threshold, voucher, now_utc_ts)
+        # year_month is what the row is filed (and was queried) under, so it
+        # is the key the ledger re-lookup inside must use; entitlement_month
+        # is written equal to it on every row that carries both.
+        _attempt_affiliate_milestone_congrats(
+            int(uid),
+            threshold,
+            voucher,
+            now_utc_ts,
+            entitlement_month=ledger.get("year_month") or ledger.get("entitlement_month"),
+        )
     return {"scanned": scanned, "attempted": attempted}
 
 

@@ -217,3 +217,174 @@ def test_username_masking_still_applied_when_gated_send_succeeds(fake_db, monkey
     assert "kamilszs" not in captured["text"]
     assert "@" not in captured["text"]
     assert "voucher issued!" in captured["text"]
+
+
+# --- Late issuance across a month boundary (7-day retention gate) ----------
+# A milestone earned Sep 28 (KL) is held PENDING_RETENTION and only ISSUED
+# ~Oct 5, still filed under year_month="202609". The sweep must announce it
+# under September, exactly once, with copy that doesn't claim "this month".
+
+EARNED_SEP = datetime(2026, 9, 28, 4, 0, tzinfo=timezone.utc)   # 12:00 KL
+ISSUED_OCT = datetime(2026, 10, 5, 4, 0, tzinfo=timezone.utc)   # 12:00 KL
+
+
+def _seed_entitlement(fake_db, uid, tier_label, *, year_month, status="ISSUED", issued_at=None, voucher_code="AFFCODE", **extra):
+    fake_db["affiliate_ledger"].insert_one(
+        {
+            **extra,
+            "ledger_type": "AFFILIATE_MONTHLY",
+            "user_id": uid,
+            "year_month": year_month,
+            "entitlement_month": year_month,
+            "tier": tier_label,
+            "status": status,
+            "voucher_code": voucher_code,
+            "issued_at": issued_at,
+        }
+    )
+
+
+def _capture_posts(monkeypatch):
+    posts = []
+
+    def _fake_post(url, json=None, timeout=None):
+        posts.append(json["text"])
+        return _OkResp()
+
+    monkeypatch.setattr(scheduler.requests, "post", _fake_post)
+    return posts
+
+
+def test_previous_month_milestone_issued_next_month_announced_once(fake_db, monkeypatch):
+    _seed_referrals(fake_db, 601, 10, now=EARNED_SEP)
+    _seed_entitlement(
+        fake_db, 601, "T1", year_month="202609", status="PENDING_RETENTION", voucher_code=None,
+        retention_required_seconds=7 * 86400,
+    )
+    posts = _capture_posts(monkeypatch)
+
+    # Sep 28: tier reached, but the reward is held for retention -> no post.
+    scheduler.maybe_shout_referral_congrats(601, EARNED_SEP)
+    scheduler.retry_pending_affiliate_milestone_congrats(now_utc_ts=EARNED_SEP)
+    assert posts == []
+
+    # Oct 5: retention completes and the voucher is issued.
+    ledger = fake_db["affiliate_ledger"]._docs[0]
+    ledger.update({"status": "ISSUED", "voucher_code": "AFFCODE-SEP", "issued_at": ISSUED_OCT})
+
+    result = scheduler.retry_pending_affiliate_milestone_congrats(now_utc_ts=ISSUED_OCT)
+    assert result == {"scanned": 1, "attempted": 1}
+    assert len(posts) == 1
+    assert "in September" in posts[0]
+    assert "this month" not in posts[0]
+    # September is closed: no "Next:" nudge toward an unreachable tier.
+    assert "Next:" not in posts[0]
+    assert "Held the Official Channel for 7 days" in posts[0]
+
+    claim = fake_db["referral_tier_congrats"].find_one({"user_id": 601, "tier": 10})
+    assert claim["month_key"] == "2026-09-01"
+    assert claim["sent_at"] == ISSUED_OCT  # timestamps stay on real now
+
+    # Repeat sweeps (same tick, and later that day) never re-announce.
+    scheduler.retry_pending_affiliate_milestone_congrats(now_utc_ts=ISSUED_OCT)
+    scheduler.retry_pending_affiliate_milestone_congrats(now_utc_ts=datetime(2026, 10, 5, 10, 0, tzinfo=timezone.utc))
+    assert len(posts) == 1
+    assert fake_db["referral_tier_congrats"].count_documents({"user_id": 601}) == 1
+
+
+def test_current_month_milestone_announcement_unchanged(fake_db, monkeypatch):
+    _seed_referrals(fake_db, 602, 10, now=ISSUED_OCT)
+    _seed_entitlement(fake_db, 602, "T1", year_month="202610", issued_at=ISSUED_OCT)
+    posts = _capture_posts(monkeypatch)
+
+    scheduler.retry_pending_affiliate_milestone_congrats(now_utc_ts=ISSUED_OCT)
+    scheduler.retry_pending_affiliate_milestone_congrats(now_utc_ts=ISSUED_OCT)
+
+    assert len(posts) == 1
+    assert "just hit <b>10 valid referrals</b> this month" in posts[0]
+    assert "Next: 25 refs" in posts[0]
+    claim = fake_db["referral_tier_congrats"].find_one({"user_id": 602, "tier": 10})
+    assert claim["month_key"] == "2026-10-01"
+
+
+def test_previous_month_milestone_already_announced_is_not_reposted(fake_db, monkeypatch):
+    # Issued and announced within September by the eager path; the October
+    # sweep sees the same row but dedups on the September slot.
+    _seed_referrals(fake_db, 603, 10, now=EARNED_SEP)
+    _seed_entitlement(fake_db, 603, "T1", year_month="202609", issued_at=EARNED_SEP)
+    posts = _capture_posts(monkeypatch)
+
+    scheduler.maybe_shout_referral_congrats(603, EARNED_SEP)
+    assert len(posts) == 1
+
+    # Even a row re-stamped as issued in October must not repost.
+    fake_db["affiliate_ledger"]._docs[0]["issued_at"] = ISSUED_OCT
+    scheduler.retry_pending_affiliate_milestone_congrats(now_utc_ts=ISSUED_OCT)
+    assert len(posts) == 1
+    assert fake_db["referral_tier_congrats"].count_documents({"user_id": 603, "tier": 10}) == 1
+
+
+def test_previous_month_rows_outside_late_window_are_not_swept(fake_db, monkeypatch):
+    posts = _capture_posts(monkeypatch)
+    fake_db["users"].insert_one({"user_id": 604, "username": "user604"})
+    # Issued inside its own month: the in-month sweep already owned it.
+    _seed_entitlement(fake_db, 604, "T1", year_month="202609", issued_at=EARNED_SEP)
+    # Issued after month close but older than the late window: stale news.
+    _seed_entitlement(fake_db, 604, "T2", year_month="202609", issued_at=datetime(2026, 10, 1, 4, 0, tzinfo=timezone.utc))
+    # Two months back: never swept.
+    _seed_entitlement(fake_db, 604, "T3", year_month="202608", issued_at=ISSUED_OCT)
+
+    result = scheduler.retry_pending_affiliate_milestone_congrats(now_utc_ts=ISSUED_OCT)
+
+    assert result == {"scanned": 0, "attempted": 0}
+    assert posts == []
+
+
+@pytest.mark.parametrize(
+    "retention_seconds, expected",
+    [
+        (86400, "Held the Official Channel for 1 day to unlock it"),
+        (3 * 86400, "Held the Official Channel for 3 days to unlock it"),
+        (None, "Reward unlocked"),  # late for another reason (e.g. restock): no invented hold
+    ],
+)
+def test_late_announcement_quotes_the_ledgers_frozen_hold(fake_db, monkeypatch, retention_seconds, expected):
+    fake_db["users"].insert_one({"user_id": 605, "username": "user605"})
+    extra = {"retention_required_seconds": retention_seconds} if retention_seconds else {}
+    _seed_entitlement(fake_db, 605, "T1", year_month="202609", issued_at=ISSUED_OCT, **extra)
+    posts = _capture_posts(monkeypatch)
+
+    scheduler.retry_pending_affiliate_milestone_congrats(now_utc_ts=ISSUED_OCT)
+
+    assert len(posts) == 1
+    assert expected in posts[0]
+    if retention_seconds is None:
+        assert "Held the Official Channel" not in posts[0]
+
+
+def test_batch_limit_does_not_starve_behind_already_announced_rows(fake_db, monkeypatch):
+    # Announced rows stay ISSUED forever; if the limit were applied before
+    # dropping them, every run would get the same done prefix and a late
+    # previous-month row would age out of its window unannounced.
+    for uid in (606, 607, 608):
+        fake_db["users"].insert_one({"user_id": uid, "username": f"user{uid}"})
+        _seed_entitlement(fake_db, uid, "T1", year_month="202610", issued_at=ISSUED_OCT)
+    fake_db["users"].insert_one({"user_id": 609, "username": "user609"})
+    _seed_entitlement(fake_db, 609, "T1", year_month="202609", issued_at=ISSUED_OCT)
+    posts = _capture_posts(monkeypatch)
+
+    first = scheduler.retry_pending_affiliate_milestone_congrats(now_utc_ts=ISSUED_OCT, batch_limit=1)
+    # The expiring previous-month row goes first.
+    assert first["attempted"] == 1
+    assert "in September" in posts[0]
+
+    for _ in range(3):
+        scheduler.retry_pending_affiliate_milestone_congrats(now_utc_ts=ISSUED_OCT, batch_limit=1)
+    assert len(posts) == 4
+    assert fake_db["referral_tier_congrats"].count_documents({}) == 4
+
+    # Nothing left: a further run scans nothing and posts nothing.
+    assert scheduler.retry_pending_affiliate_milestone_congrats(now_utc_ts=ISSUED_OCT, batch_limit=1) == {
+        "scanned": 0, "attempted": 0,
+    }
+    assert len(posts) == 4
