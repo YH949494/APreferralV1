@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -738,15 +739,46 @@ def _mask_user_id(user_id) -> str:
     return f"{text[:2]}{'*' * (len(text) - 4)}{text[-2:]}"
 
 
-def _held_cas_filter(ledger_id, statuses) -> dict:
-    """The row is still held, still a monthly tier entitlement, and carries
-    no voucher of any kind — the only state either backfill write accepts."""
+_YYYYMM_RE = re.compile(r"\d{4}(0[1-9]|1[0-2])")
+
+
+def validate_entitlement_month_filter(value) -> str | None:
+    """``None`` (no filter) or a strict ``YYYYMM`` string; anything else
+    (``2026-10``, ``20261001``, ``abc``, ``""``, month 13) raises ValueError.
+    Strict on purpose: unlike ``_normalize_entitlement_month`` it does not
+    strip, so a typo can never silently widen or empty the population."""
+    if value is None:
+        return None
+    text = value if isinstance(value, str) else ""
+    if not _YYYYMM_RE.fullmatch(text):
+        raise ValueError(f"entitlement_month must be YYYYMM (e.g. 202610), got {value!r}")
+    return text
+
+
+def _entitlement_month_filter(entitlement_month: str) -> dict:
+    """Mongo filter equivalent to ``_ledger_entitlement_month(row) == m``:
+    the stored ``entitlement_month``, else the historical ``year_month``."""
     return {
+        "$or": [
+            {"entitlement_month": entitlement_month},
+            {"entitlement_month": {"$in": [None, ""]}, "year_month": entitlement_month},
+        ]
+    }
+
+
+def _held_cas_filter(ledger_id, statuses, entitlement_month: str | None = None) -> dict:
+    """The row is still held, still a monthly tier entitlement, and carries
+    no voucher of any kind — the only state either backfill write accepts.
+    With ``entitlement_month`` the row must also still belong to that month."""
+    cas = {
         "_id": ledger_id,
         "ledger_type": LEDGER_TYPE,
         "status": {"$in": sorted(statuses)},
         "$and": [_no_voucher_filter(), {"vouchers": {"$in": [None, []]}}],
     }
+    if entitlement_month is not None:
+        cas["$and"].append(_entitlement_month_filter(entitlement_month))
+    return cas
 
 
 def _classify_held_row(db, row: dict) -> tuple[str, dict]:
@@ -837,7 +869,9 @@ def _classify_held_row(db, row: dict) -> tuple[str, dict]:
     return BACKFILL_RELEASE, detail
 
 
-def _mark_for_review(db, row: dict, cls: str, detail: dict, *, statuses, now_utc: datetime) -> dict | None:
+def _mark_for_review(
+    db, row: dict, cls: str, detail: dict, *, statuses, now_utc: datetime, entitlement_month: str | None = None,
+) -> dict | None:
     """CAS held -> PENDING_REVIEW. Never issues, never touches inventory.
 
     REVIEW_* rows must also carry no voucher and get their merged risk flags.
@@ -859,9 +893,11 @@ def _mark_for_review(db, row: dict, cls: str, detail: dict, *, statuses, now_utc
     }
     if cls in _PARKED_EXCLUDE_CLASSES:
         cas = {"_id": row["_id"], "ledger_type": LEDGER_TYPE, "status": {"$in": sorted(statuses)}}
+        if entitlement_month is not None:
+            cas["$and"] = [_entitlement_month_filter(entitlement_month)]
         set_doc["retention_rollback_reasons"] = list(detail.get("reasons") or [])
     else:
-        cas = _held_cas_filter(row["_id"], statuses)
+        cas = _held_cas_filter(row["_id"], statuses, entitlement_month)
         flags = list(detail.get("merged_risk_flags") or [])
         if cls == BACKFILL_REVIEW_BLOCKED and "blocked_user" not in flags:
             flags.append("blocked_user")
@@ -873,12 +909,14 @@ def _mark_for_review(db, row: dict, cls: str, detail: dict, *, statuses, now_utc
     )
 
 
-def _release_held_row(db, row: dict, *, statuses, now_utc: datetime) -> tuple[dict | None, dict | None]:
+def _release_held_row(
+    db, row: dict, *, statuses, now_utc: datetime, entitlement_month: str | None = None,
+) -> tuple[dict | None, dict | None]:
     """CAS held -> SETTLING, then the canonical allocator. Returns
     ``(before, after)``; ``before`` is None when another actor moved the row
     first (nothing was written)."""
     before = db.affiliate_ledger.find_one_and_update(
-        _held_cas_filter(row["_id"], statuses),
+        _held_cas_filter(row["_id"], statuses, entitlement_month),
         {
             "$set": {
                 "status": SETTLING_STATUS,
@@ -950,6 +988,7 @@ def release_retention_holds(
     include_broken: bool = True,
     now_utc: datetime | None = None,
     limit: int | None = None,
+    entitlement_month: str | None = None,
 ) -> dict:
     """One-shot rollback of the retention gate for rows it is holding.
 
@@ -960,7 +999,14 @@ def release_retention_holds(
     anything. Refuses to write anything while ``AFFILIATE_SIMULATE=1`` or
     while any EXCLUDE_INTEGRITY row exists. Idempotent: a second run finds
     no held rows to act on.
+
+    ``entitlement_month="YYYYMM"`` scopes the whole run — the DB query, every
+    report section, the integrity refusal and every write CAS — to rows of
+    that entitlement month; rows of any other month are never loaded. ``None``
+    (the default) is every month, exactly as before. Raises ValueError for a
+    malformed month.
     """
+    entitlement_month = validate_entitlement_month_filter(entitlement_month)
     now = _now(now_utc)
     statuses = {RETENTION_PENDING_STATUS} | ({RETENTION_BROKEN_STATUS} if include_broken else set())
     simulate = _affiliate_simulate_enabled()
@@ -982,12 +1028,16 @@ def release_retention_holds(
         "outcomes": {},
         "rows": [],
     }
+    if entitlement_month is not None:
+        report["entitlement_month_filter"] = entitlement_month
     if simulate and not dry_run:
         report["refused"] = "affiliate_simulate_enabled"
         logger.warning("%s action=rollback_refused reason=affiliate_simulate_enabled", LOG_TAG)
         return report
 
     query = {"ledger_type": LEDGER_TYPE, "status": {"$in": sorted(statuses)}}
+    if entitlement_month is not None:
+        query.update(_entitlement_month_filter(entitlement_month))
     # limit=0 is "no limit" for pymongo (which rejects None).
     rows = list(db.affiliate_ledger.find(query, sort=[("created_at", ASCENDING), ("_id", ASCENDING)],
                                          limit=max(0, int(limit or 0))))
@@ -1005,6 +1055,10 @@ def release_retention_holds(
     # can be refused as a whole before any row moves.
     classified: list = []
     for row in rows:
+        if entitlement_month is not None and _ledger_entitlement_month(row) != entitlement_month:
+            # Defensive: the query already scoped this; never let a row the
+            # filter does not cover into the report or the commit population.
+            continue
         status = str(row.get("status") or "")
         report["held_total"] += 1
         report["held_by_status"][status] = report["held_by_status"].get(status, 0) + 1
@@ -1062,7 +1116,9 @@ def release_retention_holds(
     for row, cls, detail, item in ([] if dry_run else classified):
         try:
             if cls == BACKFILL_RELEASE:
-                before, after = _release_held_row(db, row, statuses=statuses, now_utc=now)
+                before, after = _release_held_row(
+                    db, row, statuses=statuses, now_utc=now, entitlement_month=entitlement_month,
+                )
                 if before is None:
                     item["outcome"] = "lost_race"
                 else:
@@ -1080,7 +1136,9 @@ def release_retention_holds(
                     item["outcome"],
                 )
             elif cls in _REVIEW_REASON_BY_CLASS:
-                before = _mark_for_review(db, row, cls, detail, statuses=statuses, now_utc=now)
+                before = _mark_for_review(
+                    db, row, cls, detail, statuses=statuses, now_utc=now, entitlement_month=entitlement_month,
+                )
                 item["outcome"] = "lost_race" if before is None else "pending_review"
                 logger.info(
                     "%s uid=%s tier=%s year_month=%s action=rollback_review class=%s outcome=%s",
@@ -1105,8 +1163,9 @@ def release_retention_holds(
         db, release_demand=release_demand, review_demand=review_demand, now_utc=now,
     )
     logger.info(
-        "%s action=rollback_done dry_run=%s held_total=%s class_counts=%s outcomes=%s",
-        LOG_TAG, dry_run, report["held_total"], report["class_counts"], report["outcomes"],
+        "%s action=rollback_done dry_run=%s entitlement_month=%s held_total=%s class_counts=%s outcomes=%s",
+        LOG_TAG, dry_run, entitlement_month or "*", report["held_total"], report["class_counts"],
+        report["outcomes"],
     )
     return report
 
