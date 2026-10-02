@@ -35,18 +35,21 @@ POOL_IDS = ("WELCOME",) + TIERS + DENOMINATION_POOL_IDS
 FINAL_STATUSES = {"ISSUED", "OUT_OF_STOCK", "REJECTED"}
 SETTLING_STATUS = "SETTLING"
 # Affiliate tier-reward RETENTION gate (AFFILIATE_MONTHLY only — never
-# WELCOME, weekly, or any other voucher system). The entitlement is earned
-# the moment the tier is reached; the voucher is only issued once the
-# referrer has stayed subscribed to the Official Channel for a continuous
-# retention period (see affiliate_reward_retention.py for the worker and
-# the leave/rejoin hooks). Both statuses are non-final and are deliberately
-# absent from every status list an issuance path settles from, so no
-# existing path (evaluator, admin approve, retry sweep, month-end settle)
-# can issue a held entitlement early.
+# WELCOME, weekly, or any other voucher system). DISABLED BY DEFAULT: a tier
+# entitlement is created APPROVED and issued in the same evaluation, as it
+# was before the gate existed. Setting AFFILIATE_REWARD_RETENTION_DAYS > 0
+# re-enables it: the voucher is then only issued once the referrer has
+# stayed subscribed to the Official Channel for a continuous retention
+# period (see affiliate_reward_retention.py for the worker, the leave/rejoin
+# hooks, and ``release_retention_holds`` which drains rows held while the
+# gate was on). Both statuses are non-final and are deliberately absent from
+# every status list an issuance path settles from, so no existing path
+# (evaluator, admin approve, retry sweep, month-end settle) can issue a held
+# entitlement early.
 RETENTION_PENDING_STATUS = "PENDING_RETENTION"
 RETENTION_BROKEN_STATUS = "RETENTION_BROKEN"
 RETENTION_HOLD_STATUSES = frozenset({RETENTION_PENDING_STATUS, RETENTION_BROKEN_STATUS})
-AFFILIATE_RETENTION_DEFAULT_DAYS = 7
+AFFILIATE_RETENTION_DEFAULT_DAYS = 0
 AFFILIATE_BUNDLE_REWARD_TYPE = "affiliate_bundle"
 # The surplus sweep's own index (see ensure_affiliate_indexes / Q2 below).
 # Created via plain create_index (never _ensure_equivalent_index), so this
@@ -113,7 +116,8 @@ def affiliate_retention_period() -> timedelta | None:
     """Continuous Official Channel subscription required before a NEW
     affiliate tier entitlement may be issued. ``None`` disables the gate.
 
-    Read at call time from ``AFFILIATE_REWARD_RETENTION_DAYS`` (default 7).
+    Read at call time from ``AFFILIATE_REWARD_RETENTION_DAYS`` (default 0,
+    i.e. immediate issuance).
     Only entitlement CREATION consults this: each ledger freezes its own
     ``retention_required_seconds``, so changing the setting never
     re-times, releases, or re-gates an entitlement that already exists.
@@ -126,6 +130,25 @@ def affiliate_retention_period() -> timedelta | None:
     if days <= 0:
         return None
     return timedelta(days=days)
+
+
+def _log_retention_config() -> None:
+    """One boot-time line operators can grep to confirm the effective gate —
+    a Fly secret overrides the code default, so the default alone proves
+    nothing about production."""
+    raw = os.getenv("AFFILIATE_REWARD_RETENTION_DAYS")
+    period = affiliate_retention_period()
+    source = "default" if raw in (None, "") else "env"
+    if period is None:
+        logger.info("[AFFILIATE][RETENTION_CONFIG] gate=disabled release=immediate source=%s raw=%r", source, raw)
+    else:
+        logger.warning(
+            "[AFFILIATE][RETENTION_CONFIG] gate=ENABLED retention_days=%s source=%s raw=%r",
+            period.total_seconds() / 86400, source, raw,
+        )
+
+
+_log_retention_config()
 
 
 def _retention_chat_id() -> int | None:

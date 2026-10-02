@@ -3523,6 +3523,7 @@ def _affiliate_ledger_issued_for_congrats(user_id: int, year_month: str, tier_la
             "year_month": 1,
             "reward_plan": 1,
             "retention_required_seconds": 1,
+            "retention_waived_at": 1,
         },
     )
     if not ledger:
@@ -3538,12 +3539,16 @@ def _affiliate_ledger_issued_for_congrats(user_id: int, year_month: str, tier_la
     return ledger
 
 
-def _late_congrats_tail(retention_required_seconds) -> str:
+def _late_congrats_tail(retention_required_seconds, *, retention_waived: bool = False) -> str:
     """Tail for a milestone announced after its entitlement month closed.
     Quotes the hold the ledger actually froze at creation (the retention
     period is configurable and each entitlement keeps its own); a late row
-    with no retention hold (e.g. issued late after a restock) gets neutral
-    copy rather than an invented period."""
+    with no retention hold (e.g. issued late after a restock), or one whose
+    hold was waived by the retention rollback (``retention_waived_at``) and
+    so never actually served it, gets neutral copy rather than an invented
+    period."""
+    if retention_waived:
+        return "Reward unlocked 🔓"
     try:
         seconds = int(retention_required_seconds or 0)
     except (TypeError, ValueError):
@@ -3656,7 +3661,10 @@ def _attempt_affiliate_milestone_congrats(
     elif is_late:
         # The entitlement month has closed, so the next tier can no longer
         # be reached in it — a "Next:" nudge would advertise a dead target.
-        tail = _late_congrats_tail(issued_ledger.get("retention_required_seconds"))
+        tail = _late_congrats_tail(
+            issued_ledger.get("retention_required_seconds"),
+            retention_waived=issued_ledger.get("retention_waived_at") is not None,
+        )
     else:
         next_tier, next_tier_label = REFERRAL_CONGRATS_TIER_THRESHOLDS[tier_idx + 1]
         # The NEXT milestone is earned in the same entitlement month, so it

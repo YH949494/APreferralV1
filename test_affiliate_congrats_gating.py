@@ -362,6 +362,37 @@ def test_late_announcement_quotes_the_ledgers_frozen_hold(fake_db, monkeypatch, 
         assert "Held the Official Channel" not in posts[0]
 
 
+def test_rollback_waived_reward_uses_neutral_copy(fake_db, monkeypatch):
+    """Retention rollback: a held September row released in October still
+    carries its frozen 7-day retention_required_seconds, but it never served
+    the hold — the announcement must not claim it did."""
+    fake_db["users"].insert_one({"user_id": 609, "username": "user609"})
+    _seed_entitlement(
+        fake_db, 609, "T1", year_month="202609", issued_at=ISSUED_OCT,
+        retention_required_seconds=7 * 86400, retention_waived_at=ISSUED_OCT,
+    )
+    posts = _capture_posts(monkeypatch)
+
+    scheduler.retry_pending_affiliate_milestone_congrats(now_utc_ts=ISSUED_OCT)
+
+    assert len(posts) == 1
+    assert "Reward unlocked" in posts[0]
+    assert "Held the Official Channel" not in posts[0]
+    assert "7 days" not in posts[0]
+
+
+def test_immediate_release_reward_uses_neutral_copy(fake_db, monkeypatch):
+    """Post-rollback immediate issuance carries no retention fields at all."""
+    fake_db["users"].insert_one({"user_id": 610, "username": "user610"})
+    _seed_entitlement(fake_db, 610, "T1", year_month="202609", issued_at=ISSUED_OCT)
+    posts = _capture_posts(monkeypatch)
+
+    scheduler.retry_pending_affiliate_milestone_congrats(now_utc_ts=ISSUED_OCT)
+
+    assert len(posts) == 1
+    assert "Held the Official Channel" not in posts[0]
+
+
 def test_batch_limit_does_not_starve_behind_already_announced_rows(fake_db, monkeypatch):
     # Announced rows stay ISSUED forever; if the limit were applied before
     # dropping them, every run would get the same done prefix and a late

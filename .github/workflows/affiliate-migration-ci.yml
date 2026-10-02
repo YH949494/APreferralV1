@@ -32,6 +32,8 @@ on:
       - "main.py"
       - "fake_mongo.py"
       - "scripts/verify_affiliate_reward_plan.py"
+      - "scripts/release_affiliate_retention_holds.py"
+      - "scheduler.py"
       - "static/**"
       - "test_affiliate_*.py"
       - "ci/**"
@@ -70,6 +72,8 @@ env:
     test_affiliate_my_stats_api.py
     test_affiliate_out_of_stock_retry.py
     test_affiliate_historical_replenish.py
+    test_affiliate_retention_rollback.py
+    test_affiliate_congrats_gating.py
 
 jobs:
   migration-tests:
