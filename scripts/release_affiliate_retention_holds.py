@@ -22,12 +22,20 @@ admin approve/reject only) without issuing anything. It refuses to run when:
 * ``--expect-release N`` does not match the RELEASE count found now, so a
   commit only ever acts on the population an operator just reviewed.
 
+``--entitlement-month YYYYMM`` scopes the run to one entitlement month: the
+DB query, every report section, the EXCLUDE_INTEGRITY refusal, the
+``--expect-release`` comparison and every write. Rows of any other month are
+never loaded, so never modified. Omitted = every month (unchanged).
+
 Safe to re-run: a second commit finds nothing held to act on.
 
 Usage
 -----
     MONGO_URL=... python scripts/release_affiliate_retention_holds.py            # dry run
     MONGO_URL=... python scripts/release_affiliate_retention_holds.py --commit --expect-release 12
+    MONGO_URL=... python scripts/release_affiliate_retention_holds.py --entitlement-month 202610
+    MONGO_URL=... python scripts/release_affiliate_retention_holds.py --entitlement-month 202610 \
+        --commit --expect-release 44
 """
 from __future__ import annotations
 
@@ -55,7 +63,9 @@ def _write_db():
 def _summary(report: dict) -> str:
     lines = [
         f"dry_run={report['dry_run']} include_broken={report['include_broken']} "
-        f"simulate_mode={report['simulate_mode']} refused={report['refused']}",
+        f"simulate_mode={report['simulate_mode']} refused={report['refused']}"
+        + (f" entitlement_month={report['entitlement_month_filter']}"
+           if report.get("entitlement_month_filter") else ""),
         f"held_total={report['held_total']} by_status={report['held_by_status']}",
         "class_counts=" + json.dumps(report["class_counts"], sort_keys=True),
     ]
@@ -77,15 +87,24 @@ def main(argv=None, *, db_factory=None, read_only_db_factory=None) -> int:
                         help="leave RETENTION_BROKEN rows held (default: include them)")
     parser.add_argument("--expect-release", type=int, default=None,
                         help="required with --commit: the RELEASE count from the reviewed dry run")
+    parser.add_argument("--entitlement-month", default=None, metavar="YYYYMM",
+                        help="only rows of this entitlement month, e.g. 202610 (default: every month)")
     parser.add_argument("--no-rows", action="store_true", help="omit per-row details from the JSON")
     parser.add_argument("--output", help="also write the JSON report to this path")
     args = parser.parse_args(argv)
     include_broken = not args.exclude_broken
+    try:
+        month = rr.validate_entitlement_month_filter(args.entitlement_month)
+    except ValueError:
+        print(f"refused: --entitlement-month must be YYYYMM (e.g. 202610), got {args.entitlement_month!r}",
+              file=sys.stderr)
+        return 2
+    scope = {"include_broken": include_broken, "entitlement_month": month}
 
     if not args.commit:
         if read_only_db_factory is None:
             from scripts.verify_affiliate_reward_plan import _read_only_db as read_only_db_factory
-        report = rr.release_retention_holds(read_only_db_factory(), dry_run=True, include_broken=include_broken)
+        report = rr.release_retention_holds(read_only_db_factory(), dry_run=True, **scope)
         return _emit(report, args, rc=0)
 
     if args.expect_release is None:
@@ -98,18 +117,19 @@ def main(argv=None, *, db_factory=None, read_only_db_factory=None) -> int:
         return 2
 
     db = (db_factory or _write_db)()
-    preview = rr.release_retention_holds(db, dry_run=True, include_broken=include_broken)
+    preview = rr.release_retention_holds(db, dry_run=True, **scope)
     counts = preview["class_counts"]
+    where = f" for entitlement month {month}" if month else ""
     if counts[rr.BACKFILL_EXCLUDE_INTEGRITY]:
-        print(f"refused: {counts[rr.BACKFILL_EXCLUDE_INTEGRITY]} EXCLUDE_INTEGRITY row(s); "
+        print(f"refused: {counts[rr.BACKFILL_EXCLUDE_INTEGRITY]} EXCLUDE_INTEGRITY row(s){where}; "
               "resolve them before committing", file=sys.stderr)
         return _emit(preview, args, rc=2)
     if counts[rr.BACKFILL_RELEASE] != args.expect_release:
-        print(f"refused: RELEASE count is {counts[rr.BACKFILL_RELEASE]}, expected {args.expect_release}; "
+        print(f"refused: RELEASE count{where} is {counts[rr.BACKFILL_RELEASE]}, expected {args.expect_release}; "
               "re-run the dry run and review", file=sys.stderr)
         return _emit(preview, args, rc=2)
 
-    report = rr.release_retention_holds(db, dry_run=False, include_broken=include_broken)
+    report = rr.release_retention_holds(db, dry_run=False, **scope)
     rc = 0 if report["refused"] is None and not any(
         str(k).startswith("error_") for k in report.get("outcomes", {})
     ) else 1

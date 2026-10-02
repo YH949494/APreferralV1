@@ -1027,3 +1027,259 @@ class TestScript:
         rc, out, _ = self._main(["--commit", "--expect-release", "0"], db)
         assert rc == 0 and json.loads(out)["held_total"] == 0
         _assert_one_bundle_per_tier(db)
+
+
+# ---------------------------------------------------------------------------
+# --entitlement-month: release one month only, every other month untouched
+# ---------------------------------------------------------------------------
+
+class TestEntitlementMonthFilter:
+    """Production shape: September rows held with an EMPTY September batch,
+    October rows held with October stock. ``entitlement_month="202610"``
+    must scope the query, the report, the refusals and every write."""
+
+    SEP_UIDS = (UID, UID + 2)
+    OCT_UID = UID + 1
+
+    def _mixed(self, monkeypatch):
+        db = _db()
+        _stock(db, "202610", now=SEP_30)                      # no September stock at all
+        for uid in (*self.SEP_UIDS, self.OCT_UID):
+            _user(db, uid=uid)
+        _hold(db, monkeypatch, uid=UID, total=25, at=SEP_28)          # Sep T1, T2
+        _hold(db, monkeypatch, uid=UID + 2, total=10, at=SEP_28)      # Sep T1
+        _hold(db, monkeypatch, uid=self.OCT_UID, total=25, at=OCT_01)  # Oct T1, T2
+        return db
+
+    @staticmethod
+    def _rows(db, month):
+        return sorted(
+            (copy.deepcopy(r) for r in db.affiliate_ledger.find({"year_month": month})),
+            key=lambda r: str(r["_id"]),
+        )
+
+    def _main(self, argv, db):
+        return TestScript._main(None, argv, db)
+
+    # 1
+    def test_dry_run_returns_only_october_held_rows(self, monkeypatch):
+        db = self._mixed(monkeypatch)
+        snap = _snapshot(db)
+        report = _backfill(db, entitlement_month="202610")
+        assert _snapshot(db) == snap
+        oct_ids = {str(r["_id"]) for r in self._rows(db, "202610")}
+        assert report["entitlement_month_filter"] == "202610"
+        assert report["held_total"] == 2
+        assert report["held_by_status"] == {ar.RETENTION_PENDING_STATUS: 2}
+        assert report["class_counts"]["RELEASE"] == 2
+        assert sum(report["class_counts"].values()) == 2
+        assert {r["ledger_id"] for r in report["rows"]} == oct_ids
+        assert {r["entitlement_month"] for r in report["rows"]} == {"202610"}
+        assert report["by_tier"] == {
+            "T1": {**{c: 0 for c in rr.BACKFILL_CLASSES}, "RELEASE": 1},
+            "T2": {**{c: 0 for c in rr.BACKFILL_CLASSES}, "RELEASE": 1},
+        }
+
+    # 2
+    def test_september_rows_absent_from_counts_and_output(self, monkeypatch):
+        db = self._mixed(monkeypatch)
+        report = _backfill(db, entitlement_month="202610")
+        listed = {r["ledger_id"] for r in report["rows"]}
+        users = {r["user"] for r in report["rows"]}
+        for row in self._rows(db, "202609"):
+            assert str(row["_id"]) not in listed
+            assert rr._mask_user_id(row["user_id"]) not in users
+        assert "202609" not in json.dumps(report, default=str)
+
+    # The DB query itself is scoped: September rows are never loaded.
+    def test_query_never_loads_other_months(self, monkeypatch):
+        db = self._mixed(monkeypatch)
+        coll = db.affiliate_ledger
+        real_find = coll.find
+        loaded = []
+
+        def spy_find(query=None, *args, **kwargs):
+            out = list(real_find(query, *args, **kwargs))
+            if isinstance(query, dict) and "status" in query and "_id" not in query:
+                loaded.extend(out)
+            return out
+
+        coll.find = spy_find
+        _backfill(db, entitlement_month="202610", dry_run=False)
+        assert loaded and {ar._ledger_entitlement_month(r) for r in loaded} == {"202610"}
+
+    # 3
+    def test_commit_modifies_only_october_rows(self, monkeypatch):
+        db = self._mixed(monkeypatch)
+        report = _backfill(db, entitlement_month="202610", dry_run=False)
+        assert report["outcomes"] == {"issued": 2}
+        assert {r["status"] for r in self._rows(db, "202610")} == {"ISSUED"}
+        assert {r["status"] for r in self._rows(db, "202609")} == {ar.RETENTION_PENDING_STATUS}
+        assert {r["batch_id"] for r in _issued(db)} <= _batch_ids(db, "202610")
+        assert _issued(db, UID) == [] and _issued(db, UID + 2) == []
+        _assert_one_bundle_per_tier(db, uid=self.OCT_UID)
+
+    # 4
+    def test_september_rows_byte_for_byte_unchanged(self, monkeypatch):
+        db = self._mixed(monkeypatch)
+        sep_before = self._rows(db, "202609")
+        assert len(sep_before) == 3
+        _backfill(db, entitlement_month="202610", dry_run=False)
+        _backfill(db, now=OCT_02 + DAY, entitlement_month="202610", dry_run=False)
+        assert self._rows(db, "202609") == sep_before
+
+    # 5
+    def test_expect_release_compares_against_october_count_only(self, monkeypatch):
+        db = self._mixed(monkeypatch)
+        sep_before = self._rows(db, "202609")
+        assert _backfill(db)["class_counts"]["RELEASE"] == 5          # all months
+        rc, out, err = self._main(["--entitlement-month", "202610", "--commit", "--expect-release", "2"], db)
+        report = json.loads(out)
+        assert rc == 0, err
+        assert report["entitlement_month_filter"] == "202610"
+        assert report["class_counts"]["RELEASE"] == 2 and report["outcomes"] == {"issued": 2}
+        assert "entitlement_month=202610" in err
+        assert self._rows(db, "202609") == sep_before
+
+    # 6
+    def test_wrong_expected_count_refuses_with_zero_writes(self, monkeypatch):
+        db = self._mixed(monkeypatch)
+        snap = _snapshot(db)
+        for wrong in ("5", "3", "0"):   # 5 = the all-month RELEASE count
+            rc, _, err = self._main(["--entitlement-month", "202610", "--commit", "--expect-release", wrong], db)
+            assert rc == 2
+            assert "RELEASE count for entitlement month 202610 is 2" in err
+        assert _snapshot(db) == snap
+
+    # 7
+    def test_integrity_refusal_only_evaluates_selected_month(self, monkeypatch):
+        db = self._mixed(monkeypatch)
+        _PARK_INTEGRITY(db, _ledger(db, "T1", uid=UID, month="202609"))   # September conflict
+        snap = _snapshot(db)
+        assert _backfill(db, dry_run=False)["refused"] == "integrity_conflicts"   # unfiltered: refused
+        assert _snapshot(db) == snap
+        report = _backfill(db, entitlement_month="202610", dry_run=False)
+        assert report["refused"] is None
+        assert report["class_counts"]["EXCLUDE_INTEGRITY"] == 0
+        assert report["outcomes"] == {"issued": 2}
+        assert {r["status"] for r in self._rows(db, "202609")} == {ar.RETENTION_PENDING_STATUS}
+
+    def test_integrity_conflict_in_selected_month_still_refuses(self, monkeypatch):
+        db = self._mixed(monkeypatch)
+        _PARK_INTEGRITY(db, _ledger(db, "T1", uid=self.OCT_UID, month="202610"))
+        assert _backfill(db, entitlement_month="202609")["class_counts"]["EXCLUDE_INTEGRITY"] == 0
+        snap = _snapshot(db)
+        rc, _, err = self._main(["--entitlement-month", "202610", "--commit", "--expect-release", "1"], db)
+        assert rc == 2 and "EXCLUDE_INTEGRITY row(s) for entitlement month 202610" in err
+        assert _snapshot(db) == snap
+
+    # 8
+    def test_inventory_demand_and_shortfall_use_selected_month_only(self, monkeypatch):
+        db = self._mixed(monkeypatch)
+        unfiltered = _backfill(db)
+        assert unfiltered["inventory"]["202609:AFFILIATE_10"]["shortfall"] > 0   # Sep batch is empty
+        report = _backfill(db, entitlement_month="202610")
+        # Oct T1 = 1x$10; Oct T2 = 1x$5 + 2x$10.
+        assert report["demand_release"] == {"202610:AFFILIATE_10": 3, "202610:AFFILIATE_5": 1}
+        assert report["demand_including_review"] == report["demand_release"]
+        assert set(report["inventory"]) == {"202610:AFFILIATE_10", "202610:AFFILIATE_5"}
+        for inv in report["inventory"].values():
+            assert inv["entitlement_month"] == "202610"
+            assert inv["source"] == "entitlement_batch" and inv["shortfall"] == 0
+
+    # 9
+    def test_by_entitlement_month_contains_only_selected_month(self, monkeypatch):
+        db = self._mixed(monkeypatch)
+        assert set(_backfill(db, entitlement_month="202610")["by_entitlement_month"]) == {"202610"}
+        assert set(_backfill(db, entitlement_month="202609")["by_entitlement_month"]) == {"202609"}
+
+    # 10
+    def test_no_filter_preserves_all_month_behaviour(self, monkeypatch):
+        db = self._mixed(monkeypatch)
+        default = _backfill(db)
+        explicit_none = _backfill(db, entitlement_month=None)
+        assert default == explicit_none
+        assert "entitlement_month_filter" not in default
+        assert default["held_total"] == 5 and default["class_counts"]["RELEASE"] == 5
+        assert set(default["by_entitlement_month"]) == {"202609", "202610"}
+        rc, out, err = self._main([], db)
+        assert rc == 0 and json.loads(out)["held_total"] == 5
+        assert "entitlement_month=" not in err
+        # Unfiltered commit still drains every month.
+        report = _backfill(db, dry_run=False)
+        assert report["outcomes"] == {"issued": 2, "pending_manual": 3}
+        assert db.affiliate_ledger.count_documents(
+            {"status": {"$in": sorted(ar.RETENTION_HOLD_STATUSES)}}) == 0
+
+    # 11
+    @pytest.mark.parametrize("bad", ["2026-10", "20261001", "abc", "", "202613", "202600", " 202610", "2026"])
+    def test_invalid_month_is_rejected(self, monkeypatch, bad):
+        db = self._mixed(monkeypatch)
+        snap = _snapshot(db)
+        for argv in (["--entitlement-month", bad], ["--entitlement-month", bad, "--commit", "--expect-release", "2"]):
+            rc, out, err = self._main(argv, db)
+            assert rc == 2 and out == ""
+            assert "--entitlement-month must be YYYYMM" in err
+        with pytest.raises(ValueError):
+            _backfill(db, entitlement_month=bad, dry_run=False)
+        assert _snapshot(db) == snap
+
+    # 12
+    def test_rerunning_october_commit_is_idempotent(self, monkeypatch):
+        db = self._mixed(monkeypatch)
+        sep_before = self._rows(db, "202609")
+        argv = ["--entitlement-month", "202610", "--commit", "--expect-release"]
+        assert self._main(argv + ["2"], db)[0] == 0
+        snap = _snapshot(db)
+        rc, out, _ = self._main(argv + ["0"], db)
+        report = json.loads(out)
+        assert rc == 0 and report["held_total"] == 0 and report["outcomes"] == {}
+        assert self._main(argv + ["2"], db)[0] == 2                   # nothing left to release
+        assert _snapshot(db) == snap
+        assert self._rows(db, "202609") == sep_before
+        assert len(_issued(db, self.OCT_UID)) == RECIPE["T1"][0] + RECIPE["T2"][0]
+
+    def test_write_cas_is_scoped_to_the_selected_month(self, monkeypatch):
+        """A row that leaves the selected month between read and write is
+        never moved: the CAS re-asserts the month, not just the status."""
+        db = self._mixed(monkeypatch)
+        real_classify = rr._classify_held_row
+
+        def classify_then_move(db_, row):
+            out = real_classify(db_, row)
+            db_.affiliate_ledger.update_one({"_id": row["_id"]}, {"$set": {"entitlement_month": "202609"}})
+            return out
+
+        monkeypatch.setattr(rr, "_classify_held_row", classify_then_move)
+        report = _backfill(db, entitlement_month="202610", dry_run=False)
+        assert report["outcomes"] == {"lost_race": 2}
+        assert {r["status"] for r in self._rows(db, "202610")} == {ar.RETENTION_PENDING_STATUS}
+        assert _issued(db) == []
+
+    @pytest.mark.parametrize("cls", ["REVIEW_BLOCKED", "EXCLUDE_ALREADY_ISSUED"])
+    def test_review_cas_is_scoped_to_the_selected_month(self, monkeypatch, cls):
+        db = self._mixed(monkeypatch)
+        if cls == "REVIEW_BLOCKED":
+            db.users.update_one({"user_id": self.OCT_UID}, {"$set": {"blocked": True}})
+        else:   # parked exclusion: its CAS is built separately
+            db.affiliate_ledger.update_many({"year_month": "202610"}, {"$set": {"voucher_code": "X-ALREADY"}})
+        real_classify = rr._classify_held_row
+
+        def classify_then_move(db_, row):
+            out = real_classify(db_, row)
+            db_.affiliate_ledger.update_one({"_id": row["_id"]}, {"$set": {"entitlement_month": "202609"}})
+            return out
+
+        monkeypatch.setattr(rr, "_classify_held_row", classify_then_move)
+        report = _backfill(db, entitlement_month="202610", dry_run=False)
+        assert report["class_counts"][cls] == 2
+        assert report["outcomes"] == {"lost_race": 2}
+        assert {r["status"] for r in self._rows(db, "202610")} == {ar.RETENTION_PENDING_STATUS}
+
+    def test_historical_rows_without_entitlement_month_match_on_year_month(self, monkeypatch):
+        db = self._mixed(monkeypatch)
+        db.affiliate_ledger.update_many({}, {"$unset": {"entitlement_month": ""}})
+        assert all("entitlement_month" not in r for r in db.affiliate_ledger.find({}))
+        report = _backfill(db, entitlement_month="202610")
+        assert report["held_total"] == 2
+        assert {r["entitlement_month"] for r in report["rows"]} == {"202610"}
