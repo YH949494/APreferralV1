@@ -52,6 +52,7 @@ from affiliate_rewards import (
     RETENTION_BROKEN_STATUS,
     RETENTION_HOLD_STATUSES,
     RETENTION_PENDING_STATUS,
+    RETENTION_ROLLBACK_REVIEW_REASONS,
     SETTLING_STATUS,
     TIERS,
     _INVENTORY_ONLY_RISK_FLAGS,
@@ -677,12 +678,23 @@ def process_affiliate_retention_entitlements(
 #                      stock lands in the allocator's own PENDING_MANUAL.
 #   REVIEW_BLOCKED  -> CAS held -> PENDING_REVIEW (admin approve/reject), no
 #   REVIEW_RISK        inventory touched.
-#   EXCLUDE_*       -> untouched; reported for an operator.
+#   EXCLUDE_ALREADY_ISSUED / _DUPLICATE_TIER / _BELOW_THRESHOLD / _INVALID
+#                   -> CAS held -> PENDING_REVIEW, review_reason
+#                      retention_rollback_<class>; nothing issued, nothing
+#                      else rewritten. Left held they would still be released
+#                      by the retention worker at unlock_at.
+#   EXCLUDE_INTEGRITY -> a commit REFUSES to run at all while any exists
+#                      (issued pool rows already linked to a held ledger need
+#                      a human before anything moves).
 #
-# Every write is conditional on the row still being held with no voucher, so
-# a re-run, the retention worker, the leave/rejoin hooks and the evaluator
-# can race it safely: exactly one actor ever moves a row out of a held
-# status, and the allocator's lease decides who allocates.
+# Every PENDING_REVIEW written here carries a reason in
+# affiliate_rewards.RETENTION_ROLLBACK_REVIEW_REASONS, which the evaluator
+# never settles on its own: admin approve/reject is the only way out.
+#
+# Every write is conditional on the row still being held, so a re-run, the
+# retention worker, the leave/rejoin hooks and the evaluator can race it
+# safely: exactly one actor ever moves a row out of a held status, and the
+# allocator's lease decides who allocates.
 
 BACKFILL_RELEASE = "RELEASE"
 BACKFILL_REVIEW_BLOCKED = "REVIEW_BLOCKED"
@@ -706,6 +718,16 @@ _REVIEW_REASON_BY_CLASS = {
     BACKFILL_REVIEW_BLOCKED: "retention_rollback_blocked_user",
     BACKFILL_REVIEW_RISK: "retention_rollback_risk_flags",
 }
+# Excluded rows that must not stay worker-releasable: parked, never issued.
+_PARKED_EXCLUDE_CLASSES = (
+    BACKFILL_EXCLUDE_ALREADY_ISSUED,
+    BACKFILL_EXCLUDE_DUPLICATE_TIER,
+    BACKFILL_EXCLUDE_BELOW_THRESHOLD,
+    BACKFILL_EXCLUDE_INVALID,
+)
+_REVIEW_REASON_BY_CLASS.update({cls: f"retention_rollback_{cls.lower()}" for cls in _PARKED_EXCLUDE_CLASSES})
+# The evaluator's "never auto-settle" list must cover every reason written here.
+assert set(_REVIEW_REASON_BY_CLASS.values()) <= RETENTION_ROLLBACK_REVIEW_REASONS
 ROLLBACK_SOURCE = "retention_rollback"
 
 
@@ -816,28 +838,37 @@ def _classify_held_row(db, row: dict) -> tuple[str, dict]:
 
 
 def _mark_for_review(db, row: dict, cls: str, detail: dict, *, statuses, now_utc: datetime) -> dict | None:
-    flags = list(detail.get("merged_risk_flags") or [])
-    if cls == BACKFILL_REVIEW_BLOCKED and "blocked_user" not in flags:
-        flags.append("blocked_user")
+    """CAS held -> PENDING_REVIEW. Never issues, never touches inventory.
+
+    REVIEW_* rows must also carry no voucher and get their merged risk flags.
+    Parked EXCLUDE_* rows keep everything they already carry (an
+    EXCLUDE_ALREADY_ISSUED row HAS a voucher, so that guard cannot apply);
+    only the status, the reason and the retention bookkeeping change.
+    """
+    set_doc = {
+        "status": "PENDING_REVIEW",
+        "review_reason": _REVIEW_REASON_BY_CLASS[cls],
+        # The retention phase is over (waived, not served). Recorded so an
+        # admin approval of a previous-month entitlement still draws from
+        # that month's own batch (see _issue_denomination_bundle), and so no
+        # announcement quotes a hold the user never served.
+        "retention_completed_at": now_utc,
+        "retention_waived_at": now_utc,
+        "retention_release_source": ROLLBACK_SOURCE,
+        "updated_at": now_utc,
+    }
+    if cls in _PARKED_EXCLUDE_CLASSES:
+        cas = {"_id": row["_id"], "ledger_type": LEDGER_TYPE, "status": {"$in": sorted(statuses)}}
+        set_doc["retention_rollback_reasons"] = list(detail.get("reasons") or [])
+    else:
+        cas = _held_cas_filter(row["_id"], statuses)
+        flags = list(detail.get("merged_risk_flags") or [])
+        if cls == BACKFILL_REVIEW_BLOCKED and "blocked_user" not in flags:
+            flags.append("blocked_user")
+        set_doc["risk_flags"] = flags
     return db.affiliate_ledger.find_one_and_update(
-        _held_cas_filter(row["_id"], statuses),
-        {
-            "$set": {
-                "status": "PENDING_REVIEW",
-                "review_reason": _REVIEW_REASON_BY_CLASS[cls],
-                "risk_flags": flags,
-                # The retention phase is over (waived, not served). Recorded
-                # so an admin approval of a previous-month entitlement still
-                # draws from that month's own batch (see
-                # _issue_denomination_bundle), and so no announcement quotes
-                # a hold the user never served.
-                "retention_completed_at": now_utc,
-                "retention_waived_at": now_utc,
-                "retention_release_source": ROLLBACK_SOURCE,
-                "updated_at": now_utc,
-            },
-            "$unset": {"unlock_at": "", "retention_next_check_at": ""},
-        },
+        cas,
+        {"$set": set_doc, "$unset": {"unlock_at": "", "retention_next_check_at": ""}},
         return_document=ReturnDocument.BEFORE,
     )
 
@@ -924,9 +955,11 @@ def release_retention_holds(
 
     ``dry_run=True`` (the default) performs reads only. With
     ``dry_run=False`` RELEASE rows are issued through the canonical
-    allocator and REVIEW_* rows are parked in PENDING_REVIEW; EXCLUDE_* rows
-    are never written. Refuses to write while ``AFFILIATE_SIMULATE=1``.
-    Idempotent: a second run finds no held rows to act on.
+    allocator; REVIEW_* rows and the EXCLUDE_* classes in
+    ``_PARKED_EXCLUDE_CLASSES`` are parked in PENDING_REVIEW without issuing
+    anything. Refuses to write anything while ``AFFILIATE_SIMULATE=1`` or
+    while any EXCLUDE_INTEGRITY row exists. Idempotent: a second run finds
+    no held rows to act on.
     """
     now = _now(now_utc)
     statuses = {RETENTION_PENDING_STATUS} | ({RETENTION_BROKEN_STATUS} if include_broken else set())
@@ -968,6 +1001,9 @@ def release_retention_holds(
     def _bump_outcome(name):
         report["outcomes"][name] = report["outcomes"].get(name, 0) + 1
 
+    # Pass 1 classifies everything (reads only); pass 2 writes, so a commit
+    # can be refused as a whole before any row moves.
+    classified: list = []
     for row in rows:
         status = str(row.get("status") or "")
         report["held_total"] += 1
@@ -1012,44 +1048,53 @@ def release_retention_holds(
         }
         if "duplicate_statuses" in detail:
             item["duplicate_statuses"] = detail["duplicate_statuses"]
-
-        if not dry_run:
-            try:
-                if cls == BACKFILL_RELEASE:
-                    before, after = _release_held_row(db, row, statuses=statuses, now_utc=now)
-                    if before is None:
-                        item["outcome"] = "lost_race"
-                    else:
-                        final = str((after or {}).get("status") or "")
-                        item["outcome"] = {"ISSUED": "issued", "PENDING_MANUAL": "pending_manual",
-                                           SETTLING_STATUS: "in_progress"}.get(final, f"status_{final.lower()}")
-                        item["final_status"] = final
-                        if final == "PENDING_MANUAL":
-                            item["inventory_flags_after"] = sorted(
-                                f for f in (after or {}).get("risk_flags") or [] if f in _INVENTORY_ONLY_RISK_FLAGS
-                            )
-                    logger.info(
-                        "%s uid=%s tier=%s year_month=%s action=rollback_release outcome=%s",
-                        LOG_TAG, row.get("user_id"), detail.get("tier"), detail.get("entitlement_month"),
-                        item["outcome"],
-                    )
-                elif cls in _REVIEW_REASON_BY_CLASS:
-                    before = _mark_for_review(db, row, cls, detail, statuses=statuses, now_utc=now)
-                    item["outcome"] = "lost_race" if before is None else "pending_review"
-                    logger.info(
-                        "%s uid=%s tier=%s year_month=%s action=rollback_review class=%s outcome=%s",
-                        LOG_TAG, row.get("user_id"), detail.get("tier"), detail.get("entitlement_month"),
-                        cls, item["outcome"],
-                    )
-                else:
-                    item["outcome"] = "untouched"
-            except Exception as exc:
-                # A crash after the SETTLING CAS is recovered by the existing
-                # stale-SETTLING retry sweep (no lease => eligible after TTL).
-                logger.exception("%s ledger_id=%s action=rollback_failed", LOG_TAG, row.get("_id"))
-                item["outcome"] = f"error_{exc.__class__.__name__}"
-            _bump_outcome(item["outcome"])
         report["rows"].append(item)
+        classified.append((row, cls, detail, item))
+
+    if not dry_run and report["class_counts"][BACKFILL_EXCLUDE_INTEGRITY]:
+        report["refused"] = "integrity_conflicts"
+        logger.warning(
+            "%s action=rollback_refused reason=integrity_conflicts count=%s",
+            LOG_TAG, report["class_counts"][BACKFILL_EXCLUDE_INTEGRITY],
+        )
+        classified = []
+
+    for row, cls, detail, item in ([] if dry_run else classified):
+        try:
+            if cls == BACKFILL_RELEASE:
+                before, after = _release_held_row(db, row, statuses=statuses, now_utc=now)
+                if before is None:
+                    item["outcome"] = "lost_race"
+                else:
+                    final = str((after or {}).get("status") or "")
+                    item["outcome"] = {"ISSUED": "issued", "PENDING_MANUAL": "pending_manual",
+                                       SETTLING_STATUS: "in_progress"}.get(final, f"status_{final.lower()}")
+                    item["final_status"] = final
+                    if final == "PENDING_MANUAL":
+                        item["inventory_flags_after"] = sorted(
+                            f for f in (after or {}).get("risk_flags") or [] if f in _INVENTORY_ONLY_RISK_FLAGS
+                        )
+                logger.info(
+                    "%s uid=%s tier=%s year_month=%s action=rollback_release outcome=%s",
+                    LOG_TAG, row.get("user_id"), detail.get("tier"), detail.get("entitlement_month"),
+                    item["outcome"],
+                )
+            elif cls in _REVIEW_REASON_BY_CLASS:
+                before = _mark_for_review(db, row, cls, detail, statuses=statuses, now_utc=now)
+                item["outcome"] = "lost_race" if before is None else "pending_review"
+                logger.info(
+                    "%s uid=%s tier=%s year_month=%s action=rollback_review class=%s outcome=%s",
+                    LOG_TAG, row.get("user_id"), detail.get("tier"), detail.get("entitlement_month"),
+                    cls, item["outcome"],
+                )
+            else:
+                item["outcome"] = "untouched"
+        except Exception as exc:
+            # A crash after the SETTLING CAS is recovered by the existing
+            # stale-SETTLING retry sweep (no lease => eligible after TTL).
+            logger.exception("%s ledger_id=%s action=rollback_failed", LOG_TAG, row.get("_id"))
+            item["outcome"] = f"error_{exc.__class__.__name__}"
+        _bump_outcome(item["outcome"])
 
     def _fmt(demand: dict) -> dict:
         return {f"{m}:{p}": int(q) for (m, p, _legacy), q in sorted(demand.items())}

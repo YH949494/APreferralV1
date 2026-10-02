@@ -110,6 +110,10 @@ class FakeCollection:
                 if not any(self._match(doc, sub) for sub in v):
                     return False
                 continue
+            if k == "$and":
+                if not all(self._match(doc, sub) for sub in v):
+                    return False
+                continue
             if not self._match_value(_get_dotted(doc, k), v):
                 return False
         return True

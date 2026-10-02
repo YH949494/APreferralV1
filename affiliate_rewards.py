@@ -50,6 +50,19 @@ RETENTION_PENDING_STATUS = "PENDING_RETENTION"
 RETENTION_BROKEN_STATUS = "RETENTION_BROKEN"
 RETENTION_HOLD_STATUSES = frozenset({RETENTION_PENDING_STATUS, RETENTION_BROKEN_STATUS})
 AFFILIATE_RETENTION_DEFAULT_DAYS = 0
+# PENDING_REVIEW reasons written by the retention rollback
+# (affiliate_reward_retention.release_retention_holds). Unlike an ordinary
+# blocked-user PENDING_REVIEW row — which the evaluator settles on its own
+# once the user is unblocked — these wait for an explicit admin
+# approve/reject: the evaluator never settles them.
+RETENTION_ROLLBACK_REVIEW_REASONS = frozenset({
+    "retention_rollback_blocked_user",
+    "retention_rollback_risk_flags",
+    "retention_rollback_exclude_already_issued",
+    "retention_rollback_exclude_duplicate_tier",
+    "retention_rollback_exclude_below_threshold",
+    "retention_rollback_exclude_invalid",
+})
 AFFILIATE_BUNDLE_REWARD_TYPE = "affiliate_bundle"
 # The surplus sweep's own index (see ensure_affiliate_indexes / Q2 below).
 # Created via plain create_index (never _ensure_equivalent_index), so this
@@ -1473,6 +1486,21 @@ def _resolve_welcome_ledger_target(db, ledger: dict, *, now_utc: datetime) -> di
 
 def _no_voucher_filter():
     return {"$or": [{"voucher_code": None}, {"voucher_code": {"$exists": False}}]}
+
+
+def _is_rollback_review_parked(ledger: dict | None) -> bool:
+    return (
+        str((ledger or {}).get("status") or "") == "PENDING_REVIEW"
+        and (ledger or {}).get("review_reason") in RETENTION_ROLLBACK_REVIEW_REASONS
+    )
+
+
+def _not_rollback_review_parked_filter() -> dict:
+    """Query form of ``not _is_rollback_review_parked``."""
+    return {"$or": [
+        {"status": {"$ne": "PENDING_REVIEW"}},
+        {"review_reason": {"$nin": sorted(RETENTION_ROLLBACK_REVIEW_REASONS)}},
+    ]}
 
 
 def _as_aware_utc(value):
@@ -3586,6 +3614,17 @@ def evaluate_monthly_affiliate_reward(db, *, referrer_id: int, now_utc: datetime
             last_ledger = ledger
             continue
 
+        # Parked for review by the retention rollback: admin approve/reject
+        # only. Checked before the simulate branch for the same reason as
+        # the hold check above.
+        if _is_rollback_review_parked(ledger):
+            logger.info(
+                "[AFFILIATE][LEDGER_SKIP] user_id=%s tier=%s year_month=%s reason=rollback_review review_reason=%s",
+                int(referrer_id), eligible_tier, yyyymm, ledger.get("review_reason"),
+            )
+            last_ledger = ledger
+            continue
+
         if _affiliate_simulate_enabled():
             db.affiliate_ledger.update_one(
                 {"_id": ledger["_id"]},
@@ -3619,10 +3658,15 @@ def evaluate_monthly_affiliate_reward(db, *, referrer_id: int, now_utc: datetime
 
         # Transition any non-final, non-settling status to SETTLING before claiming.
         # Retention-held statuses are excluded here too: a concurrent create
-        # that raced the read above must still never be settled early.
+        # that raced the read above must still never be settled early; nor
+        # may a row the retention rollback parked for review in between.
         if status != SETTLING_STATUS:
             settle_res = db.affiliate_ledger.update_one(
-                {"_id": ledger["_id"], "status": {"$nin": list(FINAL_STATUSES | RETENTION_HOLD_STATUSES)}, **_no_voucher_filter()},
+                {
+                    "_id": ledger["_id"],
+                    "status": {"$nin": list(FINAL_STATUSES | RETENTION_HOLD_STATUSES)},
+                    "$and": [_no_voucher_filter(), _not_rollback_review_parked_filter()],
+                },
                 {"$set": {"status": SETTLING_STATUS, "updated_at": now_utc}},
             )
             if settle_res.modified_count == 0:

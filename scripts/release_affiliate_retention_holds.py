@@ -9,15 +9,16 @@ stock in each entitlement month's own batch. No voucher codes are printed;
 user ids are masked.
 
 ``--commit`` performs ``affiliate_reward_retention.release_retention_holds(
-dry_run=False)``: RELEASE rows go held -> SETTLING -> canonical allocator,
-REVIEW_* rows go to PENDING_REVIEW, EXCLUDE_* rows are untouched. It refuses
-to run when:
+dry_run=False)``: RELEASE rows go held -> SETTLING -> canonical allocator;
+REVIEW_* rows and EXCLUDE_ALREADY_ISSUED / _DUPLICATE_TIER / _BELOW_THRESHOLD
+/ _INVALID rows go to PENDING_REVIEW (review_reason retention_rollback_*,
+admin approve/reject only) without issuing anything. It refuses to run when:
 
 * the retention gate is still enabled in THIS process's environment (run it
   inside the app machine, e.g. ``fly ssh console``, so that is the deployed
   configuration) — new holds would keep appearing behind the backfill;
 * ``AFFILIATE_SIMULATE=1``;
-* any EXCLUDE_INTEGRITY row exists (unless ``--allow-integrity-exclusions``);
+* any EXCLUDE_INTEGRITY row exists (no override: resolve it first);
 * ``--expect-release N`` does not match the RELEASE count found now, so a
   commit only ever acts on the population an operator just reviewed.
 
@@ -76,8 +77,6 @@ def main(argv=None, *, db_factory=None, read_only_db_factory=None) -> int:
                         help="leave RETENTION_BROKEN rows held (default: include them)")
     parser.add_argument("--expect-release", type=int, default=None,
                         help="required with --commit: the RELEASE count from the reviewed dry run")
-    parser.add_argument("--allow-integrity-exclusions", action="store_true",
-                        help="commit even if EXCLUDE_INTEGRITY rows exist (they stay untouched)")
     parser.add_argument("--no-rows", action="store_true", help="omit per-row details from the JSON")
     parser.add_argument("--output", help="also write the JSON report to this path")
     args = parser.parse_args(argv)
@@ -101,9 +100,9 @@ def main(argv=None, *, db_factory=None, read_only_db_factory=None) -> int:
     db = (db_factory or _write_db)()
     preview = rr.release_retention_holds(db, dry_run=True, include_broken=include_broken)
     counts = preview["class_counts"]
-    if counts[rr.BACKFILL_EXCLUDE_INTEGRITY] and not args.allow_integrity_exclusions:
+    if counts[rr.BACKFILL_EXCLUDE_INTEGRITY]:
         print(f"refused: {counts[rr.BACKFILL_EXCLUDE_INTEGRITY]} EXCLUDE_INTEGRITY row(s); "
-              "investigate first or pass --allow-integrity-exclusions", file=sys.stderr)
+              "resolve them before committing", file=sys.stderr)
         return _emit(preview, args, rc=2)
     if counts[rr.BACKFILL_RELEASE] != args.expect_release:
         print(f"refused: RELEASE count is {counts[rr.BACKFILL_RELEASE]}, expected {args.expect_release}; "

@@ -399,6 +399,39 @@ class TestBackfill:
 # 12-14: review routing and inventory semantics
 # ---------------------------------------------------------------------------
 
+def _park_already_issued(db, row, month):
+    db.affiliate_ledger.update_one({"_id": row["_id"]}, {"$set": {"voucher_code": "X-ALREADY"}})
+
+
+def _park_duplicate(db, row, month):
+    db.affiliate_ledger.insert_one({
+        "ledger_type": "AFFILIATE_MONTHLY", "user_id": UID, "year_month": month, "tier": "T1",
+        "status": "REJECTED", "dedup_key": f"LEGACY-DUP-{month}"})
+
+
+def _park_below_threshold(db, row, month):
+    db.qualified_events.delete_one({"referrer_id": UID})
+
+
+def _park_invalid(db, row, month):
+    # Keeps the canonical dedup_key, so the evaluator still finds the row.
+    db.affiliate_ledger.update_one({"_id": row["_id"]}, {"$set": {"entitlement_month": "209912"}})
+
+
+def _PARK_INTEGRITY(db, row):
+    db.voucher_pools.update_one(
+        {"status": "available", "pool_id": "AFFILIATE_10"},
+        {"$set": {"status": "issued", "issued_for_ledger_id": str(row["_id"]), "ledger_id": row["_id"]}})
+
+
+_PARK_MUTATIONS = [
+    ("EXCLUDE_ALREADY_ISSUED", _park_already_issued),
+    ("EXCLUDE_DUPLICATE_TIER", _park_duplicate),
+    ("EXCLUDE_BELOW_THRESHOLD", _park_below_threshold),
+    ("EXCLUDE_INVALID", _park_invalid),
+]
+
+
 class TestReviewAndInventory:
     def test_blocked_held_user_goes_to_pending_review(self, monkeypatch):
         db = _db()
@@ -475,32 +508,59 @@ class TestReviewAndInventory:
         assert _ledger(db, "T3")["status"] == "ISSUED"
         _assert_one_bundle_per_tier(db)
 
-    @pytest.mark.parametrize("cls, mutate", [
-        ("EXCLUDE_ALREADY_ISSUED", lambda db, row: db.affiliate_ledger.update_one(
-            {"_id": row["_id"]}, {"$set": {"voucher_code": "X-ALREADY"}})),
-        ("EXCLUDE_INTEGRITY", lambda db, row: db.voucher_pools.update_one(
-            {"status": "available", "pool_id": "AFFILIATE_10"},
-            {"$set": {"status": "issued", "issued_for_ledger_id": str(row["_id"]), "ledger_id": row["_id"]}})),
-        ("EXCLUDE_DUPLICATE_TIER", lambda db, row: db.affiliate_ledger.insert_one({
-            "ledger_type": "AFFILIATE_MONTHLY", "user_id": UID, "year_month": "202609", "tier": "T1",
-            "status": "REJECTED", "dedup_key": "LEGACY-DUP"})),
-        ("EXCLUDE_BELOW_THRESHOLD", lambda db, row: db.qualified_events.delete_one({"referrer_id": UID})),
-        ("EXCLUDE_INVALID", lambda db, row: db.affiliate_ledger.update_one(
-            {"_id": row["_id"]}, {"$set": {"entitlement_month": "202610"}})),
-    ])
-    def test_exclusions_are_never_written(self, monkeypatch, cls, mutate):
+    @pytest.mark.parametrize("cls, mutate", _PARK_MUTATIONS)
+    def test_unsafe_exclusions_are_parked_for_review_not_issued(self, monkeypatch, cls, mutate):
         db = _db()
         _stock(db)
         _user(db)
         _hold(db, monkeypatch, total=10)
-        mutate(db, _ledger(db, "T1"))
+        mutate(db, _ledger(db, "T1"), "202609")
         before = copy.deepcopy(_ledger(db, "T1"))
-        issued_before = len(_issued(db))
+        issued_before = copy.deepcopy(_issued(db))
+
         report = _backfill(db, dry_run=False)
         assert report["class_counts"][cls] == 1 and report["class_counts"]["RELEASE"] == 0
-        assert report["outcomes"] == {"untouched": 1}
-        assert _ledger(db, "T1") == before
-        assert len(_issued(db)) == issued_before
+        assert report["outcomes"] == {"pending_review": 1}
+        row = _ledger(db, "T1")
+        assert row["status"] == "PENDING_REVIEW"
+        assert row["review_reason"] == f"retention_rollback_{cls.lower()}"
+        assert row["retention_rollback_reasons"]
+        # Only status, reason and retention bookkeeping changed.
+        for field in ("tier", "year_month", "entitlement_month", "dedup_key", "voucher_code",
+                      "vouchers", "risk_flags", "bundle_recipe", "qualified_count"):
+            assert row.get(field) == before.get(field), field
+        assert _issued(db) == issued_before
+
+        # No automatic path releases it any more — not the retention worker
+        # at what was its unlock time, nor any issuance sweep.
+        matured = SEP_28 + 8 * DAY
+        stats = rr.process_affiliate_retention_entitlements(
+            db, now_utc=matured, membership_checker=lambda u, c=None: (rr.MEMBERSHIP_MEMBER, None, None))
+        assert stats["candidates"] == 0
+        ar._retry_stuck_pending_manual_affiliate_ledgers(db, now_utc=matured)
+        ar.settle_previous_month_affiliate_rewards(db, now_utc=OCT_02)
+        ar.catch_up_missing_current_month_affiliate_ledgers(db, now_utc=OCT_02)
+        assert _ledger(db, "T1")["status"] == "PENDING_REVIEW"
+        assert _issued(db) == issued_before
+        # A second run does not select it again.
+        assert _backfill(db, now=OCT_02 + DAY, dry_run=False)["held_total"] == 0
+
+    def test_integrity_conflict_refuses_the_whole_commit(self, monkeypatch):
+        db = _db()
+        _stock(db)
+        _user(db)
+        _user(db, uid=UID + 1)
+        _hold(db, monkeypatch, total=10)
+        _hold(db, monkeypatch, uid=UID + 1, total=10)            # an otherwise releasable row
+        _PARK_INTEGRITY(db, _ledger(db, "T1"))
+        snap = _snapshot(db)
+        report = _backfill(db, dry_run=False)
+        assert report["refused"] == "integrity_conflicts"
+        assert report["class_counts"]["EXCLUDE_INTEGRITY"] == 1 and report["class_counts"]["RELEASE"] == 1
+        assert report["outcomes"] == {}
+        assert _snapshot(db) == snap
+        dry = _backfill(db)
+        assert dry["refused"] is None and dry["class_counts"]["EXCLUDE_INTEGRITY"] == 1
 
     def test_rejected_and_normal_review_rows_are_never_selected(self, monkeypatch):
         db = _db()
@@ -514,6 +574,83 @@ class TestReviewAndInventory:
         assert _ledger(db, "T1")["status"] == "REJECTED"
         assert _ledger(db, "T2")["status"] == "PENDING_REVIEW"
         assert _issued(db) == []
+
+
+class TestRollbackReviewIsNeverAutoSettled:
+    """A current-month row the rollback parked in PENDING_REVIEW must survive
+    the 5-minute catch-up evaluation: only an admin approve/reject moves it.
+    (Without the evaluator guard the next evaluation issued it.)"""
+
+    def _october_held(self, monkeypatch, *, uid=UID):
+        db = _db()
+        _stock(db, "202610", now=SEP_30)
+        _user(db, uid=uid)
+        _hold(db, monkeypatch, uid=uid, total=10, at=OCT_01)
+        return db
+
+    def _sweep(self, db, rounds=3):
+        for i in range(rounds):
+            at = OCT_02 + timedelta(minutes=5 * (i + 1))
+            ar.evaluate_monthly_affiliate_reward(db, referrer_id=UID, now_utc=at)
+            ar.catch_up_missing_current_month_affiliate_ledgers(db, now_utc=at)
+            ar._retry_stuck_pending_manual_affiliate_ledgers(db, now_utc=at)
+
+    def test_review_risk_current_month(self, monkeypatch):
+        db = self._october_held(monkeypatch)
+        db.affiliate_ledger.update_one({"_id": _ledger(db, "T1")["_id"]}, {"$set": {"risk_flags": ["ip_cluster"]}})
+        assert _backfill(db, dry_run=False)["outcomes"] == {"pending_review": 1}
+        self._sweep(db)
+        assert _ledger(db, "T1")["status"] == "PENDING_REVIEW"
+        assert _issued(db) == []
+        # The admin path still works.
+        out = ar.approve_affiliate_ledger(db, ledger_id=_ledger(db, "T1")["_id"], now_utc=OCT_02 + DAY)
+        assert out["status"] == "ISSUED"
+        _assert_one_bundle_per_tier(db)
+
+    def test_review_blocked_then_unblocked_current_month(self, monkeypatch):
+        db = self._october_held(monkeypatch)
+        db.users.update_one({"user_id": UID}, {"$set": {"blocked": True}})
+        _backfill(db, dry_run=False)
+        db.users.update_one({"user_id": UID}, {"$set": {"blocked": False}})
+        self._sweep(db)
+        assert _ledger(db, "T1")["status"] == "PENDING_REVIEW"
+        assert _issued(db) == []
+
+    @pytest.mark.parametrize("cls, mutate", [m for m in _PARK_MUTATIONS if m[0] != "EXCLUDE_BELOW_THRESHOLD"])
+    def test_parked_exclusion_current_month(self, monkeypatch, cls, mutate):
+        db = self._october_held(monkeypatch)
+        mutate(db, _ledger(db, "T1"), "202610")
+        report = _backfill(db, dry_run=False)
+        assert report["class_counts"][cls] == 1
+        self._sweep(db)
+        row = db.affiliate_ledger.find_one({"dedup_key": f"AFF:{UID}:202610:T1"})
+        assert row["status"] == "PENDING_REVIEW"
+        assert _issued(db) == []
+
+    def test_write_time_guard_holds_when_the_read_missed_the_park(self, monkeypatch):
+        """The evaluator's settle CAS re-asserts the rule, so a stale read
+        (the row parked between the evaluator's read and its write) still
+        cannot settle a parked row."""
+        db = self._october_held(monkeypatch)
+        db.affiliate_ledger.update_one({"_id": _ledger(db, "T1")["_id"]}, {"$set": {"risk_flags": ["ip_cluster"]}})
+        _backfill(db, dry_run=False)
+        monkeypatch.setattr(ar, "_is_rollback_review_parked", lambda ledger: False)
+        self._sweep(db, rounds=1)
+        assert _ledger(db, "T1")["status"] == "PENDING_REVIEW"
+        assert _issued(db) == []
+
+    def test_ordinary_blocked_review_still_settles_after_unblock(self):
+        """Narrowness: a blocked-user PENDING_REVIEW row NOT written by the
+        rollback keeps its existing semantics (issued once unblocked)."""
+        db = _db()
+        _stock(db, "202610", now=SEP_30)
+        _user(db, blocked=True)
+        _earn(db, total=10, at=OCT_01)
+        assert _ledger(db, "T1")["status"] == "PENDING_REVIEW"
+        assert _ledger(db, "T1")["review_reason"] == "blocked_user"
+        db.users.update_one({"user_id": UID}, {"$set": {"blocked": False}})
+        ar.evaluate_monthly_affiliate_reward(db, referrer_id=UID, now_utc=OCT_02)
+        assert _ledger(db, "T1")["status"] == "ISSUED"
 
 
 # ---------------------------------------------------------------------------
@@ -874,6 +1011,9 @@ class TestScript:
         snap = _snapshot(db)
         rc, _, err = self._main(["--commit", "--expect-release", "1"], db)
         assert rc == 2 and "EXCLUDE_INTEGRITY" in err
+        with pytest.raises(SystemExit) as exc:   # the override flag no longer exists
+            self._main(["--commit", "--expect-release", "1", "--allow-integrity-exclusions"], db)
+        assert exc.value.code == 2
         assert _snapshot(db) == snap
 
     def test_commit_releases_and_rerun_is_noop(self, monkeypatch):

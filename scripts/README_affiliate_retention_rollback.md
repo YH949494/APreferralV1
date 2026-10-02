@@ -72,11 +72,16 @@ stderr carries the summary; stdout/`--output` the full JSON. Review:
 
 ## 5. Go criteria for the commit
 
-* `class_counts.EXCLUDE_INTEGRITY == 0` (the script refuses otherwise).
-* `class_counts.EXCLUDE_ALREADY_ISSUED == 0` and
-  `class_counts.EXCLUDE_DUPLICATE_TIER == 0` — anything else is investigated
-  first; excluded rows are never written and stay under the (now idle)
-  retention worker.
+* `class_counts.EXCLUDE_INTEGRITY == 0`. Hard requirement: the commit refuses
+  to write ANY row while one exists (no override). Resolve it first (issued
+  pool rows already linked to a held ledger).
+* Review the rows the commit will park in `PENDING_REVIEW` without issuing
+  anything — `REVIEW_BLOCKED`, `REVIEW_RISK`, and the excluded classes
+  `EXCLUDE_ALREADY_ISSUED`, `EXCLUDE_DUPLICATE_TIER`,
+  `EXCLUDE_BELOW_THRESHOLD`, `EXCLUDE_INVALID` — each with
+  `review_reason = retention_rollback_<class>`. Nothing is left in a status
+  the retention worker can release, and the evaluator never settles these
+  reasons on its own: an admin approves or rejects each one.
 * `shortfall == 0` for every pool, or accept that those rows land in
   `PENDING_MANUAL` (`bundle_denomination_short`) and finish via the existing
   retry sweep after restock.
@@ -88,16 +93,23 @@ fly ssh console -a apreferralv1 --process-group worker \
   -C 'python scripts/release_affiliate_retention_holds.py --commit --expect-release <RELEASE count from step 4> --output /tmp/retention_commit.json'
 ```
 
-Refuses (exit 2, no writes) if the gate is still enabled in the machine's
-environment, `AFFILIATE_SIMULATE=1`, any EXCLUDE_INTEGRITY row exists, or the
-RELEASE count no longer equals `--expect-release`. Safe to re-run.
+Refuses (exit 2, no writes at all) if the gate is still enabled in the
+machine's environment, `AFFILIATE_SIMULATE=1`, any EXCLUDE_INTEGRITY row
+exists, or the RELEASE count no longer equals `--expect-release`. Safe to
+re-run.
 
 ## 7-10. Verify
 
 ```js
-// 7. Held population drained (only EXCLUDE_* rows, if any, may remain)
+// 7. Held population fully drained (expect 0)
 db.affiliate_ledger.countDocuments({ ledger_type: "AFFILIATE_MONTHLY",
   status: { $in: ["PENDING_RETENTION", "RETENTION_BROKEN"] } })
+
+// Rows parked for admin review (approve/reject in the admin dashboard,
+// Pending Affiliate Rewards -> PENDING_REVIEW)
+db.affiliate_ledger.find(
+  { status: "PENDING_REVIEW", review_reason: /^retention_rollback_/ },
+  { user_id: 1, tier: 1, year_month: 1, review_reason: 1, retention_rollback_reasons: 1, risk_flags: 1 })
 
 // Outcome of the backfill
 db.affiliate_ledger.aggregate([
