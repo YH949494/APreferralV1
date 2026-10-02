@@ -31,6 +31,10 @@ Membership evidence, all reused (nothing parallel is recorded):
 Voucher inventory is never read or touched while an entitlement is held; the
 only path to inventory is ``affiliate_rewards._issue_affiliate_ledger_from_pool``
 after this module has won the PENDING_RETENTION -> SETTLING transition.
+
+The gate is OFF by default (AFFILIATE_REWARD_RETENTION_DAYS unset/0): no new
+row is held, the worker and hooks idle, and ``release_retention_holds``
+drains rows held while it was on (scripts/release_affiliate_retention_holds.py).
 """
 from __future__ import annotations
 
@@ -41,19 +45,34 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import requests
-from pymongo import ASCENDING
+from pymongo import ASCENDING, ReturnDocument
 
+from affiliate_reward_plans import recipe_required_by_pool
 from affiliate_rewards import (
     RETENTION_BROKEN_STATUS,
     RETENTION_HOLD_STATUSES,
     RETENTION_PENDING_STATUS,
+    RETENTION_ROLLBACK_REVIEW_REASONS,
     SETTLING_STATUS,
+    TIERS,
+    _INVENTORY_ONLY_RISK_FLAGS,
+    _affiliate_simulate_enabled,
     _as_aware_utc,
+    _available_pool_count,
+    _batch_claimable_available_count,
+    _eligible_tiers_for_count,
+    _find_batches_for_period,
     _has_issued_pool_voucher_for_ledger,
     _issue_affiliate_ledger_from_pool,
+    _ledger_entitlement_month,
     _ledger_has_affiliate_bundle,
+    _ledger_recipe,
+    _ledger_uses_denomination_plan,
+    _merge_monthly_risk_flags,
+    _month_window_from_yyyymm,
     _month_window_utc,
     _no_voucher_filter,
+    _risk_flags_for_referrer_month,
     affiliate_retention_period,
 )
 
@@ -643,6 +662,453 @@ def process_affiliate_retention_entitlements(
 
     logger.info("%s action=sweep_done stats=%s", LOG_TAG, stats)
     return stats
+
+
+# ---------------------------------------------------------------------------
+# Retention rollback: one-shot release of rows held while the gate was on
+# ---------------------------------------------------------------------------
+#
+# The gate now defaults OFF (immediate issuance, as before it existed). Rows
+# created while it was on are still PENDING_RETENTION / RETENTION_BROKEN and
+# no other path will issue them, so this drains them exactly once:
+#
+#   RELEASE         -> CAS held -> SETTLING, then the canonical allocator
+#                      (_issue_affiliate_ledger_from_pool: recipe, entitlement-
+#                      month batch pin, lease/fencing, reconciliation). Out of
+#                      stock lands in the allocator's own PENDING_MANUAL.
+#   REVIEW_BLOCKED  -> CAS held -> PENDING_REVIEW (admin approve/reject), no
+#   REVIEW_RISK        inventory touched.
+#   EXCLUDE_ALREADY_ISSUED / _DUPLICATE_TIER / _BELOW_THRESHOLD / _INVALID
+#                   -> CAS held -> PENDING_REVIEW, review_reason
+#                      retention_rollback_<class>; nothing issued, nothing
+#                      else rewritten. Left held they would still be released
+#                      by the retention worker at unlock_at.
+#   EXCLUDE_INTEGRITY -> a commit REFUSES to run at all while any exists
+#                      (issued pool rows already linked to a held ledger need
+#                      a human before anything moves).
+#
+# Every PENDING_REVIEW written here carries a reason in
+# affiliate_rewards.RETENTION_ROLLBACK_REVIEW_REASONS, which the evaluator
+# never settles on its own: admin approve/reject is the only way out.
+#
+# Every write is conditional on the row still being held, so a re-run, the
+# retention worker, the leave/rejoin hooks and the evaluator can race it
+# safely: exactly one actor ever moves a row out of a held status, and the
+# allocator's lease decides who allocates.
+
+BACKFILL_RELEASE = "RELEASE"
+BACKFILL_REVIEW_BLOCKED = "REVIEW_BLOCKED"
+BACKFILL_REVIEW_RISK = "REVIEW_RISK"
+BACKFILL_EXCLUDE_ALREADY_ISSUED = "EXCLUDE_ALREADY_ISSUED"
+BACKFILL_EXCLUDE_INTEGRITY = "EXCLUDE_INTEGRITY"
+BACKFILL_EXCLUDE_DUPLICATE_TIER = "EXCLUDE_DUPLICATE_TIER"
+BACKFILL_EXCLUDE_BELOW_THRESHOLD = "EXCLUDE_BELOW_THRESHOLD"
+BACKFILL_EXCLUDE_INVALID = "EXCLUDE_INVALID"
+BACKFILL_CLASSES = (
+    BACKFILL_RELEASE,
+    BACKFILL_REVIEW_BLOCKED,
+    BACKFILL_REVIEW_RISK,
+    BACKFILL_EXCLUDE_ALREADY_ISSUED,
+    BACKFILL_EXCLUDE_INTEGRITY,
+    BACKFILL_EXCLUDE_DUPLICATE_TIER,
+    BACKFILL_EXCLUDE_BELOW_THRESHOLD,
+    BACKFILL_EXCLUDE_INVALID,
+)
+_REVIEW_REASON_BY_CLASS = {
+    BACKFILL_REVIEW_BLOCKED: "retention_rollback_blocked_user",
+    BACKFILL_REVIEW_RISK: "retention_rollback_risk_flags",
+}
+# Excluded rows that must not stay worker-releasable: parked, never issued.
+_PARKED_EXCLUDE_CLASSES = (
+    BACKFILL_EXCLUDE_ALREADY_ISSUED,
+    BACKFILL_EXCLUDE_DUPLICATE_TIER,
+    BACKFILL_EXCLUDE_BELOW_THRESHOLD,
+    BACKFILL_EXCLUDE_INVALID,
+)
+_REVIEW_REASON_BY_CLASS.update({cls: f"retention_rollback_{cls.lower()}" for cls in _PARKED_EXCLUDE_CLASSES})
+# The evaluator's "never auto-settle" list must cover every reason written here.
+assert set(_REVIEW_REASON_BY_CLASS.values()) <= RETENTION_ROLLBACK_REVIEW_REASONS
+ROLLBACK_SOURCE = "retention_rollback"
+
+
+def _mask_user_id(user_id) -> str:
+    text = str(user_id if user_id is not None else "")
+    if len(text) <= 4:
+        return "*" * len(text)
+    return f"{text[:2]}{'*' * (len(text) - 4)}{text[-2:]}"
+
+
+def _held_cas_filter(ledger_id, statuses) -> dict:
+    """The row is still held, still a monthly tier entitlement, and carries
+    no voucher of any kind — the only state either backfill write accepts."""
+    return {
+        "_id": ledger_id,
+        "ledger_type": LEDGER_TYPE,
+        "status": {"$in": sorted(statuses)},
+        "$and": [_no_voucher_filter(), {"vouchers": {"$in": [None, []]}}],
+    }
+
+
+def _classify_held_row(db, row: dict) -> tuple[str, dict]:
+    """``(class, detail)`` for one held row. Reads only."""
+    detail: dict = {"reasons": []}
+    reasons = detail["reasons"]
+    uid = row.get("user_id")
+    tier = str(row.get("tier") or "").strip().upper()
+    year_month = str(row.get("year_month") or "")
+    entitlement_month = _ledger_entitlement_month(row)
+    detail.update({"tier": tier or None, "entitlement_month": entitlement_month})
+
+    # -- shape --------------------------------------------------------------
+    if row.get("ledger_type") != LEDGER_TYPE:
+        reasons.append("not_affiliate_monthly")
+    if tier not in TIERS:
+        reasons.append("invalid_tier")
+    if not isinstance(uid, int) or isinstance(uid, bool):
+        reasons.append("invalid_user_id")
+    if entitlement_month is None or entitlement_month != year_month:
+        reasons.append("entitlement_month_mismatch")
+    if str(row.get("pool_id") or "").strip().upper() != tier:
+        reasons.append("pool_id_mismatch")
+    if not reasons and row.get("dedup_key") != f"AFF:{uid}:{year_month}:{tier}":
+        reasons.append("dedup_key_mismatch")
+    if reasons:
+        return BACKFILL_EXCLUDE_INVALID, detail
+
+    # -- already issued / integrity ----------------------------------------
+    has_code = bool(str(row.get("voucher_code") or "").strip())
+    voucher_rows = len(row.get("vouchers") or [])
+    detail.update({"has_voucher_code": has_code, "ledger_voucher_count": voucher_rows})
+    if has_code or voucher_rows or _ledger_has_affiliate_bundle(row):
+        reasons.append("ledger_carries_voucher")
+        return BACKFILL_EXCLUDE_ALREADY_ISSUED, detail
+    linked = db.voucher_pools.count_documents(
+        {"status": "issued", "$or": [{"issued_for_ledger_id": str(row["_id"])}, {"ledger_id": row["_id"]}]}
+    )
+    detail["linked_issued_pool_rows"] = int(linked)
+    if linked:
+        reasons.append("issued_pool_rows_linked_to_held_ledger")
+        return BACKFILL_EXCLUDE_INTEGRITY, detail
+
+    # -- one entitlement per user/month/tier -------------------------------
+    siblings = list(
+        db.affiliate_ledger.find(
+            {"_id": {"$ne": row["_id"]}, "ledger_type": LEDGER_TYPE, "user_id": uid,
+             "year_month": year_month, "tier": tier},
+            projection={"status": 1},
+        )
+    )
+    if siblings:
+        detail["duplicate_statuses"] = sorted(str(s.get("status") or "") for s in siblings)
+        reasons.append("another_ledger_for_same_user_month_tier")
+        return BACKFILL_EXCLUDE_DUPLICATE_TIER, detail
+
+    # -- still earned (the evaluator's own count + tier rule) ---------------
+    start_utc, end_utc = _month_window_from_yyyymm(entitlement_month)
+    qualified_now = db.qualified_events.count_documents(
+        {"referrer_id": uid, "qualified_at": {"$gte": start_utc, "$lt": end_utc}}
+    )
+    detail["qualified_count_now"] = int(qualified_now)
+    if tier not in _eligible_tiers_for_count(int(qualified_now)):
+        reasons.append("qualified_count_below_tier_threshold")
+        return BACKFILL_EXCLUDE_BELOW_THRESHOLD, detail
+
+    # -- genuine review signals (inventory flags are NOT abuse) -------------
+    user_doc = db.users.find_one({"user_id": uid}, {"blocked": 1}) or {}
+    try:
+        fresh = _risk_flags_for_referrer_month(db, referrer_id=uid, start_utc=start_utc, end_utc=end_utc)
+    except Exception:
+        logger.exception("%s uid=%s action=rollback_risk_calc_failed", LOG_TAG, uid)
+        fresh = ["risk_flags_calc_failed"]
+    stored = list(row.get("risk_flags") or [])
+    abuse = sorted({f for f in list(stored) + list(fresh) if f not in _INVENTORY_ONLY_RISK_FLAGS})
+    detail.update({
+        "blocked": bool(user_doc.get("blocked")),
+        "abuse_flags": abuse,
+        "inventory_flags": sorted(f for f in stored if f in _INVENTORY_ONLY_RISK_FLAGS),
+        "merged_risk_flags": _merge_monthly_risk_flags(stored, sorted(set(fresh) | set(abuse))),
+    })
+    if user_doc.get("blocked"):
+        reasons.append("user_blocked")
+        return BACKFILL_REVIEW_BLOCKED, detail
+    if abuse:
+        reasons.append("abuse_risk_flags")
+        return BACKFILL_REVIEW_RISK, detail
+    return BACKFILL_RELEASE, detail
+
+
+def _mark_for_review(db, row: dict, cls: str, detail: dict, *, statuses, now_utc: datetime) -> dict | None:
+    """CAS held -> PENDING_REVIEW. Never issues, never touches inventory.
+
+    REVIEW_* rows must also carry no voucher and get their merged risk flags.
+    Parked EXCLUDE_* rows keep everything they already carry (an
+    EXCLUDE_ALREADY_ISSUED row HAS a voucher, so that guard cannot apply);
+    only the status, the reason and the retention bookkeeping change.
+    """
+    set_doc = {
+        "status": "PENDING_REVIEW",
+        "review_reason": _REVIEW_REASON_BY_CLASS[cls],
+        # The retention phase is over (waived, not served). Recorded so an
+        # admin approval of a previous-month entitlement still draws from
+        # that month's own batch (see _issue_denomination_bundle), and so no
+        # announcement quotes a hold the user never served.
+        "retention_completed_at": now_utc,
+        "retention_waived_at": now_utc,
+        "retention_release_source": ROLLBACK_SOURCE,
+        "updated_at": now_utc,
+    }
+    if cls in _PARKED_EXCLUDE_CLASSES:
+        cas = {"_id": row["_id"], "ledger_type": LEDGER_TYPE, "status": {"$in": sorted(statuses)}}
+        set_doc["retention_rollback_reasons"] = list(detail.get("reasons") or [])
+    else:
+        cas = _held_cas_filter(row["_id"], statuses)
+        flags = list(detail.get("merged_risk_flags") or [])
+        if cls == BACKFILL_REVIEW_BLOCKED and "blocked_user" not in flags:
+            flags.append("blocked_user")
+        set_doc["risk_flags"] = flags
+    return db.affiliate_ledger.find_one_and_update(
+        cas,
+        {"$set": set_doc, "$unset": {"unlock_at": "", "retention_next_check_at": ""}},
+        return_document=ReturnDocument.BEFORE,
+    )
+
+
+def _release_held_row(db, row: dict, *, statuses, now_utc: datetime) -> tuple[dict | None, dict | None]:
+    """CAS held -> SETTLING, then the canonical allocator. Returns
+    ``(before, after)``; ``before`` is None when another actor moved the row
+    first (nothing was written)."""
+    before = db.affiliate_ledger.find_one_and_update(
+        _held_cas_filter(row["_id"], statuses),
+        {
+            "$set": {
+                "status": SETTLING_STATUS,
+                # Set BEFORE allocation: a previous-month entitlement (e.g.
+                # 202609 released in October) may then draw from its OWN
+                # month's batch past that batch's end — the allocator's
+                # existing retention-release exception. Never a later batch.
+                "retention_completed_at": now_utc,
+                "retention_waived_at": now_utc,
+                "retention_release_source": ROLLBACK_SOURCE,
+                "updated_at": now_utc,
+            },
+            "$unset": {"unlock_at": "", "retention_next_check_at": ""},
+        },
+        return_document=ReturnDocument.BEFORE,
+    )
+    if before is None:
+        return None, None
+    after = _issue_affiliate_ledger_from_pool(
+        db, ledger=db.affiliate_ledger.find_one({"_id": row["_id"]}), now_utc=now_utc,
+    )
+    return before, after or db.affiliate_ledger.find_one({"_id": row["_id"]})
+
+
+def _entitlement_inventory(db, *, release_demand: dict, review_demand: dict, now_utc: datetime) -> dict:
+    """Claimable stock in the batch each entitlement month is pinned to,
+    against RELEASE demand (issued now) and RELEASE + REVIEW demand (if every
+    review row were later approved). ``shortfall`` is for RELEASE only."""
+    out = {}
+    for (month, pool_id, legacy) in sorted(set(release_demand) | set(review_demand)):
+        key = f"{month}:{pool_id}"
+        start_utc, end_utc = _month_window_from_yyyymm(month)
+        matches = (
+            _find_batches_for_period(db, pool_id=pool_id, period_start_utc=start_utc, period_end_utc=end_utc)
+            if start_utc is not None else []
+        )
+        entry = {
+            "entitlement_month": month,
+            "pool_id": pool_id,
+            "required": int(release_demand.get((month, pool_id, legacy), 0)),
+            "required_including_review": int(review_demand.get((month, pool_id, legacy), 0)),
+            "batches": len(matches),
+        }
+        if len(matches) == 1:
+            batch = matches[0]
+            ends_at = _as_aware_utc(batch.get("ends_at"))
+            entry.update({
+                "source": "entitlement_batch",
+                "batch_id": str(batch.get("_id")),
+                "batch_name": batch.get("batch_name"),
+                "batch_window_closed": bool(ends_at and now_utc >= ends_at),
+                "available": _batch_claimable_available_count(db, batch),
+            })
+        elif not matches and legacy:
+            entry.update({"source": "legacy_undated_pool",
+                          "available": _available_pool_count(db, pool_id=pool_id, now_utc=now_utc, legacy_only=True)})
+        else:
+            entry.update({"source": "ambiguous_batches" if matches else "no_batch_for_entitlement_period",
+                          "available": 0})
+        entry["shortfall"] = max(0, entry["required"] - int(entry["available"]))
+        out[key] = entry
+    return out
+
+
+def release_retention_holds(
+    db,
+    *,
+    dry_run: bool = True,
+    include_broken: bool = True,
+    now_utc: datetime | None = None,
+    limit: int | None = None,
+) -> dict:
+    """One-shot rollback of the retention gate for rows it is holding.
+
+    ``dry_run=True`` (the default) performs reads only. With
+    ``dry_run=False`` RELEASE rows are issued through the canonical
+    allocator; REVIEW_* rows and the EXCLUDE_* classes in
+    ``_PARKED_EXCLUDE_CLASSES`` are parked in PENDING_REVIEW without issuing
+    anything. Refuses to write anything while ``AFFILIATE_SIMULATE=1`` or
+    while any EXCLUDE_INTEGRITY row exists. Idempotent: a second run finds
+    no held rows to act on.
+    """
+    now = _now(now_utc)
+    statuses = {RETENTION_PENDING_STATUS} | ({RETENTION_BROKEN_STATUS} if include_broken else set())
+    simulate = _affiliate_simulate_enabled()
+    report: dict = {
+        "generated_at": now.isoformat(),
+        "dry_run": bool(dry_run),
+        "include_broken": bool(include_broken),
+        "simulate_mode": simulate,
+        "refused": None,
+        "source_statuses": sorted(statuses),
+        "held_total": 0,
+        "held_by_status": {},
+        "class_counts": {cls: 0 for cls in BACKFILL_CLASSES},
+        "by_tier": {},
+        "by_entitlement_month": {},
+        "demand_release": {},
+        "demand_including_review": {},
+        "inventory": {},
+        "outcomes": {},
+        "rows": [],
+    }
+    if simulate and not dry_run:
+        report["refused"] = "affiliate_simulate_enabled"
+        logger.warning("%s action=rollback_refused reason=affiliate_simulate_enabled", LOG_TAG)
+        return report
+
+    query = {"ledger_type": LEDGER_TYPE, "status": {"$in": sorted(statuses)}}
+    # limit=0 is "no limit" for pymongo (which rejects None).
+    rows = list(db.affiliate_ledger.find(query, sort=[("created_at", ASCENDING), ("_id", ASCENDING)],
+                                         limit=max(0, int(limit or 0))))
+    release_demand: dict = {}
+    review_demand: dict = {}
+
+    def _bump(bucket: dict, key, cls):
+        per = bucket.setdefault(str(key), {c: 0 for c in BACKFILL_CLASSES})
+        per[cls] += 1
+
+    def _bump_outcome(name):
+        report["outcomes"][name] = report["outcomes"].get(name, 0) + 1
+
+    # Pass 1 classifies everything (reads only); pass 2 writes, so a commit
+    # can be refused as a whole before any row moves.
+    classified: list = []
+    for row in rows:
+        status = str(row.get("status") or "")
+        report["held_total"] += 1
+        report["held_by_status"][status] = report["held_by_status"].get(status, 0) + 1
+        try:
+            cls, detail = _classify_held_row(db, row)
+        except Exception as exc:
+            logger.exception("%s ledger_id=%s action=rollback_classify_failed", LOG_TAG, row.get("_id"))
+            cls, detail = BACKFILL_EXCLUDE_INVALID, {"reasons": [f"classify_error_{exc.__class__.__name__}"]}
+        report["class_counts"][cls] += 1
+        _bump(report["by_tier"], detail.get("tier") or "?", cls)
+        _bump(report["by_entitlement_month"], detail.get("entitlement_month") or "?", cls)
+
+        if cls in (BACKFILL_RELEASE, BACKFILL_REVIEW_BLOCKED, BACKFILL_REVIEW_RISK):
+            legacy = not _ledger_uses_denomination_plan(row)
+            for pool_id, qty in recipe_required_by_pool(_ledger_recipe(row)).items():
+                key = (detail.get("entitlement_month"), pool_id, legacy)
+                review_demand[key] = review_demand.get(key, 0) + int(qty)
+                if cls == BACKFILL_RELEASE:
+                    release_demand[key] = release_demand.get(key, 0) + int(qty)
+
+        item = {
+            "ledger_id": str(row.get("_id")),
+            "user": _mask_user_id(row.get("user_id")),
+            "tier": detail.get("tier"),
+            "entitlement_month": detail.get("entitlement_month"),
+            "status": status,
+            "class": cls,
+            "reasons": list(detail.get("reasons") or []),
+            "qualified_count_stored": row.get("qualified_count"),
+            "qualified_count_now": detail.get("qualified_count_now"),
+            "reward_value": int(row.get("reward_value") or 0),
+            "has_voucher_code": detail.get("has_voucher_code", False),
+            "ledger_voucher_count": detail.get("ledger_voucher_count", 0),
+            "linked_issued_pool_rows": detail.get("linked_issued_pool_rows", 0),
+            "blocked": detail.get("blocked"),
+            "abuse_flags": detail.get("abuse_flags", []),
+            "inventory_flags": detail.get("inventory_flags", []),
+            "earned_at": _iso(row.get("earned_at")),
+            "unlock_at": _iso(row.get("unlock_at")),
+            "retention_broken_reason": row.get("retention_broken_reason"),
+        }
+        if "duplicate_statuses" in detail:
+            item["duplicate_statuses"] = detail["duplicate_statuses"]
+        report["rows"].append(item)
+        classified.append((row, cls, detail, item))
+
+    if not dry_run and report["class_counts"][BACKFILL_EXCLUDE_INTEGRITY]:
+        report["refused"] = "integrity_conflicts"
+        logger.warning(
+            "%s action=rollback_refused reason=integrity_conflicts count=%s",
+            LOG_TAG, report["class_counts"][BACKFILL_EXCLUDE_INTEGRITY],
+        )
+        classified = []
+
+    for row, cls, detail, item in ([] if dry_run else classified):
+        try:
+            if cls == BACKFILL_RELEASE:
+                before, after = _release_held_row(db, row, statuses=statuses, now_utc=now)
+                if before is None:
+                    item["outcome"] = "lost_race"
+                else:
+                    final = str((after or {}).get("status") or "")
+                    item["outcome"] = {"ISSUED": "issued", "PENDING_MANUAL": "pending_manual",
+                                       SETTLING_STATUS: "in_progress"}.get(final, f"status_{final.lower()}")
+                    item["final_status"] = final
+                    if final == "PENDING_MANUAL":
+                        item["inventory_flags_after"] = sorted(
+                            f for f in (after or {}).get("risk_flags") or [] if f in _INVENTORY_ONLY_RISK_FLAGS
+                        )
+                logger.info(
+                    "%s uid=%s tier=%s year_month=%s action=rollback_release outcome=%s",
+                    LOG_TAG, row.get("user_id"), detail.get("tier"), detail.get("entitlement_month"),
+                    item["outcome"],
+                )
+            elif cls in _REVIEW_REASON_BY_CLASS:
+                before = _mark_for_review(db, row, cls, detail, statuses=statuses, now_utc=now)
+                item["outcome"] = "lost_race" if before is None else "pending_review"
+                logger.info(
+                    "%s uid=%s tier=%s year_month=%s action=rollback_review class=%s outcome=%s",
+                    LOG_TAG, row.get("user_id"), detail.get("tier"), detail.get("entitlement_month"),
+                    cls, item["outcome"],
+                )
+            else:
+                item["outcome"] = "untouched"
+        except Exception as exc:
+            # A crash after the SETTLING CAS is recovered by the existing
+            # stale-SETTLING retry sweep (no lease => eligible after TTL).
+            logger.exception("%s ledger_id=%s action=rollback_failed", LOG_TAG, row.get("_id"))
+            item["outcome"] = f"error_{exc.__class__.__name__}"
+        _bump_outcome(item["outcome"])
+
+    def _fmt(demand: dict) -> dict:
+        return {f"{m}:{p}": int(q) for (m, p, _legacy), q in sorted(demand.items())}
+
+    report["demand_release"] = _fmt(release_demand)
+    report["demand_including_review"] = _fmt(review_demand)
+    report["inventory"] = _entitlement_inventory(
+        db, release_demand=release_demand, review_demand=review_demand, now_utc=now,
+    )
+    logger.info(
+        "%s action=rollback_done dry_run=%s held_total=%s class_counts=%s outcomes=%s",
+        LOG_TAG, dry_run, report["held_total"], report["class_counts"], report["outcomes"],
+    )
+    return report
 
 
 # ---------------------------------------------------------------------------
