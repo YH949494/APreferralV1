@@ -29,6 +29,8 @@ from database import db, users_collection, _ensure_equivalent_index
 from time_utils import as_aware_utc
 from onboarding import record_onboarding_start, record_visible_ping
 from affiliate_rewards import (
+    affiliate_approve_outcome_reason,
+    affiliate_approve_refusal_reason,
     affiliate_bundle_visible_cards,
     approve_affiliate_ledger,
     reject_affiliate_ledger,
@@ -8072,8 +8074,13 @@ def admin_affiliate_pending_v2():
         return err
 
     status = str(request.args.get("status") or "PENDING_REVIEW").strip().upper()
-    if status not in {"PENDING_REVIEW", "PENDING_MANUAL", "SIMULATED_PENDING"}:
+    if status not in {"PENDING_REVIEW", "PENDING_MANUAL", "SIMULATED_PENDING", "OUT_OF_STOCK"}:
         return jsonify({"status": "error", "reason": "bad_status"}), 400
+    query = {"status": status}
+    if status == "OUT_OF_STOCK":
+        # Only monthly tier ledgers can be retried from OUT_OF_STOCK (see
+        # approve_affiliate_ledger); WELCOME rows would only crowd them out.
+        query["ledger_type"] = "AFFILIATE_MONTHLY"
 
     now_utc = datetime.now(timezone.utc)
     month_start_utc = now_utc.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
@@ -8085,7 +8092,7 @@ def admin_affiliate_pending_v2():
     from affiliate_reward_plans import tier_thresholds
 
     threshold_by_tier = tier_thresholds()
-    rows = list(db.affiliate_ledger.find({"status": status}).sort("created_at", 1).limit(200))
+    rows = list(db.affiliate_ledger.find(query).sort("created_at", 1).limit(200))
     items = []
     for row in rows:
         uid = row.get("user_id")
@@ -8146,8 +8153,24 @@ def admin_affiliate_approve_v2(ledger_id):
 
     ledger = approve_affiliate_ledger(db, ledger_id=oid, now_utc=datetime.now(timezone.utc))
     if not ledger:
-        return jsonify({"status": "error", "reason": "not_found"}), 404
-    return jsonify({"status": "ok", "ledger_status": ledger.get("status"), "voucher_code": ledger.get("voucher_code")})
+        current = db.affiliate_ledger.find_one({"_id": oid})
+        if not current:
+            return jsonify({"status": "error", "reason": "not_found"}), 404
+        return jsonify({
+            "status": "error",
+            "reason": affiliate_approve_refusal_reason(current),
+            "ledger_status": current.get("status"),
+        }), 409
+    issued = ledger.get("status") == "ISSUED"
+    return jsonify({
+        "status": "ok",
+        "ledger_status": ledger.get("status"),
+        "voucher_code": ledger.get("voucher_code"),
+        "issued": issued,
+        "reason": affiliate_approve_outcome_reason(ledger),
+        "risk_flags": [] if issued else list(ledger.get("risk_flags") or []),
+        "shortage_reasons": None if issued else ledger.get("shortage_reasons"),
+    })
 
 
 @vouchers_bp.route("/admin/affiliate/<ledger_id>/reject", methods=["POST"])

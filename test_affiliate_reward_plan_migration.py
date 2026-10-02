@@ -87,12 +87,16 @@ def _stock_denomination_batch(db, pool_id, count, prefix, *, month="202609", sta
     import affiliate_voucher_batches as batches
 
     codes = [f"{prefix}{i:04d}" for i in range(start, start + count)]
+    # Stock "as of" the entitlement month's start, never the wall clock:
+    # add_codes_to_batch refuses an already-ended batch, so a wall-clock
+    # top-up starts failing the moment the real calendar passes the month.
+    stocked_at = ar._month_window_from_yyyymm(month)[0]
     existing = db.affiliate_voucher_batches.find_one({"pool_id": pool_id})
     if existing is not None:
         # Top up the pool's existing month batch rather than creating an
         # overlapping second one (which create_batch correctly refuses).
         result = batches.add_codes_to_batch(
-            db, existing["_id"], admin_identity="test", codes=codes,
+            db, existing["_id"], admin_identity="test", codes=codes, now_utc=stocked_at,
         )
     else:
         result = batches.create_batch(
@@ -102,6 +106,7 @@ def _stock_denomination_batch(db, pool_id, count, prefix, *, month="202609", sta
             pool_id=pool_id,
             entitlement_month=month,
             codes=codes,
+            now_utc=stocked_at,
         )
     assert result["ok"] is True, result
     return result
