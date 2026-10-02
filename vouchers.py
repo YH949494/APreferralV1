@@ -8120,6 +8120,17 @@ def admin_affiliate_pending_v2():
                 "ledger_status": row.get("status"),
                 "voucher_code": row.get("voucher_code"),
                 "risk_flags": row.get("risk_flags") or [],
+                "ledger_type": row.get("ledger_type"),
+                "entitlement_month": row.get("entitlement_month") or row.get("year_month"),
+                "reward_plan": row.get("reward_plan"),
+                "shortage_reasons": row.get("shortage_reasons") or {},
+                "missing_by_denomination": row.get("missing_by_denomination") or {},
+                # Only "is a batch pinned per pool" — the modal re-derives
+                # everything authoritative from the server.
+                "pinned_pools": sorted(
+                    pid for pid, tgt in (row.get("pool_targets") or {}).items()
+                    if (tgt or {}).get("mode") == "batch" and (tgt or {}).get("batch_id") is not None
+                ),
                 "simulate": bool(row.get("simulate")),
                 "would_issue_pool": row.get("would_issue_pool"),
                 "qualified_week": qualified_week,
@@ -8171,6 +8182,74 @@ def admin_affiliate_approve_v2(ledger_id):
         "risk_flags": [] if issued else list(ledger.get("risk_flags") or []),
         "shortage_reasons": None if issued else ledger.get("shortage_reasons"),
     })
+
+
+_HISTORICAL_REPLENISH_HTTP_STATUS = {
+    "ledger_not_found": 404,
+    "batch_not_found": 404,
+    "already_issued": 409,
+    "rejected": 409,
+    "invalid_status": 409,
+    "replenish_in_progress": 409,
+    "stock_already_sufficient": 409,
+    "no_shortage": 409,
+    "database_error": 500,
+}
+
+
+def _historical_replenish_response(result: dict):
+    if result.get("status") == "ok":
+        return jsonify(result), 200
+    return jsonify(result), _HISTORICAL_REPLENISH_HTTP_STATUS.get(result.get("reason"), 400)
+
+
+@vouchers_bp.route("/admin/affiliate/<ledger_id>/historical-batch", methods=["GET"])
+def admin_affiliate_historical_batch_context(ledger_id):
+    _, err = require_admin()
+    if err:
+        return err
+    try:
+        oid = ObjectId(ledger_id)
+    except Exception:
+        return jsonify({"status": "error", "reason": "bad_ledger_id"}), 400
+    from affiliate_voucher_batches import historical_replenish_context
+
+    result = historical_replenish_context(db, oid, now_utc=datetime.now(timezone.utc))
+    if result.get("reason") == "ledger_not_found":
+        return jsonify(result), 404
+    # Ineligibility is information for the modal, not a request failure.
+    return jsonify(result), 200
+
+
+@vouchers_bp.route("/admin/affiliate/<ledger_id>/historical-batch/replenish", methods=["POST"])
+def admin_affiliate_historical_batch_replenish(ledger_id):
+    admin, err = require_admin()
+    if err:
+        return err
+    try:
+        oid = ObjectId(ledger_id)
+    except Exception:
+        return jsonify({"status": "error", "reason": "bad_ledger_id"}), 400
+    from affiliate_voucher_batches import replenish_historical_pinned_batch
+
+    data = request.get_json(silent=True) or {}
+    admin = admin or {}
+    admin_identity = (
+        admin.get("usernameLower") or admin.get("username")
+        or (f"{admin.get('adminSource') or 'admin'}:{admin.get('id')}" if admin.get("id") is not None else "admin")
+    )
+    result = replenish_historical_pinned_batch(
+        db,
+        oid,
+        admin_identity=str(admin_identity),
+        codes=data.get("codes"),
+        pool_id=data.get("pool_id"),
+        denomination=data.get("denomination"),
+        # Only ever compared against the ledger's own pinned batch.
+        batch_id=data.get("batch_id"),
+        now_utc=datetime.now(timezone.utc),
+    )
+    return _historical_replenish_response(result)
 
 
 @vouchers_bp.route("/admin/affiliate/<ledger_id>/reject", methods=["POST"])

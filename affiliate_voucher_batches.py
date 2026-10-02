@@ -1116,6 +1116,499 @@ def reconcile_batch(db, batch_id, *, admin_identity: str | None = None, now_utc:
 
 
 # ---------------------------------------------------------------------------
+# Historical pinned-batch replenishment (admin-only, per ledger)
+# ---------------------------------------------------------------------------
+#
+# ``add_codes_to_batch`` refuses an ended batch, and the allocator never lets
+# a later month's batch satisfy an earlier entitlement. A September
+# denomination ledger whose pinned September batch ran dry is therefore stuck
+# until codes land in THAT batch. This is the one narrow way to put them
+# there: driven by a ledger, never by a batch id, so it can only top up the
+# exact batch that ledger is already pinned to (``pool_targets.<POOL>``), only
+# for a denomination it is actually short of, and only by that shortfall.
+#
+# It never issues anything, never changes a ledger, and never moves a batch's
+# window. Issuance stays with the normal Approve -> allocator path, which is
+# already allowed to continue a pinned allocation past ``ends_at``.
+
+HISTORICAL_REPLENISH_SOURCE = "admin_historical_replenish"
+HISTORICAL_REPLENISH_STATUSES = ("PENDING_MANUAL", "OUT_OF_STOCK")
+HISTORICAL_REPLENISH_AUDIT_COLLECTION = "affiliate_historical_replenish_audit"
+HISTORICAL_REPLENISH_LOCK_COLLECTION = "affiliate_historical_replenish_locks"
+_HISTORICAL_REPLENISH_LOCK_TTL_SECONDS = 120
+
+
+def _replenish_fail(reason: str, message: str, **extra) -> dict:
+    out = {"status": "error", "reason": reason, "message": message}
+    out.update(extra)
+    return out
+
+
+def _month_label(entitlement_month: str) -> str:
+    try:
+        return datetime.strptime(str(entitlement_month), "%Y%m").strftime("%B %Y")
+    except ValueError:
+        return str(entitlement_month)
+
+
+def _historical_ledger_gate(db, ledger_id, *, now_utc: datetime):
+    """Ledger-level checks shared by the read-only context and the write.
+    Returns ``(failure_or_None, ledger, recipe, entitlement_month, state)``.
+    """
+    # Lazy: these are private allocator helpers, imported here so the
+    # module-level import surface stays exactly what it was.
+    from affiliate_rewards import (
+        _classify_issued_pool_rows,
+        _ledger_entitlement_month,
+        _ledger_has_affiliate_bundle,
+        _ledger_recipe,
+        _ledger_uses_denomination_plan,
+    )
+
+    ledger = db.affiliate_ledger.find_one({"_id": ledger_id}) if ledger_id is not None else None
+    if not ledger:
+        return _replenish_fail("ledger_not_found", "Ledger not found."), None, None, None, None
+    if str(ledger.get("ledger_type") or "").strip().upper() != "AFFILIATE_MONTHLY":
+        return _replenish_fail(
+            "unsupported_ledger_type",
+            "Only monthly affiliate tier entitlements can use historical batch replenishment.",
+            ledger_type=ledger.get("ledger_type"),
+        ), ledger, None, None, None
+    status = str(ledger.get("status") or "")
+    if status == "ISSUED" or ledger.get("voucher_code") or _ledger_has_affiliate_bundle(ledger):
+        return _replenish_fail("already_issued", "This entitlement is already issued.", ledger_status=status), ledger, None, None, None
+    if status == "REJECTED":
+        return _replenish_fail("rejected", "This entitlement was rejected.", ledger_status=status), ledger, None, None, None
+    if status not in HISTORICAL_REPLENISH_STATUSES:
+        return _replenish_fail(
+            "invalid_status",
+            f"Replenishment is only allowed for {' / '.join(HISTORICAL_REPLENISH_STATUSES)} ledgers.",
+            ledger_status=status,
+        ), ledger, None, None, None
+    if not _ledger_uses_denomination_plan(ledger):
+        return _replenish_fail(
+            "not_denomination_plan",
+            "Only denomination-plan (Sep 2026 onward) entitlements use pinned denomination batches.",
+        ), ledger, None, None, None
+    entitlement_month = _ledger_entitlement_month(ledger)
+    _, month_end = canonical_entitlement_month_window(entitlement_month)
+    if month_end is None or now_utc < month_end:
+        return _replenish_fail(
+            "ledger_not_historical",
+            "This entitlement month has not ended yet. Use the normal batch Add Codes flow for current stock.",
+            entitlement_month=entitlement_month,
+        ), ledger, None, entitlement_month, None
+    recipe = _ledger_recipe(ledger)
+    state = _classify_issued_pool_rows(db, ledger, recipe=recipe)
+    if state["foreign"] or state["surplus"]:
+        # Replenishing cannot fix a corrupt linkage; it needs a human.
+        return _replenish_fail(
+            "historical_replenish_not_allowed",
+            "Codes linked to this ledger do not match its recipe (foreign or surplus rows). Resolve that first.",
+        ), ledger, recipe, entitlement_month, state
+    if not state["missing"]:
+        return _replenish_fail(
+            "no_shortage",
+            "Every denomination of this bundle is already allocated. Retry Approve to finalize.",
+        ), ledger, recipe, entitlement_month, state
+    return None, ledger, recipe, entitlement_month, state
+
+
+def _historical_pool_gate(db, *, ledger, state, entitlement_month, pool_id: str, now_utc: datetime,
+                          client_batch_id=None):
+    """Per-denomination checks. The target batch is ALWAYS the ledger's own
+    ``pool_targets.<pool_id>.batch_id``; a client-supplied id is only ever
+    compared against it, never used to look anything up.
+    Returns ``(failure_or_None, batch, replenishable_quantity, available)``.
+    """
+    if pool_id not in (state.get("required") or {}):
+        return _replenish_fail(
+            "invalid_denomination",
+            "This denomination is not part of the ledger's reward bundle.",
+            pool_id=pool_id,
+        ), None, 0, 0
+    missing = int((state.get("missing") or {}).get(pool_id) or 0)
+    if missing <= 0:
+        return _replenish_fail(
+            "denomination_not_short",
+            "This denomination is already fully allocated for this ledger.",
+            pool_id=pool_id,
+        ), None, 0, 0
+    target = (ledger.get("pool_targets") or {}).get(pool_id) or {}
+    pinned_batch_id = target.get("batch_id")
+    if target.get("mode") != "batch" or pinned_batch_id is None:
+        return _replenish_fail(
+            "missing_pinned_batch",
+            "This denomination was never pinned to a batch for this entitlement; there is no historical batch to replenish.",
+            pool_id=pool_id,
+        ), None, 0, 0
+    if client_batch_id not in (None, "") and str(client_batch_id) != str(pinned_batch_id):
+        return _replenish_fail(
+            "batch_not_pinned_to_ledger",
+            "The supplied batch is not the batch this ledger is pinned to.",
+            pool_id=pool_id,
+        ), None, 0, 0
+    batch = db.affiliate_voucher_batches.find_one({"_id": pinned_batch_id})
+    if not batch:
+        return _replenish_fail("batch_not_found", "The pinned batch no longer exists.", pool_id=pool_id), None, 0, 0
+    if str(batch.get("pool_id") or "").strip().upper() != pool_id:
+        return _replenish_fail(
+            "batch_not_pinned_to_ledger",
+            "The pinned batch belongs to a different pool.",
+            pool_id=pool_id,
+        ), None, 0, 0
+    # Same full-containment rule the allocator pinned with, plus the batch
+    # must START in the entitlement month — so a batch belonging to any
+    # other month can never be topped up through this path.
+    month_start, month_end = canonical_entitlement_month_window(entitlement_month)
+    starts_at = _as_aware_utc(batch.get("starts_at"))
+    ends_at = _as_aware_utc(batch.get("ends_at"))
+    if (
+        starts_at is None or ends_at is None
+        or not (starts_at <= month_start and ends_at >= month_end)
+        or _entitlement_month_for_batch(batch) != entitlement_month
+    ):
+        return _replenish_fail(
+            "batch_month_mismatch",
+            "The pinned batch does not correspond to this ledger's entitlement month.",
+            pool_id=pool_id,
+        ), None, 0, 0
+    if now_utc < ends_at:
+        return _replenish_fail(
+            "batch_not_historical",
+            "The pinned batch is still within its window. Use the normal batch Add Codes flow.",
+            pool_id=pool_id,
+        ), None, 0, 0
+    if (batch.get("upload_status") or "ready") != "ready":
+        return _replenish_fail("batch_not_ready", "The pinned batch is not in a ready state.", pool_id=pool_id), None, 0, 0
+    if bool(batch.get("distribution_disabled")):
+        return _replenish_fail("batch_disabled", "The pinned batch is disabled.", pool_id=pool_id), None, 0, 0
+    available = int(db.voucher_pools.count_documents(
+        {"batch_id": batch["_id"], "pool_id": pool_id, "status": "available"}
+    ))
+    replenishable = missing - available
+    if replenishable <= 0:
+        return _replenish_fail(
+            "stock_already_sufficient",
+            f"The pinned batch already holds {available} available code(s) for this denomination. Retry Approve first.",
+            pool_id=pool_id,
+            available_in_batch=available,
+        ), batch, 0, available
+    return None, batch, replenishable, available
+
+
+def historical_replenish_context(db, ledger_id, *, now_utc: datetime | None = None) -> dict:
+    """Read-only view for the admin modal: the ledger, its pinned batch per
+    denomination, what is missing, and whether each denomination can be
+    replenished right now (with the exact refusal reason if not)."""
+    now_utc = now_utc or datetime.now(timezone.utc)
+    failure, ledger, recipe, entitlement_month, state = _historical_ledger_gate(db, ledger_id, now_utc=now_utc)
+    if failure and state is None:
+        out = dict(failure, eligible=False, pools=[])
+        if ledger:
+            out.update({
+                "ledger_id": str(ledger.get("_id")),
+                "user_id": ledger.get("user_id"),
+                "tier": ledger.get("tier"),
+                "ledger_status": ledger.get("status"),
+                "entitlement_month": entitlement_month or ledger.get("entitlement_month") or ledger.get("year_month"),
+                "shortage_reasons": ledger.get("shortage_reasons") or {},
+            })
+        return out
+    pools = []
+    for pool_id in sorted((state or {}).get("required") or {}):
+        target = (ledger.get("pool_targets") or {}).get(pool_id) or {}
+        missing = int((state.get("missing") or {}).get(pool_id) or 0)
+        entry = {
+            "pool_id": pool_id,
+            "denomination": pool_denomination(pool_id),
+            "required": int(state["required"][pool_id]),
+            "allocated": len(state["allocated"].get(pool_id) or []),
+            "missing": missing,
+            "pinned_batch_id": str(target["batch_id"]) if target.get("batch_id") is not None else None,
+            "replenishable": 0,
+            "available_in_batch": None,
+            "blocked_reason": None,
+        }
+        if failure is None and missing > 0:
+            pool_failure, batch, replenishable, available = _historical_pool_gate(
+                db, ledger=ledger, state=state, entitlement_month=entitlement_month, pool_id=pool_id, now_utc=now_utc,
+            )
+            entry["replenishable"] = replenishable
+            entry["available_in_batch"] = available if batch is not None else None
+            if batch is not None:
+                entry["batch_name"] = batch.get("batch_name")
+                entry["batch_ends_at_kl"] = _to_kl_iso(batch.get("ends_at"))
+            if pool_failure:
+                entry["blocked_reason"] = pool_failure["reason"]
+        elif failure is not None:
+            entry["blocked_reason"] = failure["reason"]
+        pools.append(entry)
+    return {
+        "status": "ok" if failure is None else "error",
+        "reason": None if failure is None else failure["reason"],
+        "message": None if failure is None else failure["message"],
+        "eligible": failure is None and any(p["replenishable"] > 0 for p in pools),
+        "ledger_id": str(ledger.get("_id")),
+        "user_id": ledger.get("user_id"),
+        "tier": ledger.get("tier"),
+        "ledger_status": ledger.get("status"),
+        "entitlement_month": entitlement_month,
+        "shortage_reasons": ledger.get("shortage_reasons") or {},
+        "missing_by_denomination": dict((state or {}).get("missing") or {}),
+        "pools": pools,
+    }
+
+
+def _resolve_denomination_pool_id(*, pool_id=None, denomination=None) -> str | None:
+    if pool_id not in (None, ""):
+        key = str(pool_id).strip().upper()
+        return key if pool_denomination(key) is not None else None
+    try:
+        value = int(str(denomination).strip())
+    except (TypeError, ValueError):
+        return None
+    for key in ADMIN_AFFILIATE_POOL_IDS:
+        if pool_denomination(key) == value:
+            return key
+    return None
+
+
+def _acquire_replenish_lock(db, *, key: str, holder: str) -> bool:
+    """One replenishment per batch at a time, so two admins cannot both pass
+    the shortfall check and overfill an expired batch. A crashed holder's
+    lock is reclaimable after the TTL."""
+    locks = db[HISTORICAL_REPLENISH_LOCK_COLLECTION]
+    wall = datetime.now(timezone.utc)
+    cutoff = datetime.fromtimestamp(wall.timestamp() - _HISTORICAL_REPLENISH_LOCK_TTL_SECONDS, tz=timezone.utc)
+    locks.delete_one({"_id": key, "locked_at": {"$lt": cutoff}})
+    try:
+        locks.insert_one({"_id": key, "holder": holder, "locked_at": wall})
+    except Exception as exc:
+        if _is_duplicate_key_error(exc):
+            return False
+        raise
+    return True
+
+
+def _release_replenish_lock(db, *, key: str, holder: str):
+    try:
+        db[HISTORICAL_REPLENISH_LOCK_COLLECTION].delete_one({"_id": key, "holder": holder})
+    except Exception:
+        logger.exception("[AFF_HIST_REPLENISH][LOCK_RELEASE_FAILED] key=%s", key)
+
+
+def replenish_historical_pinned_batch(
+    db,
+    ledger_id,
+    *,
+    admin_identity: str,
+    codes,
+    pool_id=None,
+    denomination=None,
+    batch_id=None,
+    now_utc: datetime | None = None,
+) -> dict:
+    """Insert new physical codes into the exact expired batch a denomination
+    ledger is already pinned to, for ONE denomination it is short of, up to
+    that shortfall. Never issues, never touches the ledger, never edits the
+    batch's identity or window. Retry Approve afterwards to issue.
+    """
+    now_utc = now_utc or datetime.now(timezone.utc)
+    failure, ledger, recipe, entitlement_month, state = _historical_ledger_gate(db, ledger_id, now_utc=now_utc)
+    if failure:
+        return failure
+
+    target_pool = _resolve_denomination_pool_id(pool_id=pool_id, denomination=denomination)
+    if target_pool is None:
+        return _replenish_fail("invalid_denomination", "A valid denomination ($5 / $10 / $50) is required.")
+
+    unique_codes, duplicate_in_upload, invalid_count = normalize_voucher_codes(codes)
+    if invalid_count:
+        return _replenish_fail("invalid_code", f"{invalid_count} submitted code(s) contain whitespace. Nothing was inserted.")
+    if not unique_codes:
+        return _replenish_fail("empty_codes", "No voucher codes were provided.")
+
+    # Server-derived target only (see _historical_pool_gate). Resolved once
+    # here so the lock key is the pinned batch, then re-checked under lock.
+    pre_failure, pre_batch, _, _ = _historical_pool_gate(
+        db, ledger=ledger, state=state, entitlement_month=entitlement_month, pool_id=target_pool,
+        now_utc=now_utc, client_batch_id=batch_id,
+    )
+    if pre_batch is None:
+        return pre_failure
+
+    lock_key = str(pre_batch["_id"])
+    holder = str(ObjectId())
+    if not _acquire_replenish_lock(db, key=lock_key, holder=holder):
+        return _replenish_fail(
+            "replenish_in_progress",
+            "Another historical replenishment of this batch is in progress. Try again shortly.",
+        )
+    try:
+        # Everything re-read under the lock: the ledger may have been
+        # approved/issued, and the batch may have gained stock, meanwhile.
+        failure, ledger, recipe, entitlement_month, state = _historical_ledger_gate(db, ledger_id, now_utc=now_utc)
+        if failure:
+            return failure
+        failure, batch, replenishable, available = _historical_pool_gate(
+            db, ledger=ledger, state=state, entitlement_month=entitlement_month, pool_id=target_pool,
+            now_utc=now_utc, client_batch_id=batch_id,
+        )
+        if failure:
+            return failure
+
+        # The same physical code anywhere in the affiliate pools (any pool,
+        # any status) is refused — the unique (pool_id, code) index alone
+        # would only catch it within this one pool.
+        existing = list(db.voucher_pools.find(
+            {"pool_id": {"$in": list(ADMIN_AFFILIATE_POOL_IDS)}, "code": {"$in": unique_codes}},
+            projection={"code": 1, "status": 1},
+        ))
+        issued_codes = {r.get("code") for r in existing if r.get("status") == "issued"}
+        existing_codes = {r.get("code") for r in existing}
+        new_codes = [c for c in unique_codes if c not in existing_codes]
+        already_issued = len(issued_codes)
+        duplicates = duplicate_in_upload + len(existing_codes - issued_codes)
+
+        if not new_codes:
+            reason = "code_already_issued" if already_issued else "duplicate_code"
+            return _replenish_fail(
+                reason,
+                "No new codes: every submitted code already exists in the affiliate voucher pools.",
+                inserted=0, duplicates=duplicates, already_issued=already_issued,
+            )
+        if len(new_codes) > replenishable:
+            return _replenish_fail(
+                "quantity_exceeds_shortage",
+                f"This ledger is short {replenishable} code(s) for this denomination; {len(new_codes)} new code(s) "
+                "were submitted. Nothing was inserted.",
+                replenishable=replenishable,
+            )
+
+        oid = batch["_id"]
+        denomination_value = pool_denomination(target_pool)
+        audit_id = ObjectId()
+        audit = db[HISTORICAL_REPLENISH_AUDIT_COLLECTION]
+        audit.insert_one({
+            "_id": audit_id,
+            "source": HISTORICAL_REPLENISH_SOURCE,
+            "state": "in_progress",
+            "ledger_id": ledger["_id"],
+            "user_id": ledger.get("user_id"),
+            "tier": ledger.get("tier"),
+            "entitlement_month": entitlement_month,
+            "batch_id": oid,
+            "pool_id": target_pool,
+            "denomination": denomination_value,
+            "admin_identity": admin_identity,
+            "created_at": now_utc,
+            "submitted": len(unique_codes) + duplicate_in_upload,
+            "missing_before": int(state["missing"].get(target_pool) or 0),
+            "available_before": available,
+        })
+
+        inserted = 0
+        inserted_masked = []
+        raced = 0
+        db_error = None
+        for code in new_codes:
+            # Same row shape add_codes_to_batch writes, plus provenance.
+            row = {
+                "pool_id": target_pool,
+                "code": code,
+                "batch_id": oid,
+                "batch_name": batch.get("batch_name"),
+                "starts_at": batch.get("starts_at"),
+                "ends_at": batch.get("ends_at"),
+                "status": "available",
+                "created_at": now_utc,
+                "distribution_disabled": False,
+                "upload_source": HISTORICAL_REPLENISH_SOURCE,
+                "historical_replenish_audit_id": audit_id,
+            }
+            if denomination_value is not None:
+                row["voucher_value"] = denomination_value
+            try:
+                db.voucher_pools.insert_one(row)
+                inserted += 1
+                inserted_masked.append(_mask_code(code))
+            except Exception as exc:
+                if _is_duplicate_key_error(exc):
+                    raced += 1  # inserted elsewhere since the pre-check
+                    continue
+                db_error = exc.__class__.__name__
+                break
+        duplicates += raced
+
+        live = _hydrate_live_counts(db, batch)
+        db.affiliate_voucher_batches.update_one(
+            {"_id": oid},
+            {
+                "$set": {
+                    "available_count": int(live["available_count"]),
+                    "issued_count": int(live["issued_count"]),
+                    "uploaded_count": int(live["available_count"]) + int(live["issued_count"]),
+                    "last_historical_replenish_at": now_utc,
+                },
+                "$inc": {
+                    "submitted_count": len(unique_codes) + duplicate_in_upload,
+                    "inserted_count": inserted,
+                    "duplicate_count": duplicates + already_issued,
+                },
+            },
+        )
+        denominations_added = {str(denomination_value): inserted} if inserted else {}
+        audit.update_one(
+            {"_id": audit_id},
+            {"$set": {
+                "state": "failed" if db_error else "completed",
+                "error_code": db_error,
+                "inserted": inserted,
+                "duplicates": duplicates,
+                "already_issued": already_issued,
+                "denominations_added": denominations_added,
+                "inserted_codes_masked": inserted_masked,
+                "completed_at": now_utc,
+            }},
+        )
+        logger.info(
+            "[AFF_HIST_REPLENISH][%s] source=%s admin=%s ledger_id=%s user_id=%s entitlement_month=%s "
+            "batch_id=%s pool_id=%s inserted=%s duplicates=%s already_issued=%s audit_id=%s",
+            "FAILED" if db_error else "OK", HISTORICAL_REPLENISH_SOURCE, admin_identity, ledger["_id"],
+            ledger.get("user_id"), entitlement_month, oid, target_pool, inserted, duplicates, already_issued, audit_id,
+        )
+        if db_error:
+            return _replenish_fail(
+                "database_error",
+                "A database error stopped the upload partway. Codes inserted before it remain in the batch.",
+                inserted=inserted, duplicates=duplicates, audit_id=str(audit_id),
+            )
+        if not inserted:
+            return _replenish_fail(
+                "duplicate_code",
+                "No new codes: every submitted code was inserted concurrently by another request.",
+                inserted=0, duplicates=duplicates, already_issued=already_issued,
+            )
+        return {
+            "status": "ok",
+            "ledger_id": str(ledger["_id"]),
+            "batch_id": str(oid),
+            "entitlement_month": entitlement_month,
+            "pool_id": target_pool,
+            "inserted": inserted,
+            "duplicates": duplicates,
+            "already_issued": already_issued,
+            "denominations_added": denominations_added,
+            "remaining_shortfall": max(0, replenishable - inserted),
+            "audit_id": str(audit_id),
+            "message": f"Historical {_month_label(entitlement_month)} batch replenished. Retry Approve to complete issuance.",
+        }
+    finally:
+        _release_replenish_lock(db, key=lock_key, holder=holder)
+
+
+# ---------------------------------------------------------------------------
 # Admin API
 # ---------------------------------------------------------------------------
 

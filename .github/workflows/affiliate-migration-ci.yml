@@ -69,6 +69,7 @@ env:
     test_affiliate_reward_retention.py
     test_affiliate_my_stats_api.py
     test_affiliate_out_of_stock_retry.py
+    test_affiliate_historical_replenish.py
 
 jobs:
   migration-tests:
