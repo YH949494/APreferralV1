@@ -11698,6 +11698,122 @@
     });
   }
 
+  // ---------- Historical pinned-batch replenishment ----------
+  // Visibility only; the server re-derives and enforces every rule (ledger
+  // type, status, pinned batch, entitlement month, shortfall).
+  var AFFP_HIST_STATUSES = { PENDING_MANUAL: true, OUT_OF_STOCK: true };
+  var AFFP_DENOMINATION_FIRST_MONTH = "202609";
+
+  function affpCurrentKlMonth() {
+    var kl = new Date(Date.now() + 8 * 3600 * 1000);
+    var m = kl.getUTCMonth() + 1;
+    return String(kl.getUTCFullYear()) + (m < 10 ? "0" : "") + m;
+  }
+
+  function affpHistoricalReplenishVisible(it) {
+    if (!it || it.ledger_type !== "AFFILIATE_MONTHLY") return false;
+    if (!AFFP_HIST_STATUSES[it.ledger_status || it.status]) return false;
+    if (it.voucher_code) return false;
+    var month = String(it.entitlement_month || "");
+    if (!/^\d{6}$/.test(month) || month < AFFP_DENOMINATION_FIRST_MONTH) return false;
+    if (it.reward_plan && it.reward_plan !== "denomination_2026_09") return false;
+    if (month >= affpCurrentKlMonth()) return false;
+    return Array.isArray(it.pinned_pools) && it.pinned_pools.length > 0;
+  }
+
+  function affpOpenHistoricalReplenishModal(ledgerId) {
+    var overlay = document.createElement("div");
+    overlay.className = "modal-overlay";
+    overlay.innerHTML = '<div class="modal-box" style="max-width:600px;"><h3>Replenish Historical Batch</h3><p class="sub">Loading…</p></div>';
+    document.body.appendChild(overlay);
+    function done() { overlay.remove(); }
+    overlay.addEventListener("click", function (e) { if (e.target === overlay) done(); });
+
+    fetch("/v2/miniapp/admin/affiliate/" + encodeURIComponent(ledgerId) + "/historical-batch", {
+      credentials: "same-origin", headers: { "Accept": "application/json" },
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (ctx) { affpRenderHistoricalReplenish(overlay, ledgerId, ctx || {}, done); })
+      .catch(function (e) {
+        overlay.querySelector(".modal-box").innerHTML = "<h3>Replenish Historical Batch</h3><p class=\"sub\">Failed to load: " + esc(e.message) + "</p>";
+      });
+  }
+
+  function affpRenderHistoricalReplenish(overlay, ledgerId, ctx, done) {
+    var pools = ctx.pools || [];
+    var options = pools.filter(function (p) { return p.replenishable > 0; });
+    var shortage = ctx.shortage_reasons || {};
+    var poolRows = pools.map(function (p) {
+      return "<tr><td>$" + fmt(p.denomination) + "</td><td>" + esc(p.pool_id) + "</td>" +
+        '<td class="num">' + fmt(p.allocated) + "/" + fmt(p.required) + "</td>" +
+        '<td class="num">' + fmt(p.missing) + "</td>" +
+        "<td>" + esc(p.pinned_batch_id || "— not pinned") + "</td>" +
+        "<td>" + esc(shortage[p.pool_id] || "—") + "</td>" +
+        "<td>" + (p.replenishable > 0 ? "up to " + fmt(p.replenishable) : esc(p.blocked_reason || (p.missing ? "blocked" : "complete"))) + "</td></tr>";
+    }).join("");
+    var monthLabel = esc(ctx.entitlement_month || "?");
+    var box = overlay.querySelector(".modal-box");
+    box.innerHTML =
+      "<h3>Replenish Historical Batch</h3>" +
+      '<p class="sub">Ledger ' + esc(ctx.ledger_id || ledgerId) + " · User " + fmt(ctx.user_id) + " · Tier " + esc(ctx.tier || "?") +
+      " · Status " + esc(ctx.ledger_status || "?") + " · Entitlement month <b>" + monthLabel + "</b></p>" +
+      '<p class="sub">Adds new physical codes ONLY into the exact batch this entitlement is already pinned to. It does not issue anything — retry Approve afterwards.</p>' +
+      '<table class="data-table"><thead><tr><th>Value</th><th>Pool</th><th class="num">Allocated</th><th class="num">Missing</th><th>Pinned batch</th><th>Shortage reason</th><th>Replenish</th></tr></thead><tbody>' +
+      poolRows + "</tbody></table>" +
+      (ctx.status !== "ok" || !options.length
+        ? '<div style="margin-top:12px;color:var(--bad);font-size:12px;">Not replenishable: ' + esc(ctx.reason || ctx.message || "no denomination is replenishable") + "</div>" +
+          '<div class="modal-actions"><button class="btn" id="affp-hist-cancel">Close</button></div>'
+        : '<label style="font-size:12px;font-weight:600;display:block;margin:12px 0 4px;">Denomination</label>' +
+          '<select id="affp-hist-pool">' + options.map(function (p) {
+            return '<option value="' + esc(p.pool_id) + '" data-batch="' + esc(p.pinned_batch_id) + '" data-max="' + esc(p.replenishable) + '">$' +
+              fmt(p.denomination) + " (" + esc(p.pool_id) + ") — up to " + fmt(p.replenishable) + " code(s)</option>";
+          }).join("") + "</select>" +
+          '<label style="font-size:12px;font-weight:600;display:block;margin:12px 0 4px;">Voucher Codes</label>' +
+          '<textarea id="affp-hist-codes" rows="5" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg);color:var(--text);box-sizing:border-box;resize:vertical;font-family:monospace;"></textarea>' +
+          '<p class="sub" style="margin-top:4px;">One code per line, comma-separated, or pasted CSV column</p>' +
+          '<div id="affp-hist-error" style="display:none;background:rgba(255,107,107,0.12);border:1px solid var(--bad);color:var(--bad);border-radius:8px;padding:8px 12px;font-size:12px;margin-top:8px;"></div>' +
+          '<div class="modal-actions"><button class="btn" id="affp-hist-cancel">Cancel</button>' +
+          '<button class="btn primary" id="affp-hist-submit">Replenish</button></div>');
+    box.querySelector("#affp-hist-cancel").addEventListener("click", done);
+    var submitBtn = box.querySelector("#affp-hist-submit");
+    if (!submitBtn) return;
+    var errEl = box.querySelector("#affp-hist-error");
+    function showError(msg) { errEl.textContent = msg; errEl.style.display = "block"; }
+    submitBtn.addEventListener("click", function () {
+      var select = box.querySelector("#affp-hist-pool");
+      var opt = select.options[select.selectedIndex];
+      var codesText = box.querySelector("#affp-hist-codes").value || "";
+      var parsed = abParseCodesPreview(codesText);
+      if (parsed.invalid) { showError(parsed.invalid + " code(s) contain whitespace."); return; }
+      if (!parsed.unique.length) { showError("Paste at least one voucher code."); return; }
+      var max = parseInt(opt.dataset.max, 10) || 0;
+      if (parsed.unique.length > max) { showError("Only " + max + " code(s) are missing for this denomination; " + parsed.unique.length + " submitted."); return; }
+      if (!confirm(
+        "Add " + parsed.unique.length + " code(s) to historical batch " + opt.dataset.batch +
+        " (" + select.value + ", entitlement month " + (ctx.entitlement_month || "?") + ")?\n\n" +
+        "This does NOT issue the reward. Retry Approve afterwards."
+      )) return;
+      errEl.style.display = "none";
+      if (!btnStart(submitBtn, "Replenishing…")) return;
+      apiPostJson("/v2/miniapp/admin/affiliate/" + encodeURIComponent(ledgerId) + "/historical-batch/replenish", {
+        pool_id: select.value, batch_id: opt.dataset.batch, codes: codesText,
+      })
+        .then(function (res) {
+          btnStop(submitBtn);
+          var d = res.d || {};
+          if (!res.ok || d.status !== "ok") {
+            showError((d.reason || "error") + ": " + (d.message || "unknown"));
+            return;
+          }
+          done();
+          toast("✅ " + (d.message || "Historical batch replenished. Retry Approve to complete issuance.") +
+            (d.duplicates ? " " + fmt(d.duplicates) + " duplicate(s) skipped." : ""), "success");
+          loadAffiliatePending(true);
+        })
+        .catch(function (e) { btnStop(submitBtn); showError("Network error: " + e.message + " — please retry."); });
+    });
+  }
+
   // ---------- Pending Affiliate Rewards (migrated from legacy MiniApp admin panel) ----------
   function loadAffiliatePending(force) {
     var activeBtn = $("#affp-status-filter .active");
@@ -11721,6 +11837,9 @@
             "<td>" + esc((it.risk_flags || []).join(", ") || "—") + "</td>" +
             "<td>" +
             '<button class="btn primary" data-affp-op="approve" data-ledger-id="' + esc(it.ledger_id) + '">Approve</button> ' +
+            (affpHistoricalReplenishVisible(it)
+              ? '<button class="btn" data-affp-op="hist-replenish" data-ledger-id="' + esc(it.ledger_id) + '">Replenish Historical Batch</button> '
+              : "") +
             '<button class="btn danger" data-affp-op="reject" data-ledger-id="' + esc(it.ledger_id) + '">Reject</button>' +
             "</td></tr>";
         }).join("");
@@ -11747,7 +11866,9 @@
       if (!btn) return;
       var op = btn.dataset.affpOp;
       var ledgerId = btn.dataset.ledgerId;
-      if (op === "reject") {
+      if (op === "hist-replenish") {
+        affpOpenHistoricalReplenishModal(ledgerId);
+      } else if (op === "reject") {
         var reason = prompt("Reason for rejection (optional):") || "";
         btn.disabled = true;
         fetch("/v2/miniapp/admin/affiliate/" + encodeURIComponent(ledgerId) + "/reject", {
