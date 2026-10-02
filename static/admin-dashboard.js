@@ -11771,8 +11771,12 @@
           headers: { "Content-Type": "application/json" },
         }).then(function (r) { return r.json(); })
           .then(function (d) {
-            if (d.status === "ok") { toast("✅ Affiliate reward approved", "success"); loadAffiliatePending(true); }
-            else banner("❌ Approve failed: " + (d.reason || "unknown"), "error");
+            if (d.status === "ok" && d.issued === false) {
+              banner("⚠️ Approved but not issued: " + esc(d.reason || "unknown") + " (status " + esc(d.ledger_status || "?") + ")", "error");
+              loadAffiliatePending(true);
+            }
+            else if (d.status === "ok") { toast("✅ Affiliate reward approved", "success"); loadAffiliatePending(true); }
+            else banner("❌ Approve failed: " + esc(d.reason || "unknown") + (d.ledger_status ? " (status " + esc(d.ledger_status) + ")" : ""), "error");
           })
           .catch(function (e) { banner("❌ Approve failed: " + e.message, "error"); })
           .finally(function () { btn.disabled = false; });

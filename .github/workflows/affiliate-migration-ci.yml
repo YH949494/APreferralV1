@@ -68,6 +68,7 @@ env:
     test_affiliate_surplus_sweep_index_hint.py
     test_affiliate_reward_retention.py
     test_affiliate_my_stats_api.py
+    test_affiliate_out_of_stock_retry.py
 
 jobs:
   migration-tests:

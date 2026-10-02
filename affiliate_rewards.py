@@ -4374,6 +4374,30 @@ def mark_invitee_qualified(db, *, invitee_id: int, referrer_id: int | None, now_
     return True
 
 
+def _restore_out_of_stock_after_failed_retry(db, *, ledger_id, now_utc: datetime):
+    """An admin retry of an OUT_OF_STOCK ledger that still could not be
+    filled goes back to OUT_OF_STOCK rather than staying PENDING_MANUAL, so
+    it does not silently join the automatic retry sweep.
+
+    Only when NOTHING was allocated: a denomination bundle that secured some
+    codes before running short keeps PENDING_MANUAL, so the sweep can resume
+    it instead of stranding those codes on a final-status ledger.
+    """
+    if _has_issued_pool_voucher_for_ledger(db, ledger_id=ledger_id):
+        return
+    res = db.affiliate_ledger.update_one(
+        {
+            "_id": ledger_id,
+            "status": "PENDING_MANUAL",
+            "admin_retry_from_status": "OUT_OF_STOCK",
+            **_no_voucher_filter(),
+        },
+        {"$set": {"status": "OUT_OF_STOCK", "updated_at": now_utc}, "$unset": {"admin_retry_from_status": ""}},
+    )
+    if getattr(res, "modified_count", 0) == 1:
+        logger.info("[AFF_ADMIN_RETRY][STILL_OUT_OF_STOCK] ledger_id=%s", ledger_id)
+
+
 def approve_affiliate_ledger(db, *, ledger_id, now_utc: datetime | None = None):
     now_utc = now_utc or datetime.now(timezone.utc)
     ledger = db.affiliate_ledger.find_one_and_update(
@@ -4382,12 +4406,38 @@ def approve_affiliate_ledger(db, *, ledger_id, now_utc: datetime | None = None):
         return_document=ReturnDocument.AFTER,
     )
     if not ledger:
-        return None
+        # OUT_OF_STOCK stays in FINAL_STATUSES for every automatic path; only
+        # this explicit admin action may reopen it, and only for a monthly
+        # tier ledger with no voucher attached. WELCOME OUT_OF_STOCK rows are
+        # excluded: they are issued by issue_welcome_bonus_if_eligible, not
+        # by the tier allocator below.
+        ledger = db.affiliate_ledger.find_one_and_update(
+            {"_id": ledger_id, "status": "OUT_OF_STOCK", "ledger_type": "AFFILIATE_MONTHLY", **_no_voucher_filter()},
+            {
+                "$set": {
+                    "status": "APPROVED",
+                    "admin_retry_from_status": "OUT_OF_STOCK",
+                    "admin_retry_at": now_utc,
+                    "updated_at": now_utc,
+                },
+            },
+            return_document=ReturnDocument.AFTER,
+        )
+        if not ledger:
+            return None
+        logger.info(
+            "[AFF_ADMIN_RETRY][OUT_OF_STOCK_REOPENED] ledger_id=%s user_id=%s tier=%s year_month=%s",
+            ledger.get("_id"), ledger.get("user_id"), ledger.get("tier"), ledger.get("year_month"),
+        )
     ledger = _finalize_issued_if_voucher_exists(db, ledger=ledger, now_utc=now_utc)
     if ledger.get("status") == "ISSUED":
         return ledger
+    # APPROVED -> SETTLING is the mutex between concurrent approvals: only the
+    # approver that performs this exact transition goes on to claim. SETTLING
+    # is deliberately not accepted here, so a second click (or second admin)
+    # never joins an issuance already in flight.
     issue_claim = db.affiliate_ledger.update_one(
-        {"_id": ledger["_id"], "status": {"$in": ["APPROVED", SETTLING_STATUS]}, **_no_voucher_filter()},
+        {"_id": ledger["_id"], "status": "APPROVED", **_no_voucher_filter()},
         {"$set": {"status": SETTLING_STATUS, "updated_at": now_utc}},
     )
     if issue_claim.modified_count == 0:
@@ -4395,7 +4445,46 @@ def approve_affiliate_ledger(db, *, ledger_id, now_utc: datetime | None = None):
         if latest and not _ledger_has_affiliate_bundle(latest) and latest.get("status") != "SIMULATED_PENDING":
             latest = _reconcile_affiliate_bundle_from_issued_pool(db, ledger=latest, now_utc=now_utc) or latest
         return latest
-    return _issue_affiliate_ledger_from_pool(db, ledger=db.affiliate_ledger.find_one({"_id": ledger["_id"]}), now_utc=now_utc)
+    result = _issue_affiliate_ledger_from_pool(db, ledger=db.affiliate_ledger.find_one({"_id": ledger["_id"]}), now_utc=now_utc)
+    if (result or {}).get("status") == "PENDING_MANUAL" and result.get("admin_retry_from_status") == "OUT_OF_STOCK":
+        _restore_out_of_stock_after_failed_retry(db, ledger_id=ledger["_id"], now_utc=now_utc)
+        result = db.affiliate_ledger.find_one({"_id": ledger["_id"]}) or result
+    return result
+
+
+def affiliate_approve_refusal_reason(ledger: dict) -> str:
+    """Why ``approve_affiliate_ledger`` returned ``None`` for a ledger that
+    exists — so the admin API never reports a real row as ``not_found``."""
+    status = str(ledger.get("status") or "")
+    if status == "ISSUED":
+        return "already_issued"
+    if status == "REJECTED":
+        return "rejected"
+    if status == SETTLING_STATUS:
+        return "in_progress"
+    if status in RETENTION_HOLD_STATUSES:
+        return "retention_hold"
+    if status == "OUT_OF_STOCK":
+        if ledger.get("voucher_code") or _ledger_has_affiliate_bundle(ledger):
+            return "voucher_already_attached"
+        return "retry_not_supported_for_ledger_type"
+    return "invalid_status"
+
+
+def affiliate_approve_outcome_reason(ledger: dict) -> str | None:
+    """Short reason when an approval ran but did not end in ISSUED."""
+    status = str(ledger.get("status") or "")
+    if status == "ISSUED":
+        return None
+    if status == SETTLING_STATUS:
+        return "in_progress"
+    if status == "OUT_OF_STOCK":
+        return "no_stock"
+    if status == "PENDING_MANUAL" and set(ledger.get("risk_flags") or []) & _INVENTORY_ONLY_RISK_FLAGS:
+        return "no_stock"
+    if status == "REJECTED":
+        return "rejected"
+    return "manual_review"
 
 
 def affiliate_bundle_visible_cards(db, *, user_id: int) -> list[dict]:
