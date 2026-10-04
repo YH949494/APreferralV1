@@ -91,7 +91,9 @@ def test_growth_top5_order_and_format_and_escape():
     assert "#4 D**** — 18 qualified invites" in sent
     assert "#5 E**** — 12 qualified invites" in sent
     assert "@" not in sent
-    assert "<i>Invite more qualified members, join our affiliate program, and earn up to <b>$450/month</b>.</i>" in sent
+    assert "<i>Invite more qualified members, join our affiliate program, and earn up to <b>$625/month</b>.</i>" in sent
+    assert "$625/month" in sent
+    assert "$450/month" not in sent
 
 
 def test_growth_empty_skips_posting():

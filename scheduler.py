@@ -1838,7 +1838,7 @@ def post_growth_leaderboard_weekly(*, db_ref=None, now_utc_ts: datetime | None =
     lines.extend(
         [
             "",
-            "<i>Invite more qualified members, join our affiliate program, and earn up to <b>$450/month</b>.</i>",
+            "<i>Invite more qualified members, join our affiliate program, and earn up to <b>$625/month</b>.</i>",
         ]
     )
     text = "\n".join(lines)
@@ -2021,7 +2021,7 @@ def render_weekly_referral_post_text(entries: list[dict]) -> str:
     lines.extend(
         [
             "",
-            "Invite more qualified members, join our affiliate program, and earn up to <b>$450/month</b>.",
+            "Invite more qualified members, join our affiliate program, and earn up to <b>$625/month</b>.",
         ]
     )
     return "\n".join(lines)

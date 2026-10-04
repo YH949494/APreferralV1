@@ -199,7 +199,9 @@ def test_historical_text_format_and_escaping():
     assert "#4 d**** — 10 qualified invites" in text
     assert "#5 e**** — 7 qualified invites" in text
     assert "@" not in text.split("Top 5 Growth Leaders This Week</b>")[1].split("Invite more")[0]
-    assert "Invite more qualified members, join our affiliate program, and earn up to <b>$450/month</b>." in text
+    assert "Invite more qualified members, join our affiliate program, and earn up to <b>$625/month</b>." in text
+    assert "$625/month" in text
+    assert "$450/month" not in text
 
 
 def test_telegram_success_records_message_id():
