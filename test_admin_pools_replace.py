@@ -4,7 +4,7 @@ scheduled-batch rows; inserts before deleting."""
 from __future__ import annotations
 
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from flask import Flask
 
@@ -14,7 +14,8 @@ NOW = datetime(2026, 10, 1, tzinfo=timezone.utc)
 
 
 def _db():
-    return FakeDb({"voucher_pools": [("pool_id", "code")]})
+    # real Mongo always enforces _id uniqueness; the fake only enforces declared keys
+    return FakeDb({"voucher_pools": [("pool_id", "code")], "admin_locks": [("_id",)]})
 
 
 def _row(pool_id, code, status="available", **extra):
@@ -77,6 +78,40 @@ class AdminPoolsReplaceTests(unittest.TestCase):
         self.assertEqual((status, p["reason"]), (400, "empty_codes"))
         # nothing deleted on any rejected request
         self.assertEqual(db.voucher_pools.count_documents({"pool_id": "T1", "status": "available"}), 1)
+
+    def test_concurrent_replace_is_rejected_and_stock_untouched(self):
+        db = _db()
+        db.voucher_pools.insert_one(_row("T1", "OLD"))
+        db.admin_locks.insert_one({
+            "_id": "pool_replace:T1", "owner": "other",
+            "expiresAt": datetime.now(timezone.utc) + timedelta(seconds=60),
+        })
+        status, p = self._post(db, pool_id="T1", codes_text="NEW")
+        self.assertEqual((status, p["reason"]), (409, "replace_in_progress"))
+        self.assertEqual({r["code"] for r in db.voucher_pools.find({"pool_id": "T1"})}, {"OLD"})
+        # the other holder's lock is not released by the rejected request
+        self.assertEqual(db.admin_locks.find_one({"_id": "pool_replace:T1"})["owner"], "other")
+
+    def test_expired_lock_is_taken_over_and_released_after(self):
+        db = _db()
+        db.voucher_pools.insert_one(_row("T1", "OLD"))
+        db.admin_locks.insert_one({
+            "_id": "pool_replace:T1", "owner": "crashed",
+            "expiresAt": datetime.now(timezone.utc) - timedelta(seconds=5),
+        })
+        status, p = self._post(db, pool_id="T1", codes_text="NEW")
+        self.assertEqual((status, p["inserted"], p["old_available_removed"]), (200, 1, 1))
+        self.assertIsNone(db.admin_locks.find_one({"_id": "pool_replace:T1"}))
+
+    def test_lock_released_on_success_and_pools_lock_independent(self):
+        db = _db()
+        db.admin_locks.insert_one({
+            "_id": "pool_replace:T2", "owner": "other",
+            "expiresAt": datetime.now(timezone.utc) + timedelta(seconds=60),
+        })
+        status, _ = self._post(db, pool_id="T1", codes_text="A")
+        self.assertEqual(status, 200)
+        self.assertIsNone(db.admin_locks.find_one({"_id": "pool_replace:T1"}))
 
 
 if __name__ == "__main__":
