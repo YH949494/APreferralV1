@@ -74,7 +74,7 @@ def test_bulk_approves_five_pending_rows(monkeypatch, caplog):
     assert all(db.affiliate_ledger.find_one({"_id": i})["status"] == "ISSUED" for i in ids)
     assert _available(db) == 0
     assert "T1-" not in str(body)  # no codes leak
-    assert any("[AFFILIATE][BULK_APPROVE] requested=5 processed=5 issued=5 out_of_stock=0 already_final=0 failed=0 admin=boss" in r.getMessage() for r in caplog.records)
+    assert any("[AFFILIATE][BULK_APPROVE] requested=5 processed=5 issued=5 out_of_stock=0 rejected=0 already_final=0 failed=0 admin=boss" in r.getMessage() for r in caplog.records)
 
 
 def test_mix_pending_and_already_issued_untouched(monkeypatch):
@@ -240,3 +240,17 @@ def test_one_failure_does_not_stop_the_rest(monkeypatch):
 def test_unknown_id_counted_failed_not_found(monkeypatch):
     body = _post(_client(monkeypatch, _db()), [ObjectId()]).get_json()
     assert body["failed"] == 1 and body["results"][0]["reason"] == "not_found"
+
+
+def test_rejected_outcome_is_reported_not_pending(monkeypatch):
+    db = _db()
+    a = _ledger(db, 1)
+    _stock(db, 4)
+
+    def reject(db_, *, ledger_id, now_utc=None):
+        db_.affiliate_ledger.update_one({"_id": ledger_id}, {"$set": {"status": "REJECTED"}})
+        return db_.affiliate_ledger.find_one({"_id": ledger_id})
+
+    monkeypatch.setattr(vouchers, "approve_affiliate_ledger", reject)
+    body = _post(_client(monkeypatch, db), [a]).get_json()
+    assert body["rejected"] == 1 and body["issued"] == 0 and body["results"][0]["outcome"] == "rejected"

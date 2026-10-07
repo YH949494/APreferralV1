@@ -8200,7 +8200,7 @@ ${referral}`;
         if (!res.ok || data.status !== "ok") {
           summary = `Bulk approve failed: ${data.reason || res.status}`;
         } else {
-          summary = `Approved: ${data.processed} | Issued: ${data.issued} | Out of stock: ${data.out_of_stock} | Failed: ${data.failed}`;
+          summary = `Approved: ${data.processed} | Issued: ${data.issued} | Out of stock: ${data.out_of_stock} | Rejected: ${data.rejected || 0} | Failed: ${data.failed}`;
         }
       } catch (e) {
         console.error(e);

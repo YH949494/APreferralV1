@@ -8231,7 +8231,7 @@ def admin_affiliate_approve_bulk_v2():
         row["_id"]: row.get("status")
         for row in db.affiliate_ledger.find({"_id": {"$in": oids}})
     }
-    counts = {"processed": 0, "issued": 0, "out_of_stock": 0, "already_final": 0, "failed": 0}
+    counts = {"processed": 0, "issued": 0, "out_of_stock": 0, "rejected": 0, "already_final": 0, "failed": 0}
     results = []
     for oid in oids:
         lid = str(oid)
@@ -8270,13 +8270,16 @@ def admin_affiliate_approve_bulk_v2():
         elif reason == "no_stock":
             counts["out_of_stock"] += 1
             outcome = "out_of_stock"
+        elif after == "REJECTED":
+            counts["rejected"] += 1
+            outcome = "rejected"
         else:
             outcome = "pending"
         results.append({"ledger_id": lid, "outcome": outcome, "ledger_status": after, "reason": reason})
 
     logger.info(
-        "[AFFILIATE][BULK_APPROVE] requested=%s processed=%s issued=%s out_of_stock=%s already_final=%s failed=%s admin=%s",
-        len(oids), counts["processed"], counts["issued"], counts["out_of_stock"],
+        "[AFFILIATE][BULK_APPROVE] requested=%s processed=%s issued=%s out_of_stock=%s rejected=%s already_final=%s failed=%s admin=%s",
+        len(oids), counts["processed"], counts["issued"], counts["out_of_stock"], counts["rejected"],
         counts["already_final"], counts["failed"], admin_identity,
     )
     return jsonify({"status": "ok", "requested": len(oids), **counts, "results": results})
