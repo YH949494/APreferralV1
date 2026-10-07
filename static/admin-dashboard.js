@@ -11814,10 +11814,169 @@
     });
   }
 
+  // ---------- Pending Manual: Voucher Stock Required ----------
+  // Everything numeric comes from GET /admin/affiliate/pending-manual/summary,
+  // which is computed server-side across ALL matching ledgers. This block only
+  // renders it and posts uploads / the bulk retry; no stock maths lives here.
+  var AFFP_SHORTAGE_DENOMS = ["5", "10", "50"];
+  var AFFP_SHORTAGE_BASE = "/v2/miniapp/admin/affiliate/pending-manual";
+
+  function affpMonthLabel(yyyymm) {
+    var names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    var m = parseInt(String(yyyymm).slice(4, 6), 10);
+    return (names[m - 1] || "?") + " " + String(yyyymm).slice(0, 4);
+  }
+
+  function affpShortageMonthsFor(summary, denom) {
+    var out = [];
+    var byMonth = (summary && summary.by_month) || {};
+    Object.keys(byMonth).sort().forEach(function (month) {
+      var d = byMonth[month][denom];
+      if (d && d.shortage > 0) out.push({ month: month, shortage: d.shortage, historical: !!d.historical });
+    });
+    return out;
+  }
+
+  function affpShortageHtml(s) {
+    s = s || {};
+    var dens = s.denominations || {};
+    var blocked = Object.keys(s.blocked_breakdown || {}).map(function (k) {
+      return esc(k) + " × " + fmt(s.blocked_breakdown[k]);
+    }).join(", ");
+    var rows = AFFP_SHORTAGE_DENOMS.map(function (v) {
+      var d = dens[v] || { required: 0, available: 0, shortage: 0 };
+      var months = affpShortageMonthsFor(s, v);
+      var detail = months.length > 1 || (months.length === 1 && months[0].historical)
+        ? '<div class="sub" style="font-size:11px;">' + months.map(function (m) {
+            return esc(affpMonthLabel(m.month)) + ": " + fmt(m.shortage) + (m.historical ? " (ended batch)" : "");
+          }).join(" · ") + "</div>"
+        : "";
+      return "<tr><td><b>$" + esc(v) + "</b></td>" +
+        '<td class="num">' + fmt(d.required) + "</td>" +
+        '<td class="num">' + fmt(d.available) + "</td>" +
+        '<td class="num"><b' + (d.shortage > 0 ? ' style="color:var(--bad);"' : "") + ">" + fmt(d.shortage) + "</b>" + detail + "</td>" +
+        '<td><button class="btn" data-affp-shortage-op="upload" data-denom="' + esc(v) + '"' +
+        (d.shortage > 0 ? "" : " disabled") + ">Upload $" + esc(v) + " Codes</button></td></tr>";
+    }).join("");
+    var partial = s.partially_reserved_ledgers
+      ? " · " + fmt(s.partially_reserved_ledgers) + " already hold part of their bundle (only the missing codes are counted)" : "";
+    return '<div class="card" style="margin-bottom:16px;padding:14px;">' +
+      "<h3 style=\"margin:0 0 6px;\">Voucher Stock Required — Pending Manual</h3>" +
+      '<p class="sub" style="margin:0 0 10px;">' +
+      "<b>" + fmt(s.pending_count) + "</b> pending reward(s) affected · total reward value waiting <b>$" + fmt(s.total_reward_value) + "</b> · " +
+      "<b>" + fmt(s.issuable_after_replenishment) + "</b> will become issuable after full replenishment (" + fmt(s.issuable_now) + " issuable with current stock) · " +
+      "<b>" + fmt(s.still_blocked) + "</b> blocked by another reason" + (blocked ? " (" + blocked + ")" : "") + partial +
+      (s.scan_truncated ? ' · <b style="color:var(--bad);">scan truncated — figures are a lower bound</b>' : "") +
+      "</p>" +
+      '<table class="data-table"><thead><tr><th>Denomination</th><th class="num">Required</th><th class="num">Available</th><th class="num">Need To Upload</th><th>Upload</th></tr></thead><tbody>' +
+      rows + "</tbody></table>" +
+      '<div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">' +
+      '<button class="btn primary" data-affp-shortage-op="retry-all"' + (s.pending_count ? "" : " disabled") + ">Retry All Eligible Pending</button>" +
+      '<span class="sub" style="font-size:11px;">Upload the “Need To Upload” quantities, then retry. Bundles are issued whole or not at all.</span>' +
+      "</div></div>";
+  }
+
+  function affpLoadShortage() {
+    var host = $("#affp-shortage");
+    if (!host) return;
+    host.style.display = "";
+    host.innerHTML = '<p class="sub">Loading voucher stock required…</p>';
+    return fetch(AFFP_SHORTAGE_BASE + "/summary", { credentials: "same-origin", headers: { "Accept": "application/json" } })
+      .then(function (r) { return r.json(); })
+      .then(function (s) {
+        if (s.status !== "ok") throw new Error(s.reason || "unknown");
+        host._summary = s;
+        host.innerHTML = affpShortageHtml(s);
+      })
+      .catch(function (e) { host.innerHTML = '<p class="sub" style="color:var(--bad);">Failed to load voucher stock required: ' + esc(e.message) + "</p>"; });
+  }
+
+  function affpOpenUploadModal(denom) {
+    var host = $("#affp-shortage");
+    var months = affpShortageMonthsFor(host && host._summary, denom);
+    if (!months.length) { toast("No $" + denom + " shortage to upload against.", "error"); return; }
+    var overlay = document.createElement("div");
+    overlay.className = "modal-overlay";
+    overlay.innerHTML =
+      '<div class="modal-box" style="max-width:560px;"><h3>Upload $' + esc(denom) + " Codes</h3>" +
+      '<label style="font-size:12px;font-weight:600;display:block;margin:8px 0 4px;">Entitlement month (batch)</label>' +
+      '<select id="affp-up-month">' + months.map(function (m) {
+        return '<option value="' + esc(m.month) + '" data-need="' + esc(m.shortage) + '" data-hist="' + (m.historical ? "1" : "") + '">' +
+          esc(affpMonthLabel(m.month)) + " — need " + fmt(m.shortage) + (m.historical ? " (ended batch)" : "") + "</option>";
+      }).join("") + "</select>" +
+      '<label style="font-size:12px;font-weight:600;display:block;margin:12px 0 4px;">Voucher codes</label>' +
+      '<textarea id="affp-up-codes" rows="7" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg);color:var(--text);box-sizing:border-box;resize:vertical;font-family:monospace;"></textarea>' +
+      '<p class="sub" id="affp-up-preview" style="margin-top:4px;">One code per line, comma-separated, or a pasted CSV column.</p>' +
+      '<div id="affp-up-error" style="display:none;background:rgba(255,107,107,0.12);border:1px solid var(--bad);color:var(--bad);border-radius:8px;padding:8px 12px;font-size:12px;margin-top:8px;"></div>' +
+      '<div class="modal-actions"><button class="btn" id="affp-up-cancel">Cancel</button><button class="btn primary" id="affp-up-submit">Upload</button></div></div>';
+    document.body.appendChild(overlay);
+    function done() { overlay.remove(); }
+    overlay.addEventListener("click", function (e) { if (e.target === overlay) done(); });
+    var box = overlay.querySelector(".modal-box");
+    var errEl = box.querySelector("#affp-up-error");
+    var textEl = box.querySelector("#affp-up-codes");
+    function showError(msg) { errEl.textContent = msg; errEl.style.display = "block"; }
+    textEl.addEventListener("input", function () {
+      var p = abParseCodesPreview(textEl.value);
+      box.querySelector("#affp-up-preview").textContent =
+        fmt(p.unique.length) + " unique code(s)" + (p.duplicates ? ", " + fmt(p.duplicates) + " duplicate(s) in paste" : "") +
+        (p.invalid ? ", " + fmt(p.invalid) + " invalid (whitespace) will be ignored" : "");
+    });
+    box.querySelector("#affp-up-cancel").addEventListener("click", done);
+    var submitBtn = box.querySelector("#affp-up-submit");
+    submitBtn.addEventListener("click", function () {
+      var sel = box.querySelector("#affp-up-month");
+      var opt = sel.options[sel.selectedIndex];
+      var parsed = abParseCodesPreview(textEl.value);
+      if (!parsed.unique.length) { showError("Paste at least one voucher code."); return; }
+      var need = parseInt(opt.dataset.need, 10) || 0;
+      if (opt.dataset.hist && parsed.unique.length > need) {
+        showError("This ended batch needs only " + need + " code(s); " + parsed.unique.length + " pasted.");
+        return;
+      }
+      if (!confirm("Add " + parsed.unique.length + " $" + denom + " code(s) to the " + affpMonthLabel(sel.value) + " batch?\n\nThis does NOT issue rewards. Use “Retry All Eligible Pending” afterwards.")) return;
+      errEl.style.display = "none";
+      if (!btnStart(submitBtn, "Uploading…")) return;
+      apiPostJson(AFFP_SHORTAGE_BASE + "/upload-codes", { denomination: parseInt(denom, 10), entitlement_month: sel.value, codes: textEl.value })
+        .then(function (res) {
+          btnStop(submitBtn);
+          var d = res.d || {};
+          if (!res.ok || d.status !== "ok") { showError((d.reason || "error") + ": " + (d.message || "unknown")); return; }
+          done();
+          toast("✅ Inserted " + fmt(d.inserted) + " $" + denom + " code(s)" +
+            (d.duplicates ? ", skipped " + fmt(d.duplicates) + " duplicate(s)" : "") +
+            (d.wrong_bucket ? " (" + fmt(d.wrong_bucket) + " already exist in another denomination)" : "") +
+            (d.invalid ? ", ignored " + fmt(d.invalid) + " invalid" : "") + ". Now run Retry All Eligible Pending.", "success");
+          affpLoadShortage();
+        })
+        .catch(function (e) { btnStop(submitBtn); showError("Network error: " + e.message + " — please retry."); });
+    });
+  }
+
+  function affpRetryAll(btn) {
+    var host = $("#affp-shortage");
+    var s = (host && host._summary) || {};
+    if (!confirm("Retry " + fmt(s.issuable_after_replenishment) + " eligible pending reward(s) against current stock?\n\nOnly bundles that can be completed in full are issued; the rest are left untouched.")) return;
+    if (!btnStart(btn, "Retrying…")) return;
+    apiPostJson(AFFP_SHORTAGE_BASE + "/retry-all", {})
+      .then(function (res) {
+        btnStop(btn);
+        var d = res.d || {};
+        if (!res.ok || d.status !== "ok") { banner("❌ Retry failed: " + esc(d.reason || "error") + " " + esc(d.message || ""), "error"); return; }
+        toast("✅ Scanned " + fmt(d.scanned) + " · issued " + fmt(d.issued) + " · still short " + fmt(d.still_short) +
+          " · already issued " + fmt(d.already_issued) + " · errors " + fmt(d.errors), d.errors ? "error" : "success");
+        loadAffiliatePending(true);
+      })
+      .catch(function (e) { btnStop(btn); banner("❌ Retry failed: " + e.message, "error"); });
+  }
+
   // ---------- Pending Affiliate Rewards (migrated from legacy MiniApp admin panel) ----------
   function loadAffiliatePending(force) {
     var activeBtn = $("#affp-status-filter .active");
     var status = (activeBtn && activeBtn.dataset.status) || "PENDING_REVIEW";
+    var shortageHost = $("#affp-shortage");
+    if (status === "PENDING_MANUAL") { affpLoadShortage(); }
+    else if (shortageHost) { shortageHost.style.display = "none"; shortageHost.innerHTML = ""; }
     statePanel("affp-body", "loading", "Loading pending affiliate rewards…");
     fetch("/v2/miniapp/admin/affiliate/pending?status=" + encodeURIComponent(status), { credentials: "same-origin", headers: { "Accept": "application/json" } })
       .then(function (r) { return r.json(); })
@@ -11837,7 +11996,9 @@
             "<td>" + esc((it.risk_flags || []).join(", ") || "—") + "</td>" +
             "<td>" +
             '<button class="btn primary" data-affp-op="approve" data-ledger-id="' + esc(it.ledger_id) + '">Approve</button> ' +
-            (affpHistoricalReplenishVisible(it)
+            // Pending Manual is now cleared in bulk (Voucher Stock Required panel above);
+            // the per-ledger modal stays only for the Out of Stock tab.
+            (status !== "PENDING_MANUAL" && affpHistoricalReplenishVisible(it)
               ? '<button class="btn" data-affp-op="hist-replenish" data-ledger-id="' + esc(it.ledger_id) + '">Replenish Historical Batch</button> '
               : "") +
             '<button class="btn danger" data-affp-op="reject" data-ledger-id="' + esc(it.ledger_id) + '">Reject</button>' +
@@ -11862,6 +12023,12 @@
     });
 
     document.addEventListener("click", function (event) {
+      var sbtn = event.target && event.target.closest && event.target.closest("[data-affp-shortage-op]");
+      if (sbtn) {
+        if (sbtn.dataset.affpShortageOp === "upload") affpOpenUploadModal(sbtn.dataset.denom);
+        else if (sbtn.dataset.affpShortageOp === "retry-all") affpRetryAll(sbtn);
+        return;
+      }
       var btn = event.target && event.target.closest && event.target.closest("[data-affp-op]");
       if (!btn) return;
       var op = btn.dataset.affpOp;
