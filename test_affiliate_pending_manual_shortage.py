@@ -480,6 +480,41 @@ def test_never_pinned_ledger_of_an_ended_month_is_blocked_not_fed_from_other_sto
     assert db.voucher_pools.count_documents({"status": "issued", "issued_for_ledger_id": str(lid)}) == 0
 
 
+def test_historical_insert_failure_is_reported_not_success(historical, monkeypatch):
+    db = historical["db"]
+    real = db.voucher_pools.insert_one
+    calls = {"n": 0}
+
+    def flaky(doc):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("write failed")
+        return real(doc)
+
+    monkeypatch.setattr(db.voucher_pools, "insert_one", flaky)
+    out = ds.upload_codes_for_denomination(db, admin_identity="a", entitlement_month="202609",
+                                           denomination=10, codes="F1\nF2\nF3", now_utc=OCT)
+    assert out["status"] == "error" and out["reason"] == "database_error" and out["inserted"] == 1
+    assert db.voucher_pools.count_documents({"code": "F1"}) == 1  # partial rows are kept, and reported
+
+
+def test_retry_all_default_limit_matches_the_summary_scan():
+    import inspect
+
+    assert inspect.signature(ds.retry_all_eligible_pending).parameters["limit"].default == ds.DEFAULT_SCAN_LIMIT
+
+
+def test_retry_all_flags_truncation():
+    db = _db()
+    _stock(db, p10=5)
+    for i in (1, 2, 3):
+        _short(db, user_id=i, tier="T1")
+    out = ds.retry_all_eligible_pending(db, now_utc=SEP, limit=2)
+    assert out["scanned"] == 2 and out["issued"] == 2 and out["scan_truncated"] is True
+    again = ds.retry_all_eligible_pending(db, now_utc=SEP, limit=2)
+    assert again["scanned"] == 1 and again["issued"] == 1 and again["scan_truncated"] is False
+
+
 def test_current_month_upload_goes_through_the_normal_add_codes_flow():
     db = _db()
     ids = _stock(db, "202610", now=SEP)

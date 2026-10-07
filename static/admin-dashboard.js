@@ -11858,6 +11858,8 @@
         '<td><button class="btn" data-affp-shortage-op="upload" data-denom="' + esc(v) + '"' +
         (d.shortage > 0 ? "" : " disabled") + ">Upload $" + esc(v) + " Codes</button></td></tr>";
     }).join("");
+    var reserved = s.excluded && s.excluded.reserved_complete
+      ? " · " + fmt(s.excluded.reserved_complete) + " already hold a full bundle and just need finalizing (retry does this, no stock needed)" : "";
     var partial = s.partially_reserved_ledgers
       ? " · " + fmt(s.partially_reserved_ledgers) + " already hold part of their bundle (only the missing codes are counted)" : "";
     return '<div class="card" style="margin-bottom:16px;padding:14px;">' +
@@ -11865,13 +11867,13 @@
       '<p class="sub" style="margin:0 0 10px;">' +
       "<b>" + fmt(s.pending_count) + "</b> pending reward(s) affected · total reward value waiting <b>$" + fmt(s.total_reward_value) + "</b> · " +
       "<b>" + fmt(s.issuable_after_replenishment) + "</b> will become issuable after full replenishment (" + fmt(s.issuable_now) + " issuable with current stock) · " +
-      "<b>" + fmt(s.still_blocked) + "</b> blocked by another reason" + (blocked ? " (" + blocked + ")" : "") + partial +
+      "<b>" + fmt(s.still_blocked) + "</b> blocked by another reason" + (blocked ? " (" + blocked + ")" : "") + partial + reserved +
       (s.scan_truncated ? ' · <b style="color:var(--bad);">scan truncated — figures are a lower bound</b>' : "") +
       "</p>" +
       '<table class="data-table"><thead><tr><th>Denomination</th><th class="num">Required</th><th class="num">Available</th><th class="num">Need To Upload</th><th>Upload</th></tr></thead><tbody>' +
       rows + "</tbody></table>" +
       '<div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">' +
-      '<button class="btn primary" data-affp-shortage-op="retry-all"' + (s.pending_count ? "" : " disabled") + ">Retry All Eligible Pending</button>" +
+      '<button class="btn primary" data-affp-shortage-op="retry-all"' + ((s.pending_count || (s.excluded && s.excluded.reserved_complete)) ? "" : " disabled") + ">Retry All Eligible Pending</button>" +
       '<span class="sub" style="font-size:11px;">Upload the “Need To Upload” quantities, then retry. Bundles are issued whole or not at all.</span>' +
       "</div></div>";
   }
@@ -11964,7 +11966,8 @@
         var d = res.d || {};
         if (!res.ok || d.status !== "ok") { banner("❌ Retry failed: " + esc(d.reason || "error") + " " + esc(d.message || ""), "error"); return; }
         toast("✅ Scanned " + fmt(d.scanned) + " · issued " + fmt(d.issued) + " · still short " + fmt(d.still_short) +
-          " · already issued " + fmt(d.already_issued) + " · errors " + fmt(d.errors), d.errors ? "error" : "success");
+          " · already issued " + fmt(d.already_issued) + " · errors " + fmt(d.errors) +
+          (d.scan_truncated ? " · more eligible rows remain — run Retry All again" : ""), d.errors ? "error" : "success");
         loadAffiliatePending(true);
       })
       .catch(function (e) { btnStop(btn); banner("❌ Retry failed: " + e.message, "error"); });

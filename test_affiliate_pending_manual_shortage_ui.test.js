@@ -72,6 +72,10 @@ test("upload is disabled where nothing is needed; retry is enabled only with pen
   assert.doesNotMatch(html, /data-affp-shortage-op="retry-all" disabled/);
   const empty = load().affpShortageHtml(Object.assign({}, summary, { pending_count: 0 }));
   assert.match(empty, /data-affp-shortage-op="retry-all" disabled/);
+  // Rows that already hold a full bundle are finalized by retry, so it must stay enabled for them.
+  const reservedOnly = load().affpShortageHtml(Object.assign({}, summary, { pending_count: 0, excluded: { reserved_complete: 2 } }));
+  assert.doesNotMatch(reservedOnly, /data-affp-shortage-op="retry-all" disabled/);
+  assert.match(reservedOnly, /2<\/b>? ?already hold a full bundle|2 already hold a full bundle/);
 });
 
 test("per-month breakdown flags ended batches", () => {

@@ -482,8 +482,17 @@ def upload_codes_for_denomination(
                     f"This ended batch is short {shortage} {target_pool} code(s); {len(new_codes)} new code(s) were submitted. Nothing was inserted.",
                     replenishable=shortage, inserted=0, **counts,
                 )
-            inserted = _insert_historical(db, batch=batch, pool_id=target_pool, codes=new_codes,
-                                          admin_identity=admin_identity, now_utc=now_utc)
+            inserted, db_error = _insert_historical(db, batch=batch, pool_id=target_pool, codes=new_codes,
+                                                    admin_identity=admin_identity, now_utc=now_utc)
+            if db_error:
+                # Keep the partial count so the operator can see what landed;
+                # never report a short upload as a success.
+                return _fail(
+                    "database_error",
+                    "A database error stopped the upload partway. Codes inserted before it remain in the batch; "
+                    "re-submit the remaining codes.",
+                    inserted=inserted, **counts,
+                )
         else:
             res = av.add_codes_to_batch(db, batch["_id"], admin_identity=admin_identity, codes=new_codes, now_utc=now_utc)
             if not res.get("ok") and not res.get("inserted_count"):
@@ -518,11 +527,13 @@ def _batch_pool_shortage(db, *, batch_id, pool_id: str, now_utc: datetime) -> in
     return int(group["shortage"]) if group else 0
 
 
-def _insert_historical(db, *, batch: dict, pool_id: str, codes, admin_identity: str, now_utc: datetime) -> int:
+def _insert_historical(db, *, batch: dict, pool_id: str, codes, admin_identity: str, now_utc: datetime):
+    """Returns ``(inserted, error_class_name_or_None)``."""
     import affiliate_voucher_batches as av
 
     value = pool_denomination(pool_id)
     inserted = 0
+    db_error = None
     for code in codes:
         row = {
             "pool_id": pool_id,
@@ -544,8 +555,9 @@ def _insert_historical(db, *, batch: dict, pool_id: str, codes, admin_identity: 
         except Exception as exc:
             if av._is_duplicate_key_error(exc):
                 continue
+            db_error = exc.__class__.__name__
             logger.error("[AFF_PM_SHORTAGE][UPLOAD_FAILED] batch_id=%s pool_id=%s inserted_so_far=%s err=%s",
-                         batch["_id"], pool_id, inserted, exc.__class__.__name__)
+                         batch["_id"], pool_id, inserted, db_error)
             break
     live = av._hydrate_live_counts(db, batch)
     db.affiliate_voucher_batches.update_one(
@@ -557,7 +569,7 @@ def _insert_historical(db, *, batch: dict, pool_id: str, codes, admin_identity: 
             "last_historical_replenish_at": now_utc,
         }, "$inc": {"inserted_count": inserted}},
     )
-    return inserted
+    return inserted, db_error
 
 
 # --------------------------------------------------------------------------
@@ -633,7 +645,7 @@ def _attempt_issue(db, ledger_id, *, now_utc: datetime) -> str:
 
 
 def retry_all_eligible_pending(
-    db, *, admin_identity: str = "system", now_utc: datetime | None = None, limit: int = 1000,
+    db, *, admin_identity: str = "system", now_utc: datetime | None = None, limit: int = DEFAULT_SCAN_LIMIT,
 ) -> dict:
     """Re-run every stock-blocked PENDING_MANUAL denomination ledger against
     current stock, oldest first.
