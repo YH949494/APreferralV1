@@ -26,6 +26,7 @@ on:
       - "affiliate_reward_retention.py"
       - "affiliate_reward_plans.py"
       - "affiliate_voucher_batches.py"
+      - "affiliate_denomination_shortage.py"
       - "vouchers.py"
       - "dashboard_panels.py"
       - "database.py"
@@ -72,6 +73,7 @@ env:
     test_affiliate_my_stats_api.py
     test_affiliate_out_of_stock_retry.py
     test_affiliate_historical_replenish.py
+    test_affiliate_pending_manual_shortage.py
     test_affiliate_retention_rollback.py
     test_affiliate_congrats_gating.py
 

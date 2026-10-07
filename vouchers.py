@@ -8379,6 +8379,81 @@ def admin_affiliate_historical_batch_replenish(ledger_id):
     return _historical_replenish_response(result)
 
 
+def _pending_manual_admin_identity(admin) -> str:
+    admin = admin or {}
+    return str(
+        admin.get("usernameLower") or admin.get("username")
+        or (f"{admin.get('adminSource') or 'admin'}:{admin.get('id')}" if admin.get("id") is not None else "admin")
+    )
+
+
+_PENDING_MANUAL_HTTP_STATUS = {
+    "invalid_denomination": 400,
+    "invalid_entitlement_month": 400,
+    "empty_codes": 400,
+    "duplicate_code": 409,
+    "no_batch_for_entitlement_period": 404,
+    "target_batch_ambiguous": 409,
+    "batch_disabled": 409,
+    "batch_not_ready": 409,
+    "replenish_in_progress": 409,
+    "retry_in_progress": 409,
+    "quantity_exceeds_shortage": 409,
+    "database_error": 500,
+}
+
+
+@vouchers_bp.route("/admin/affiliate/pending-manual/summary", methods=["GET"])
+def admin_affiliate_pending_manual_summary():
+    """Voucher Stock Required — Pending Manual. Computed across ALL matching
+    ledgers server-side (never from the paged table), read-only."""
+    _, err = require_admin()
+    if err:
+        return err
+    from affiliate_denomination_shortage import summarize_pending_manual_shortage
+
+    return jsonify(summarize_pending_manual_shortage(db, now_utc=datetime.now(timezone.utc))), 200
+
+
+@vouchers_bp.route("/admin/affiliate/pending-manual/upload-codes", methods=["POST"])
+def admin_affiliate_pending_manual_upload_codes():
+    admin, err = require_admin()
+    if err:
+        return err
+    from affiliate_denomination_shortage import upload_codes_for_denomination
+
+    data = request.get_json(silent=True) or {}
+    result = upload_codes_for_denomination(
+        db,
+        admin_identity=_pending_manual_admin_identity(admin),
+        codes=data.get("codes"),
+        entitlement_month=data.get("entitlement_month"),
+        pool_id=data.get("pool_id"),
+        denomination=data.get("denomination"),
+        now_utc=datetime.now(timezone.utc),
+    )
+    if result.get("status") == "ok":
+        return jsonify(result), 200
+    return jsonify(result), _PENDING_MANUAL_HTTP_STATUS.get(result.get("reason"), 400)
+
+
+@vouchers_bp.route("/admin/affiliate/pending-manual/retry-all", methods=["POST"])
+def admin_affiliate_pending_manual_retry_all():
+    admin, err = require_admin()
+    if err:
+        return err
+    from affiliate_denomination_shortage import retry_all_eligible_pending
+
+    result = retry_all_eligible_pending(
+        db,
+        admin_identity=_pending_manual_admin_identity(admin),
+        now_utc=datetime.now(timezone.utc),
+    )
+    if result.get("status") == "ok":
+        return jsonify(result), 200
+    return jsonify(result), _PENDING_MANUAL_HTTP_STATUS.get(result.get("reason"), 400)
+
+
 @vouchers_bp.route("/admin/affiliate/<ledger_id>/reject", methods=["POST"])
 def admin_affiliate_reject_v2(ledger_id):
     _, err = require_admin()
