@@ -435,13 +435,30 @@ def test_mark_script_commit_stamps_only_old_available_unreserved_rows_and_is_ide
 def test_mark_script_cli_requires_expect_count_and_validates(capsys):
     db, ids, cutoff = _script_fixture()
     args = ["--entitlement-month", "202609", "--denomination", "5", "--denomination", "10",
-            "--created-before", "2026-10-07T00:00:00+00:00"]
+            "--created-before", "2026-10-07T00:00:00+00:00", "--expires-at", "2026-09-30T16:00:00+00:00"]
     assert mark.main(args + ["--commit"], db_factory=lambda: db) == 2                    # no --expect-count
     assert mark.main(args + ["--commit", "--expect-count", "99"], db_factory=lambda: db) == 2
     assert db.voucher_pools.count_documents({F: {"$ne": None}}) == 0
-    assert mark.main(["--entitlement-month", "202609", "--denomination", "5",
+    assert mark.main(["--entitlement-month", "202609", "--denomination", "5", "--expires-at", "2026-09-30T16:00:00+00:00",
                       "--created-before", "2026-10-07T00:00:00"], db_factory=lambda: db) == 2   # naive timestamp
+    future = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+    bad = [a if a != "2026-09-30T16:00:00+00:00" else future for a in args]
+    assert mark.main(bad + ["--commit", "--expect-count", "5"], db_factory=lambda: db) == 2         # future expiry
     assert mark.main(args, db_factory=lambda: db) == 0                                    # dry run
     assert db.voucher_pools.count_documents({F: {"$ne": None}}) == 0
     assert mark.main(args + ["--commit", "--expect-count", "5"], db_factory=lambda: db) == 0
     assert db.voucher_pools.count_documents({F: {"$ne": None}}) == 5
+
+
+def test_mark_script_requires_an_explicit_past_expiry():
+    """A "now" default would be later than the clock of an allocator already in flight
+    (a bulk retry holds one timestamp for up to 5000 ledgers) and leave the code issuable."""
+    db, ids, cutoff = _script_fixture()
+    with pytest.raises(ValueError):
+        mark.mark_redemption_expired(db, **_kw(cutoff, expires_at=None))
+    with pytest.raises(ValueError):
+        mark.mark_redemption_expired(db, **_kw(cutoff, expires_at=OCT + timedelta(seconds=1)))
+    with pytest.raises(SystemExit):
+        mark.main(["--entitlement-month", "202609", "--denomination", "5",
+                   "--created-before", "2026-10-07T00:00:00+00:00"], db_factory=lambda: db)   # no --expires-at
+    assert db.voucher_pools.count_documents({F: {"$ne": None}}) == 0
