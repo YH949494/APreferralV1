@@ -7823,6 +7823,91 @@ def admin_pools_upload_v2():
     return jsonify({"status": "ok", "inserted": inserted, "received": len(rows), "pool_id": pool_id})
 
 
+@vouchers_bp.route("/admin/pools/replace", methods=["POST"])
+def admin_pools_replace_v2():
+    """Replace the *undated available* stock of a legacy pool with a new code list.
+
+    Safety properties (vs. a naive delete-then-insert):
+      * insert-first, delete-second -- inventory never dips to zero, and an
+        insert failure aborts before anything is removed;
+      * only ``status=available`` rows with no ``batch_id`` are removable, so
+        issued history and scheduled entitlement-month batch stock are never
+        touched;
+      * codes present in both old and new lists are kept in place (no churn).
+    """
+    _, err = require_admin()
+    if err:
+        return err
+
+    data = request.get_json(silent=True) or {}
+    pool_id = str(data.get("pool_id") or "").strip().upper()
+    from affiliate_reward_plans import ADMIN_AFFILIATE_POOL_IDS, DENOMINATION_POOL_IDS
+
+    # Same canonical catalogue as /admin/pools/upload. Denomination pools have
+    # no undated-stock concept (see admin_pools_upload_v2), so replacing
+    # undated rows there is meaningless and rejected.
+    if pool_id not in set(ADMIN_AFFILIATE_POOL_IDS) or pool_id in set(DENOMINATION_POOL_IDS):
+        return jsonify({"status": "error", "reason": "bad_pool_id"}), 400
+
+    codes_text = str(data.get("codes_text") or "")
+    # dict.fromkeys: de-dupe inside the uploaded batch, preserving order.
+    rows = list(dict.fromkeys(
+        line.strip() for line in codes_text.replace("\r", "\n").split("\n") if line.strip()
+    ))
+    if not rows:
+        return jsonify({"status": "error", "reason": "empty_codes"}), 400
+
+    now_ts = datetime.now(timezone.utc)
+    inserted = 0
+    duplicates = 0
+    try:
+        for code in rows:
+            try:
+                db.voucher_pools.insert_one({
+                    "pool_id": pool_id,
+                    "code": code,
+                    "status": "available",
+                    "issued_to": None,
+                    "issued_at": None,
+                    "ledger_id": None,
+                    "display_label": data.get("display_label"),
+                    "value_hint": data.get("value_hint"),
+                    "currency": data.get("currency"),
+                    "created_at": now_ts,
+                })
+                inserted += 1
+            except DuplicateKeyError:
+                # Already in the pool: retained-available (kept below) or
+                # previously issued (history, untouched).
+                duplicates += 1
+    except PyMongoError:
+        current_app.logger.exception("[POOL_REPLACE][INSERT_FAILED] pool_id=%s", pool_id)
+        return jsonify({
+            "status": "error", "reason": "insert_failed", "pool_id": pool_id,
+            "inserted": inserted, "old_available_removed": 0,
+        }), 500
+
+    delete_result = db.voucher_pools.delete_many({
+        "pool_id": pool_id,
+        "status": "available",
+        "batch_id": {"$exists": False},
+        "code": {"$nin": rows},
+    })
+    current_app.logger.info(
+        "[POOL_REPLACE] pool_id=%s received=%d inserted=%d duplicates=%d removed=%d",
+        pool_id, len(rows), inserted, duplicates, delete_result.deleted_count,
+    )
+
+    return jsonify({
+        "status": "ok",
+        "pool_id": pool_id,
+        "old_available_removed": delete_result.deleted_count,
+        "received": len(rows),
+        "inserted": inserted,
+        "duplicates": duplicates,
+    })
+
+
 @vouchers_bp.route("/admin/pools/summary", methods=["GET"])
 def admin_pools_summary_v2():
     _, err = require_admin()
