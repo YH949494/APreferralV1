@@ -41,13 +41,13 @@ const summary = {
   blocked_breakdown: { no_batch_for_entitlement_period: 2 },
   partially_reserved_ledgers: 1, scan_truncated: false,
   denominations: {
-    "5": { pool_id: "AFFILIATE_5", required: 18, available: 5, shortage: 13 },
-    "10": { pool_id: "AFFILIATE_10", required: 47, available: 12, shortage: 35 },
-    "50": { pool_id: "AFFILIATE_50", required: 63, available: 63, shortage: 0 },
+    "5": { pool_id: "AFFILIATE_5", required: 18, available: 5, available_compatible: 5, shortage: 13, uploadable_shortage: 13 },
+    "10": { pool_id: "AFFILIATE_10", required: 47, available: 12, available_compatible: 12, shortage: 35, uploadable_shortage: 35 },
+    "50": { pool_id: "AFFILIATE_50", required: 63, available: 63, available_compatible: 63, shortage: 0, uploadable_shortage: 0 },
   },
   by_month: {
-    "202609": { "5": { shortage: 13, historical: true }, "10": { shortage: 20, historical: true } },
-    "202610": { "10": { shortage: 15, historical: false } },
+    "202609": { "5": { shortage: 13, uploadable_shortage: 13, historical: true }, "10": { shortage: 20, uploadable_shortage: 20, historical: true } },
+    "202610": { "10": { shortage: 15, uploadable_shortage: 15, historical: false } },
   },
 };
 
@@ -57,7 +57,9 @@ test("renders required / available / need-to-upload per denomination and the hea
   assert.match(html, /<b>26<\/b> pending reward\(s\) affected/);
   assert.match(html, /\$3740/);
   assert.match(html, /<b>24<\/b> will become issuable/);
-  assert.match(html, /<b>2<\/b> blocked by another reason \(no_batch_for_entitlement_period × 2\)/);
+  assert.match(html, /Issuance blockers/);
+  assert.match(html, /⚠ No batch exists for the entitlement month: <b>2<\/b>/);
+  assert.match(html, /Compatible Available/);
   assert.match(html, /<td class="num">18<\/td><td class="num">5<\/td>/);
   assert.match(html, /<td class="num">47<\/td><td class="num">12<\/td>/);
   assert.match(html, /Upload \$5 Codes/);
@@ -92,11 +94,40 @@ test("per-month breakdown flags ended batches", () => {
 
 test("server strings are escaped and truncation is surfaced", () => {
   const html = load().affpShortageHtml(Object.assign({}, summary, {
-    blocked_breakdown: { "<img src=x onerror=alert(1)>": 1 }, scan_truncated: true,
+    issuance_blockers: { "<img src=x onerror=alert(1)>": 1 }, scan_truncated: true,
   }));
   assert.doesNotMatch(html, /<img src=x/);
   assert.match(html, /&lt;img src=x/);
   assert.match(html, /scan truncated/);
+});
+
+// Production shape: 40 September rewards, every September batch disabled.
+const disabledBatch = {
+  pending_count: 40, total_reward_value: 1885, issuable_after_stock_replenishment: 0, issuable_now: 0, still_blocked: 40,
+  issuance_blockers: { target_batch_disabled: 40 },
+  denominations: {
+    "5": { pool_id: "AFFILIATE_5", required: 6, available: 0, available_compatible: 0, shortage: 6, uploadable_shortage: 0 },
+    "10": { pool_id: "AFFILIATE_10", required: 61, available: 0, available_compatible: 0, shortage: 61, uploadable_shortage: 0 },
+    "50": { pool_id: "AFFILIATE_50", required: 22, available: 0, available_compatible: 0, shortage: 22, uploadable_shortage: 0 },
+  },
+  by_month: { "202609": { "10": { shortage: 61, uploadable_shortage: 0, historical: true, blockers: { target_batch_disabled: 61 } } } },
+};
+
+test("a disabled batch shows the demand, names the blocker, and offers no upload that cannot work", () => {
+  const sb = load();
+  const html = sb.affpShortageHtml(disabledBatch);
+  assert.match(html, /<b>40<\/b> pending reward\(s\) affected/);
+  assert.match(html, /\$1885/);
+  assert.match(html, /<b>0<\/b> will become issuable after full replenishment \(0 issuable with current stock\)/);
+  assert.match(html, /⚠ Historical target batch disabled: <b>40<\/b>/);
+  // Required / Compatible Available / Need To Upload are the real demand, not zeros.
+  assert.match(html, /<td class="num">61<\/td><td class="num">0<\/td>/);
+  assert.match(html, /<td class="num">22<\/td><td class="num">0<\/td>/);
+  assert.match(html, /61 of this cannot be uploaded until its blocker is cleared/);
+  assert.match(html, /data-denom="10" disabled>Upload \$10 Codes/);
+  assert.deepEqual(JSON.parse(JSON.stringify(sb.affpShortageMonthsFor(disabledBatch, "10"))), []);
+  // Retry stays available: it is a safe no-op for gated rows and finalizes the rest.
+  assert.doesNotMatch(html, /data-affp-shortage-op="retry-all" disabled/);
 });
 
 test("per-row Replenish Historical Batch is not offered on the Pending Manual tab", () => {

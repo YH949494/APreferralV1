@@ -11832,45 +11832,71 @@
     var byMonth = (summary && summary.by_month) || {};
     Object.keys(byMonth).sort().forEach(function (month) {
       var d = byMonth[month][denom];
-      if (d && d.shortage > 0) out.push({ month: month, shortage: d.shortage, historical: !!d.historical });
+      // Only what an upload can fix right now: demand held back by a closed
+      // batch gate is shown in the table but is not uploadable until it opens.
+      if (d && d.uploadable_shortage > 0) out.push({ month: month, shortage: d.uploadable_shortage, historical: !!d.historical });
     });
     return out;
   }
 
+  var AFFP_BLOCKER_LABELS = {
+    target_batch_disabled: "Historical target batch disabled",
+    target_batch_not_ready: "Target batch not ready",
+    target_batch_scheduled: "Target batch not started yet",
+    target_batch_expired_unissued: "Target batch ended before this reward was pinned to it",
+    no_batch_for_entitlement_period: "No batch exists for the entitlement month",
+    target_batch_ambiguous: "More than one batch covers the entitlement month",
+    batch_pool_mismatch: "Pinned batch belongs to a different denomination",
+    unsupported_legacy_pin: "Reward is pinned to a legacy pool",
+    integrity_conflict: "Reward holds off-recipe or foreign codes",
+    missing_recipe: "Reward has no recipe"
+  };
+
   function affpShortageHtml(s) {
     s = s || {};
     var dens = s.denominations || {};
-    var blocked = Object.keys(s.blocked_breakdown || {}).map(function (k) {
-      return esc(k) + " × " + fmt(s.blocked_breakdown[k]);
-    }).join(", ");
+    var blockers = s.issuance_blockers || s.blocked_breakdown || {};
+    var blockerKeys = Object.keys(blockers);
+    var blockerHtml = blockerKeys.length
+      ? '<div style="margin:0 0 10px;font-size:12px;"><b>Issuance blockers</b> (these hold the rewards back even after stock is added): ' +
+        blockerKeys.map(function (k) {
+          return "⚠ " + esc(AFFP_BLOCKER_LABELS[k] || k) + ": <b>" + fmt(blockers[k]) + "</b>";
+        }).join(" · ") + "</div>"
+      : "";
     var rows = AFFP_SHORTAGE_DENOMS.map(function (v) {
       var d = dens[v] || { required: 0, available: 0, shortage: 0 };
+      var compat = d.available_compatible != null ? d.available_compatible : d.available;
+      var uploadable = d.uploadable_shortage != null ? d.uploadable_shortage : d.shortage;
       var months = affpShortageMonthsFor(s, v);
       var detail = months.length > 1 || (months.length === 1 && months[0].historical)
         ? '<div class="sub" style="font-size:11px;">' + months.map(function (m) {
             return esc(affpMonthLabel(m.month)) + ": " + fmt(m.shortage) + (m.historical ? " (ended batch)" : "");
           }).join(" · ") + "</div>"
         : "";
+      var gated = d.shortage > uploadable
+        ? '<div class="sub" style="font-size:11px;">' + fmt(d.shortage - uploadable) + " of this cannot be uploaded until its blocker is cleared</div>"
+        : "";
       return "<tr><td><b>$" + esc(v) + "</b></td>" +
         '<td class="num">' + fmt(d.required) + "</td>" +
-        '<td class="num">' + fmt(d.available) + "</td>" +
-        '<td class="num"><b' + (d.shortage > 0 ? ' style="color:var(--bad);"' : "") + ">" + fmt(d.shortage) + "</b>" + detail + "</td>" +
+        '<td class="num">' + fmt(compat) + "</td>" +
+        '<td class="num"><b' + (d.shortage > 0 ? ' style="color:var(--bad);"' : "") + ">" + fmt(d.shortage) + "</b>" + detail + gated + "</td>" +
         '<td><button class="btn" data-affp-shortage-op="upload" data-denom="' + esc(v) + '"' +
-        (d.shortage > 0 ? "" : " disabled") + ">Upload $" + esc(v) + " Codes</button></td></tr>";
+        (uploadable > 0 ? "" : " disabled") + ">Upload $" + esc(v) + " Codes</button></td></tr>";
     }).join("");
     var reserved = s.excluded && s.excluded.reserved_complete
       ? " · " + fmt(s.excluded.reserved_complete) + " already hold a full bundle and just need finalizing (retry does this, no stock needed)" : "";
     var partial = s.partially_reserved_ledgers
       ? " · " + fmt(s.partially_reserved_ledgers) + " already hold part of their bundle (only the missing codes are counted)" : "";
+    var afterStock = s.issuable_after_stock_replenishment != null ? s.issuable_after_stock_replenishment : s.issuable_after_replenishment;
     return '<div class="card" style="margin-bottom:16px;padding:14px;">' +
       "<h3 style=\"margin:0 0 6px;\">Voucher Stock Required — Pending Manual</h3>" +
       '<p class="sub" style="margin:0 0 10px;">' +
       "<b>" + fmt(s.pending_count) + "</b> pending reward(s) affected · total reward value waiting <b>$" + fmt(s.total_reward_value) + "</b> · " +
-      "<b>" + fmt(s.issuable_after_replenishment) + "</b> will become issuable after full replenishment (" + fmt(s.issuable_now) + " issuable with current stock) · " +
-      "<b>" + fmt(s.still_blocked) + "</b> blocked by another reason" + (blocked ? " (" + blocked + ")" : "") + partial + reserved +
+      "<b>" + fmt(afterStock) + "</b> will become issuable after full replenishment (" + fmt(s.issuable_now) + " issuable with current stock)" +
+      partial + reserved +
       (s.scan_truncated ? ' · <b style="color:var(--bad);">scan truncated — figures are a lower bound</b>' : "") +
-      "</p>" +
-      '<table class="data-table"><thead><tr><th>Denomination</th><th class="num">Required</th><th class="num">Available</th><th class="num">Need To Upload</th><th>Upload</th></tr></thead><tbody>' +
+      "</p>" + blockerHtml +
+      '<table class="data-table"><thead><tr><th>Denomination</th><th class="num">Required</th><th class="num">Compatible Available</th><th class="num">Need To Upload</th><th>Upload</th></tr></thead><tbody>' +
       rows + "</tbody></table>" +
       '<div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">' +
       '<button class="btn primary" data-affp-shortage-op="retry-all"' + ((s.pending_count || (s.excluded && s.excluded.reserved_complete)) ? "" : " disabled") + ">Retry All Eligible Pending</button>" +
@@ -11958,7 +11984,7 @@
   function affpRetryAll(btn) {
     var host = $("#affp-shortage");
     var s = (host && host._summary) || {};
-    if (!confirm("Retry " + fmt(s.issuable_after_replenishment) + " eligible pending reward(s) against current stock?\n\nOnly bundles that can be completed in full are issued; the rest are left untouched.")) return;
+    if (!confirm("Retry " + fmt(s.issuable_after_stock_replenishment != null ? s.issuable_after_stock_replenishment : s.issuable_after_replenishment) + " eligible pending reward(s) against current stock?\n\nOnly bundles that can be completed in full are issued; the rest are left untouched.")) return;
     if (!btnStart(btn, "Retrying…")) return;
     apiPostJson(AFFP_SHORTAGE_BASE + "/retry-all", {})
       .then(function (res) {
