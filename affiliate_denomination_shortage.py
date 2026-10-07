@@ -26,6 +26,18 @@ Design rules (all inherited from the allocator, none re-implemented)
   fenced-lease, all-or-nothing path the 5-minute retry sweep and the row-level
   Approve use. This module never claims a voucher row itself.
 
+Demand vs issuability
+---------------------
+The summary keeps two questions apart. *Demand* -- what the pending ledgers
+still owe, per denomination -- comes only from the recipe minus what each
+ledger already holds, so it never depends on the state of any batch. A ledger
+whose historical batch is disabled / not ready / scheduled / expired / missing
+still owes exactly the same codes. *Issuability* -- whether a retry could
+complete it right now -- is the batch gate (``_resolve_source``) plus stock.
+A gate failure is reported under ``issuance_blockers`` and removes the ledger
+from ``issuable_now`` / ``issuable_after_stock_replenishment``; it never
+erases the ledger's ``required`` demand.
+
 Nothing in the read path writes. The only writes are (a) code insertion into
 the batch an entitlement month already owns and (b) the bulk retry, which
 mutates a ledger only through the allocator.
@@ -118,6 +130,13 @@ def _resolve_source(db, ledger: dict, pool_id: str, month: str, *, now_utc: date
     pin) and ``_claim_from_target_batch`` (every gate before the stock check),
     without writing. A reason here means uploading codes would NOT make the
     claim succeed, so such a ledger is reported as blocked, not as a shortage.
+
+    ``source`` is the batch this ledger's codes must come from whenever that
+    batch can be IDENTIFIED -- including when a gate then refuses it (disabled,
+    not ready, scheduled, expired). That lets the caller still measure demand
+    and compatible stock against the right batch. ``source`` is ``None`` only
+    when no compatible batch can be named (none, ambiguous, wrong pool,
+    legacy pin).
     """
     target = (ledger.get("pool_targets") or {}).get(pool_id) or {}
     mode = target.get("mode")
@@ -155,31 +174,34 @@ def _resolve_source(db, ledger: dict, pool_id: str, month: str, *, now_utc: date
 
     if str(batch.get("pool_id") or "").strip().upper() != pool_id:
         return None, "batch_pool_mismatch"
-    if batch.get("upload_status") not in (None, "ready"):
-        return None, "target_batch_not_ready"
-    if bool(batch.get("distribution_disabled")):
-        return None, "target_batch_disabled"
+
     starts_at = ar._as_aware_utc(batch.get("starts_at"))
     ends_at = ar._as_aware_utc(batch.get("ends_at"))
+    source = {
+        "batch_id": batch["_id"],
+        "batch_name": batch.get("batch_name"),
+        "pool_id": pool_id,
+        "ends_at": ends_at,
+        "historical": ends_at is not None and now_utc >= ends_at,
+        "pinned": pinned,
+    }
+    # Gate order is the allocator's own (``_claim_from_target_batch``).
+    if batch.get("upload_status") not in (None, "ready"):
+        return source, "target_batch_not_ready"
+    if bool(batch.get("distribution_disabled")):
+        return source, "target_batch_disabled"
     if starts_at is None or ends_at is None:
-        return None, "target_batch_not_ready"
+        return source, "target_batch_not_ready"
     if now_utc < starts_at:
-        return None, "target_batch_scheduled"
+        return source, "target_batch_scheduled"
     # The allocator only claims past ends_at when continuing an already-pinned
     # allocation (or a retention-released entitlement). A never-pinned ledger
     # of an ended month cannot be completed by ANY upload.
     allow_expired = pinned or ledger.get("retention_completed_at") is not None
     if now_utc >= ends_at and not allow_expired:
-        return None, "target_batch_expired_unissued"
+        return source, "target_batch_expired_unissued"
 
-    return {
-        "batch_id": batch["_id"],
-        "batch_name": batch.get("batch_name"),
-        "pool_id": pool_id,
-        "ends_at": ends_at,
-        "historical": now_utc >= ends_at,
-        "pinned": pinned,
-    }, None
+    return source, None
 
 
 def _evaluate(db, ledger: dict, *, now_utc: datetime, cache: _Cache | None, seen_keys: set) -> dict:
@@ -189,7 +211,8 @@ def _evaluate(db, ledger: dict, *, now_utc: datetime, cache: _Cache | None, seen
         "kind": EXCLUDED,
         "reason": None,
         "missing": {},
-        "sources": {},
+        "sources": {},          # pools whose batch passes every gate (claimable)
+        "demand_sources": {},   # every missing pool -> its compatible batch, gated or not
         "reward_value": 0,
         "partial": False,
     }
@@ -253,7 +276,8 @@ def _evaluate(db, ledger: dict, *, now_utc: datetime, cache: _Cache | None, seen
     reasons = {}
     for pool_id in ev["missing"]:
         source, why = _resolve_source(db, ledger, pool_id, month, now_utc=now_utc, cache=cache)
-        if source is None:
+        ev["demand_sources"][pool_id] = source
+        if why:
             reasons[pool_id] = why
         else:
             ev["sources"][pool_id] = source
@@ -292,6 +316,22 @@ def _group_key(source: dict, pool_id: str):
     return (str(source["batch_id"]), pool_id)
 
 
+def _rollup(groups: dict) -> dict:
+    """Per-denomination totals from a ``{(batch, pool): group}`` map."""
+    out = {}
+    for pool_id in DENOMINATION_POOL_IDS:
+        out[str(pool_denomination(pool_id))] = {"pool_id": pool_id, "required": 0, "available": 0, "available_total": 0, "shortage": 0}
+    for g in groups.values():
+        g["shortage"] = max(g["required"] - g["available"], 0)
+        usable = min(g["available"], g["required"])
+        d = out[str(pool_denomination(g["pool_id"]))]
+        d["required"] += g["required"]
+        d["available"] += usable
+        d["available_total"] += g["available"]
+        d["shortage"] += g["shortage"]
+    return out
+
+
 def _aggregate(evals, cache: _Cache, db) -> dict:
     """Per-batch required/available, then rolled up per denomination.
 
@@ -301,44 +341,80 @@ def _aggregate(evals, cache: _Cache, db) -> dict:
     deficit. The roll-up's ``available`` is the stock actually USABLE by these
     ledgers (``min(available, required)`` per batch), which keeps
     ``shortage == required - available`` true for the displayed totals.
+
+    Two views over the same ledgers:
+
+    * ``groups`` -- ACTIONABLE only (``STOCK_SHORT``: every gate passes, stock
+      is the sole obstacle). Drives ``issuable_now`` and the cap on uploads to
+      an ended batch, exactly as before.
+    * ``demand_groups`` -- every ledger that still owes codes, whether or not
+      its batch is currently claimable. This is what ``denominations[*]
+      .required / .available / .shortage`` report, so a disabled / scheduled /
+      expired / missing batch can never zero the demand. ``available`` there is
+      the unissued stock of the batch the ledger is bound to (a disabled
+      batch keeps its ``available`` rows); a ledger with NO identifiable batch
+      sees none. Stock in any other batch is never counted.
     """
     groups: dict = {}
+    demand_groups: dict = {}
     for ev in evals:
-        if ev["kind"] != STOCK_SHORT:
+        if ev["kind"] not in (STOCK_SHORT, BLOCKED) or not ev["missing"]:
             continue
+        actionable = ev["kind"] == STOCK_SHORT
+        reasons = ev.get("pool_reasons") or {}
         for pool_id, qty in ev["missing"].items():
-            src = ev["sources"][pool_id]
-            g = groups.setdefault(_group_key(src, pool_id), {
-                "pool_id": pool_id,
-                "entitlement_month": ev["month"],
-                "batch_id": str(src["batch_id"]),
-                "batch_name": src.get("batch_name"),
-                "historical": bool(src["historical"]),
-                "required": 0,
-                "available": _available_in_batch(db, src["batch_id"], pool_id, cache),
+            src = ev["demand_sources"].get(pool_id)
+            if src is not None:
+                key = _group_key(src, pool_id)
+                base = {
+                    "batch_id": str(src["batch_id"]),
+                    "batch_name": src.get("batch_name"),
+                    "historical": bool(src["historical"]),
+                    "available": _available_in_batch(db, src["batch_id"], pool_id, cache),
+                }
+            else:
+                # No compatible batch can be named: demand stands, stock is zero.
+                key = (f"unresolved:{ev['month']}", pool_id)
+                base = {"batch_id": None, "batch_name": None, "historical": False, "available": 0}
+            g = demand_groups.setdefault(key, {
+                "pool_id": pool_id, "entitlement_month": ev["month"], "required": 0, "blockers": {}, **base,
             })
             g["required"] += int(qty)
+            if pool_id in reasons:
+                g["blockers"][reasons[pool_id]] = g["blockers"].get(reasons[pool_id], 0) + int(qty)
+            if actionable:
+                a = groups.setdefault(key, {
+                    "pool_id": pool_id, "entitlement_month": ev["month"], "required": 0, **base,
+                })
+                a["required"] += int(qty)
 
-    denominations = {}
-    for pool_id in DENOMINATION_POOL_IDS:
-        denominations[str(pool_denomination(pool_id))] = {
-            "pool_id": pool_id, "required": 0, "available": 0, "available_total": 0, "shortage": 0,
-        }
+    denominations = _rollup(demand_groups)
+    uploadable = _rollup(groups)
     by_month: dict = {}
-    for g in groups.values():
-        g["shortage"] = max(g["required"] - g["available"], 0)
-        usable = min(g["available"], g["required"])
-        d = denominations[str(pool_denomination(g["pool_id"]))]
-        d["required"] += g["required"]
-        d["available"] += usable
-        d["available_total"] += g["available"]
-        d["shortage"] += g["shortage"]
-        by_month.setdefault(g["entitlement_month"], {})[str(pool_denomination(g["pool_id"]))] = {
-            k: g[k] for k in (
-                "pool_id", "batch_id", "batch_name", "historical", "required", "available", "shortage",
-            )
-        }
-    return {"denominations": denominations, "by_month": dict(sorted(by_month.items())), "groups": groups}
+    for key, g in demand_groups.items():
+        denom = str(pool_denomination(g["pool_id"]))
+        d = denominations[denom]
+        d["available_compatible"] = d["available"]
+        entry = by_month.setdefault(g["entitlement_month"], {}).setdefault(denom, {
+            "pool_id": g["pool_id"], "batch_id": g["batch_id"], "batch_name": g["batch_name"],
+            "historical": g["historical"], "required": 0, "available": 0, "shortage": 0,
+            "uploadable_shortage": 0, "blockers": {},
+        })
+        entry["required"] += g["required"]
+        entry["available"] += min(g["available"], g["required"])
+        entry["shortage"] += g["shortage"]
+        entry["uploadable_shortage"] += groups[key]["shortage"] if key in groups else 0
+        for reason, qty in g["blockers"].items():
+            entry["blockers"][reason] = entry["blockers"].get(reason, 0) + qty
+    for denom, d in denominations.items():
+        d.setdefault("available_compatible", d["available"])
+        d["uploadable_shortage"] = uploadable[denom]["shortage"]
+    return {
+        "denominations": denominations,
+        "by_month": {m: by_month[m] for m in sorted(by_month)},
+        "groups": groups,
+        "demand_groups": demand_groups,
+    }
 
 
 def _plan_issuable_now(evals, groups) -> int:
@@ -379,10 +455,15 @@ def summarize_pending_manual_shortage(db, *, now_utc: datetime | None = None, li
         "total_reward_value": sum(e["reward_value"] for e in pending),
         "denominations": agg["denominations"],
         "by_month": agg["by_month"],
-        "issuable_after_replenishment": len(short),
+        # Ledgers that WOULD complete once their denomination stock is added,
+        # i.e. every gate already passes. A ledger held back by a batch gate is
+        # not counted here; it is listed under ``issuance_blockers``.
+        "issuable_after_stock_replenishment": len(short),
+        "issuable_after_replenishment": len(short),  # legacy alias (UI / existing callers)
         "issuable_now": _plan_issuable_now(evals, agg["groups"]),
         "still_blocked": len(blocked),
-        "blocked_breakdown": blocked_breakdown,
+        "issuance_blockers": blocked_breakdown,
+        "blocked_breakdown": blocked_breakdown,       # legacy alias
         "excluded": excluded,
         "partially_reserved_ledgers": sum(1 for e in short if e["partial"]),
         "scanned": len(evals),

@@ -232,7 +232,7 @@ def test_duplicate_ledger_for_same_user_month_tier_is_not_double_counted():
     assert s["pending_count"] == 0 and s["excluded"] == {"duplicate": 1}
 
 
-def test_blocked_by_non_stock_reason_is_reported_not_required():
+def test_blocked_by_non_stock_reason_is_reported_and_still_counted_as_demand():
     db = _db()
     _stock(db, month="202609")   # a September batch exists...
     _short(db, user_id=1, tier="T1")
@@ -240,7 +240,11 @@ def test_blocked_by_non_stock_reason_is_reported_not_required():
     s = ds.summarize_pending_manual_shortage(db, now_utc=SEP)
     assert s["pending_count"] == 2 and s["issuable_after_replenishment"] == 1 and s["still_blocked"] == 1
     assert s["blocked_breakdown"] == {"no_batch_for_entitlement_period": 1}
-    assert _den(s, 10)["required"] == 1  # the unfixable one asks for nothing
+    # The unfixable one still OWES its $10 (demand is independent of any batch gate)...
+    assert _den(s, 10)["required"] == 2 and _den(s, 10)["shortage"] == 2
+    # ...but no batch exists to upload to, so only the fixable ledger is uploadable / issuable.
+    assert _den(s, 10)["uploadable_shortage"] == 1
+    assert s["issuable_now"] == 0 and s["issuance_blockers"] == {"no_batch_for_entitlement_period": 1}
 
 
 # --------------------------------------------------------------------------
@@ -474,7 +478,8 @@ def test_never_pinned_ledger_of_an_ended_month_is_blocked_not_fed_from_other_sto
     lid = _short(db, user_id=1, tier="T1")   # September, never pinned, evaluated in October
     s = ds.summarize_pending_manual_shortage(db, now_utc=OCT)
     assert s["still_blocked"] == 1 and s["blocked_breakdown"] == {"target_batch_expired_unissued": 1}
-    assert _den(s, 10)["required"] == 0
+    assert _den(s, 10)["required"] == 1 and _den(s, 10)["uploadable_shortage"] == 0   # owed, but no upload can fix it
+    assert _den(s, 10)["available_compatible"] == 0                                    # October's 5 are NOT compatible
     assert ds.retry_all_eligible_pending(db, now_utc=OCT)["blocked"] == 1
     assert db.affiliate_ledger.find_one({"_id": lid})["status"] == "PENDING_MANUAL"
     assert db.voucher_pools.count_documents({"status": "issued", "issued_for_ledger_id": str(lid)}) == 0
@@ -554,7 +559,10 @@ def test_routes_summary_upload_retry(client, monkeypatch):
     _short(db, user_id=1, tier="T1", month=month)
     body = c.get("/v2/miniapp/admin/affiliate/pending-manual/summary").get_json()
     assert body["status"] == "ok" and body["pending_count"] == 1
-    assert body["denominations"]["10"] == {"pool_id": P10, "required": 1, "available": 0, "available_total": 0, "shortage": 1}
+    assert body["denominations"]["10"] == {
+        "pool_id": P10, "required": 1, "available": 0, "available_compatible": 0, "available_total": 0,
+        "shortage": 1, "uploadable_shortage": 1,
+    }
     up = c.post("/v2/miniapp/admin/affiliate/pending-manual/upload-codes",
                 json={"denomination": 10, "entitlement_month": month, "codes": "R1\nR1"})
     assert up.status_code == 200 and up.get_json()["inserted"] == 1 and up.get_json()["duplicates"] == 1
