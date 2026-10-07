@@ -681,12 +681,41 @@ def _tier_entered_scheduled_mode(db, *, pool_id: str, reference_utc: datetime) -
     return min(starts) <= reference_utc
 
 
-def _batch_claimable_available_count(db, batch: dict) -> int:
+#: Row-level redemption validity. ``None``/absent means "no known expiry" (every
+#: row uploaded before this field existed), so existing stock is unaffected. It
+#: is deliberately NOT derived from the batch window: ``ends_at`` closes a
+#: batch to NEW pinned/unpinned allocation rules, while a code's redemption
+#: validity is a property of the code itself (and replacement codes uploaded
+#: into an ended batch are valid even though that batch ended long ago).
+REDEMPTION_EXPIRY_FIELD = "redemption_expires_at"
+
+
+def _redemption_valid_clause(now_utc: datetime | None = None) -> dict:
+    """Mongo clause selecting rows whose redemption validity is still active.
+
+    The ONE eligibility predicate shared by every claim and every stock count
+    (allocator, retry sweep, bulk retry, pre-flight, shortage summary,
+    historical replenish gate). Combine it with ``$and`` -- callers already
+    use a top-level ``$or`` for the not-reserved check.
+    """
+    now_utc = now_utc or datetime.now(timezone.utc)
+    return {"$or": [
+        {REDEMPTION_EXPIRY_FIELD: {"$exists": False}},
+        {REDEMPTION_EXPIRY_FIELD: None},
+        {REDEMPTION_EXPIRY_FIELD: {"$gt": now_utc}},
+    ]}
+
+
+def _batch_claimable_available_count(db, batch: dict, now_utc: datetime | None = None) -> int:
     if batch.get("upload_status") not in (None, "ready"):
         return 0
     if bool(batch.get("distribution_disabled")):
         return 0
-    return int(db.voucher_pools.count_documents({"batch_id": batch.get("_id"), "status": "available"}))
+    return int(db.voucher_pools.count_documents({
+        "batch_id": batch.get("_id"),
+        "status": "available",
+        **_redemption_valid_clause(now_utc),
+    }))
 
 
 def _claim_from_target_batch(
@@ -733,9 +762,15 @@ def _claim_from_target_batch(
             "batch_id": batch_id,
             "pool_id": pool_id,
             "status": "available",
-            "$or": [
-                {"issued_for_ledger_id": {"$exists": False}},
-                {"issued_for_ledger_id": None},
+            # Expired codes are never issued -- not even to a ledger pinned to
+            # an ended batch (``allow_expired_pinned`` relaxes the BATCH window
+            # only, never a code's own redemption validity).
+            "$and": [
+                {"$or": [
+                    {"issued_for_ledger_id": {"$exists": False}},
+                    {"issued_for_ledger_id": None},
+                ]},
+                _redemption_valid_clause(now_utc),
             ],
         },
         {
@@ -780,9 +815,12 @@ def _claim_legacy_voucher(db, *, pool_id: str, ledger_id, user_id: int, now_utc:
                 "status": "available",
                 "batch_id": {"$exists": False},
                 "distribution_disabled": {"$ne": True},
-                "$or": [
-                    {"issued_for_ledger_id": {"$exists": False}},
-                    {"issued_for_ledger_id": None},
+                "$and": [
+                    {"$or": [
+                        {"issued_for_ledger_id": {"$exists": False}},
+                        {"issued_for_ledger_id": None},
+                    ]},
+                    _redemption_valid_clause(now_utc),
                 ],
                 "allocation_scope": {"$nin": ["campaign_rewards", "welcome_rewards", "voucher_drops", "referral_rewards"]},
             }
@@ -791,7 +829,10 @@ def _claim_legacy_voucher(db, *, pool_id: str, ledger_id, user_id: int, now_utc:
     candidates.sort(key=lambda row: row.get("_id"))
     for candidate in candidates:
         voucher = db.voucher_pools.find_one_and_update(
-            {"_id": candidate["_id"], "status": "available", "distribution_disabled": {"$ne": True}},
+            {
+                "_id": candidate["_id"], "status": "available", "distribution_disabled": {"$ne": True},
+                **_redemption_valid_clause(now_utc),
+            },
             {
                 "$set": {
                     "status": "issued",
@@ -953,7 +994,7 @@ def _available_pool_count(db, *, pool_id: str, now_utc: datetime | None = None, 
     if not legacy_only:
         active_batch = _find_active_batch(db, pool_id=pool_id, now_utc=now_utc)
         if active_batch is not None:
-            return _batch_claimable_available_count(db, active_batch)
+            return _batch_claimable_available_count(db, active_batch, now_utc)
         if _tier_entered_scheduled_mode(db, pool_id=pool_id, reference_utc=now_utc):
             return 0
     return int(
@@ -963,9 +1004,12 @@ def _available_pool_count(db, *, pool_id: str, now_utc: datetime | None = None, 
                 "status": "available",
                 "batch_id": {"$exists": False},
                 "distribution_disabled": {"$ne": True},
-                "$or": [
-                    {"issued_for_ledger_id": {"$exists": False}},
-                    {"issued_for_ledger_id": None},
+                "$and": [
+                    {"$or": [
+                        {"issued_for_ledger_id": {"$exists": False}},
+                        {"issued_for_ledger_id": None},
+                    ]},
+                    _redemption_valid_clause(now_utc),
                 ],
             }
         )
@@ -984,7 +1028,7 @@ def _pool_inventory_blocking_reason(db, *, pool_id: str, now_utc: datetime, lega
                 return "target_batch_not_ready"
             if bool(active_batch.get("distribution_disabled")):
                 return "target_batch_disabled"
-            if _batch_claimable_available_count(db, active_batch) <= 0:
+            if _batch_claimable_available_count(db, active_batch, now_utc) <= 0:
                 return "target_batch_empty"
             return None
         if _tier_entered_scheduled_mode(db, pool_id=pool_id, reference_utc=now_utc):
@@ -1017,7 +1061,7 @@ def _monthly_entitlement_claimable_count_and_reason(db, *, pool_id: str, now_utc
             return 0, "target_batch_not_ready"
         if bool(batch.get("distribution_disabled")):
             return 0, "target_batch_disabled"
-        count = _batch_claimable_available_count(db, batch)
+        count = _batch_claimable_available_count(db, batch, now_utc)
         return count, (None if count > 0 else "target_batch_empty")
     if _tier_entered_scheduled_mode(db, pool_id=pool_id, reference_utc=period_start_utc):
         return 0, "no_batch_for_entitlement_period"
@@ -1134,7 +1178,7 @@ def _claim_affiliate_bundle_from_target_batch(db, *, batch_id, pool_id: str, led
         return None, "target_batch_expired_unissued"
     if now_utc < starts_at:
         return None, "target_batch_scheduled"
-    if _batch_claimable_available_count(db, batch) < needed:
+    if _batch_claimable_available_count(db, batch, now_utc) < needed:
         return None, "target_batch_empty"
 
     claimed = []

@@ -113,14 +113,36 @@ def _unissued_filter(batch_id, pool_id) -> dict:
     }
 
 
-def _available_in_batch(db, batch_id, pool_id, cache: _Cache | None) -> int:
+def _usable_filter(batch_id, pool_id, now_utc: datetime) -> dict:
+    """``_unissued_filter`` AND the code's redemption validity -- character for
+    character the predicate ``_claim_from_target_batch`` claims with, so the
+    summary can never count a code the allocator would refuse."""
+    base = _unissued_filter(batch_id, pool_id)
+    return {
+        "batch_id": base["batch_id"], "pool_id": base["pool_id"], "status": base["status"],
+        "$and": [{"$or": base["$or"]}, ar._redemption_valid_clause(now_utc)],
+    }
+
+
+def _stock_in_batch(db, batch_id, pool_id, now_utc: datetime, cache: _Cache | None) -> dict:
+    """``raw`` (unissued rows physically in the DB), ``usable`` (the subset the
+    allocator may still issue) and ``expired`` (the rest; kept for audit,
+    never counted as stock)."""
     key = (str(batch_id), pool_id)
     if cache is not None and key in cache.available:
         return cache.available[key]
-    count = int(db.voucher_pools.count_documents(_unissued_filter(batch_id, pool_id)))
+    raw = int(db.voucher_pools.count_documents(_unissued_filter(batch_id, pool_id)))
+    usable = int(db.voucher_pools.count_documents(_usable_filter(batch_id, pool_id, now_utc)))
+    usable = min(usable, raw)
+    stock = {"raw": raw, "usable": usable, "expired": raw - usable}
     if cache is not None:
-        cache.available[key] = count
-    return count
+        cache.available[key] = stock
+    return stock
+
+
+def _available_in_batch(db, batch_id, pool_id, now_utc: datetime, cache: _Cache | None) -> int:
+    """USABLE unissued stock in one batch."""
+    return _stock_in_batch(db, batch_id, pool_id, now_utc, cache)["usable"]
 
 
 def _resolve_source(db, ledger: dict, pool_id: str, month: str, *, now_utc: datetime, cache: _Cache | None):
@@ -317,26 +339,45 @@ def _group_key(source: dict, pool_id: str):
 
 
 def _rollup(groups: dict) -> dict:
-    """Per-denomination totals from a ``{(batch, pool): group}`` map."""
+    """Per-denomination totals from a ``{(batch, pool): group}`` map.
+
+    Stock vocabulary (``raw_available == usable_total + expired_excluded``):
+
+    * ``raw_available``    -- unissued ``available`` rows in the DB, expired or not.
+    * ``expired_excluded`` -- the part of that whose redemption validity has lapsed.
+    * ``available_total``  -- usable stock, unclamped.
+    * ``available`` / ``usable_available`` -- usable stock CAPPED at what these
+      ledgers need (``min(usable, required)`` per batch), so
+      ``shortage == required - usable_available`` holds for the displayed totals.
+    """
     out = {}
     for pool_id in DENOMINATION_POOL_IDS:
-        out[str(pool_denomination(pool_id))] = {"pool_id": pool_id, "required": 0, "available": 0, "available_total": 0, "shortage": 0}
+        out[str(pool_denomination(pool_id))] = {
+            "pool_id": pool_id, "required": 0, "available": 0, "available_total": 0,
+            "raw_available": 0, "usable_available": 0, "expired_excluded": 0, "shortage": 0,
+        }
     for g in groups.values():
         g["shortage"] = max(g["required"] - g["available"], 0)
         usable = min(g["available"], g["required"])
         d = out[str(pool_denomination(g["pool_id"]))]
         d["required"] += g["required"]
         d["available"] += usable
+        d["usable_available"] += usable
         d["available_total"] += g["available"]
+        d["raw_available"] += g.get("raw_available", g["available"])
+        d["expired_excluded"] += g.get("expired_excluded", 0)
         d["shortage"] += g["shortage"]
     return out
 
 
-def _aggregate(evals, cache: _Cache, db) -> dict:
+def _aggregate(evals, cache: _Cache, db, now_utc: datetime) -> dict:
     """Per-batch required/available, then rolled up per denomination.
 
     Required is summed per (batch, pool); available is that batch's own
-    unissued stock. Shortage is computed PER BATCH and then summed, so surplus
+    USABLE stock: unissued ``available`` rows whose ``redemption_expires_at``
+    has not lapsed (the allocator's exact claim predicate). Expired rows are
+    reported as ``expired_excluded`` -- they stay in the DB for audit and never
+    reduce the shortage. Shortage is computed PER BATCH and then summed, so surplus
     sitting in one month's batch can never be netted against another month's
     deficit. The roll-up's ``available`` is the stock actually USABLE by these
     ledgers (``min(available, required)`` per batch), which keeps
@@ -366,16 +407,20 @@ def _aggregate(evals, cache: _Cache, db) -> dict:
             src = ev["demand_sources"].get(pool_id)
             if src is not None:
                 key = _group_key(src, pool_id)
+                stock = _stock_in_batch(db, src["batch_id"], pool_id, now_utc, cache)
                 base = {
                     "batch_id": str(src["batch_id"]),
                     "batch_name": src.get("batch_name"),
                     "historical": bool(src["historical"]),
-                    "available": _available_in_batch(db, src["batch_id"], pool_id, cache),
+                    "available": stock["usable"],
+                    "raw_available": stock["raw"],
+                    "expired_excluded": stock["expired"],
                 }
             else:
                 # No compatible batch can be named: demand stands, stock is zero.
                 key = (f"unresolved:{ev['month']}", pool_id)
-                base = {"batch_id": None, "batch_name": None, "historical": False, "available": 0}
+                base = {"batch_id": None, "batch_name": None, "historical": False,
+                        "available": 0, "raw_available": 0, "expired_excluded": 0}
             g = demand_groups.setdefault(key, {
                 "pool_id": pool_id, "entitlement_month": ev["month"], "required": 0, "blockers": {}, **base,
             })
@@ -397,11 +442,15 @@ def _aggregate(evals, cache: _Cache, db) -> dict:
         d["available_compatible"] = d["available"]
         entry = by_month.setdefault(g["entitlement_month"], {}).setdefault(denom, {
             "pool_id": g["pool_id"], "batch_id": g["batch_id"], "batch_name": g["batch_name"],
-            "historical": g["historical"], "required": 0, "available": 0, "shortage": 0,
+            "historical": g["historical"], "required": 0, "available": 0, "usable_available": 0,
+            "raw_available": 0, "expired_excluded": 0, "shortage": 0,
             "uploadable_shortage": 0, "blockers": {},
         })
         entry["required"] += g["required"]
         entry["available"] += min(g["available"], g["required"])
+        entry["usable_available"] = entry["available"]
+        entry["raw_available"] += g["raw_available"]
+        entry["expired_excluded"] += g["expired_excluded"]
         entry["shortage"] += g["shortage"]
         entry["uploadable_shortage"] += groups[key]["shortage"] if key in groups else 0
         for reason, qty in g["blockers"].items():
@@ -436,7 +485,7 @@ def _plan_issuable_now(evals, groups) -> int:
 def summarize_pending_manual_shortage(db, *, now_utc: datetime | None = None, limit: int = DEFAULT_SCAN_LIMIT) -> dict:
     now_utc = now_utc or datetime.now(timezone.utc)
     evals, cache, truncated = _evaluate_all(db, now_utc=now_utc, limit=limit)
-    agg = _aggregate(evals, cache, db)
+    agg = _aggregate(evals, cache, db, now_utc)
 
     pending = [e for e in evals if e["kind"] in (STOCK_SHORT, BLOCKED)]
     short = [e for e in pending if e["kind"] == STOCK_SHORT]
@@ -603,7 +652,7 @@ def upload_codes_for_denomination(
 
 def _batch_pool_shortage(db, *, batch_id, pool_id: str, now_utc: datetime) -> int:
     evals, cache, _ = _evaluate_all(db, now_utc=now_utc, limit=DEFAULT_SCAN_LIMIT)
-    agg = _aggregate(evals, cache, db)
+    agg = _aggregate(evals, cache, db, now_utc)
     group = agg["groups"].get((str(batch_id), pool_id))
     return int(group["shortage"]) if group else 0
 
@@ -688,12 +737,12 @@ def _release_bulk_lock(db, holder: str):
         logger.exception("[AFF_PM_SHORTAGE][LOCK_RELEASE_FAILED]")
 
 
-def _fits_live_stock(db, ev: dict) -> bool:
+def _fits_live_stock(db, ev: dict, now_utc: datetime) -> bool:
     # Fresh counts (no cache): earlier iterations of this same run, the
     # 5-minute sweep and other admins all consume stock between ledgers.
     for pool_id, qty in ev["missing"].items():
         src = ev["sources"][pool_id]
-        if _available_in_batch(db, src["batch_id"], pool_id, None) < qty:
+        if _available_in_batch(db, src["batch_id"], pool_id, now_utc, None) < qty:
             return False
     return True
 
@@ -778,7 +827,7 @@ def retry_all_eligible_pending(
                 if ev["kind"] == BLOCKED:
                     out["blocked"] += 1
                     continue
-                if ev["kind"] == STOCK_SHORT and not _fits_live_stock(db, ev):
+                if ev["kind"] == STOCK_SHORT and not _fits_live_stock(db, ev, now_utc):
                     out["still_short"] += 1
                     continue
                 outcome = _attempt_issue(db, ledger_id, now_utc=now_utc)

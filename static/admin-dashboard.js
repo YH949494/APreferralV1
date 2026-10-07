@@ -11865,7 +11865,8 @@
       : "";
     var rows = AFFP_SHORTAGE_DENOMS.map(function (v) {
       var d = dens[v] || { required: 0, available: 0, shortage: 0 };
-      var compat = d.available_compatible != null ? d.available_compatible : d.available;
+      var compat = d.usable_available != null ? d.usable_available : (d.available_compatible != null ? d.available_compatible : d.available);
+      var expired = d.expired_excluded || 0;
       var uploadable = d.uploadable_shortage != null ? d.uploadable_shortage : d.shortage;
       var months = affpShortageMonthsFor(s, v);
       var detail = months.length > 1 || (months.length === 1 && months[0].historical)
@@ -11879,6 +11880,8 @@
       return "<tr><td><b>$" + esc(v) + "</b></td>" +
         '<td class="num">' + fmt(d.required) + "</td>" +
         '<td class="num">' + fmt(compat) + "</td>" +
+        '<td class="num"' + (expired > 0 ? ' title="Expired codes stay stored for audit but can never be issued, so they do not reduce Need To Upload."' : "") + ">" +
+        (expired > 0 ? '<span style="color:var(--bad);">' + fmt(expired) + "</span>" : fmt(expired)) + "</td>" +
         '<td class="num"><b' + (d.shortage > 0 ? ' style="color:var(--bad);"' : "") + ">" + fmt(d.shortage) + "</b>" + detail + gated + "</td>" +
         '<td><button class="btn" data-affp-shortage-op="upload" data-denom="' + esc(v) + '"' +
         (uploadable > 0 ? "" : " disabled") + ">Upload $" + esc(v) + " Codes</button></td></tr>";
@@ -11896,7 +11899,7 @@
       partial + reserved +
       (s.scan_truncated ? ' · <b style="color:var(--bad);">scan truncated — figures are a lower bound</b>' : "") +
       "</p>" + blockerHtml +
-      '<table class="data-table"><thead><tr><th>Denomination</th><th class="num">Required</th><th class="num">Compatible Available</th><th class="num">Need To Upload</th><th>Upload</th></tr></thead><tbody>' +
+      '<table class="data-table"><thead><tr><th>Denomination</th><th class="num">Required</th><th class="num">Usable Available</th><th class="num">Expired</th><th class="num">Need To Upload</th><th>Upload</th></tr></thead><tbody>' +
       rows + "</tbody></table>" +
       '<div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">' +
       '<button class="btn primary" data-affp-shortage-op="retry-all"' + ((s.pending_count || (s.excluded && s.excluded.reserved_complete)) ? "" : " disabled") + ">Retry All Eligible Pending</button>" +

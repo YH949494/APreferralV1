@@ -30,6 +30,7 @@ from bson.errors import InvalidId
 from flask import Blueprint, jsonify, request
 
 from affiliate_rewards import _month_window_from_yyyymm as _entitlement_month_window_utc
+from affiliate_rewards import _redemption_valid_clause
 # `database` is already in this module's import graph (affiliate_rewards
 # imports it), so this is not a new cycle, and importing it has no side
 # effect: database.py opens no connection at import time.
@@ -1283,8 +1284,11 @@ def _historical_pool_gate(db, *, ledger, state, entitlement_month, pool_id: str,
         return _replenish_fail("batch_not_ready", "The pinned batch is not in a ready state.", pool_id=pool_id), None, 0, 0
     if bool(batch.get("distribution_disabled")):
         return _replenish_fail("batch_disabled", "The pinned batch is disabled.", pool_id=pool_id), None, 0, 0
+    # USABLE stock only: expired codes stay in the batch for audit but must not
+    # make a batch look "already sufficient" (they can never be issued).
     available = int(db.voucher_pools.count_documents(
-        {"batch_id": batch["_id"], "pool_id": pool_id, "status": "available"}
+        {"batch_id": batch["_id"], "pool_id": pool_id, "status": "available",
+         **_redemption_valid_clause(now_utc)}
     ))
     replenishable = missing - available
     if replenishable <= 0:
