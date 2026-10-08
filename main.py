@@ -6909,6 +6909,8 @@ def get_active_public_campaign_activity():
                 "state": "no_active_campaign",
                 "participant_count": 0,
                 "qualified_total": 0,
+                "joins_total": 0,
+                "joins_total_complete": True,
                 "leaderboard": [],
             }
         ), 200

@@ -515,9 +515,12 @@ def test_public_view_omits_diagnostics_and_internal_fields():
     public_view = public_campaign_activity_view(activity)
     assert "diagnostics" not in public_view
     assert "_combined_rows" not in public_view
-    assert set(public_view.keys()) == {"campaign_id", "state", "participant_count", "qualified_total", "leaderboard"}
+    assert set(public_view.keys()) == {
+        "campaign_id", "state", "participant_count", "qualified_total",
+        "joins_total", "joins_total_complete", "leaderboard",
+    }
     for row in public_view["leaderboard"]:
-        assert set(row.keys()) == {"rank", "display_name", "qualified_count"}
+        assert set(row.keys()) == {"rank", "display_name", "qualified_count", "joins_count", "conversion_rate"}
 
 
 # ---------------------------------------------------------------------------

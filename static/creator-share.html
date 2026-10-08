@@ -247,6 +247,10 @@
     color: var(--muted);
     margin-right: 6px;
   }
+  .campaign-activity-detail {
+    color: var(--muted);
+    font-size: 11px;
+  }
 </style>
 </head>
 <body>
@@ -790,8 +794,20 @@
       left.appendChild(rank);
       left.appendChild(document.createTextNode(String(row.display_name || "Anonymous")));
 
-      var right = document.createElement("strong");
-      right.textContent = String(Number(row.qualified_count || 0));
+      var right = document.createElement("span");
+      var qualified = document.createElement("strong");
+      qualified.textContent = String(Number(row.qualified_count || 0));
+      // joins_count / conversion_rate are null when unknown (legacy manual
+      // entry) or when joins is 0 -- shown as an em dash, never as 0 / 0%.
+      var joinsText = row.joins_count === null || row.joins_count === undefined ? "—" : String(Number(row.joins_count));
+      var convText = row.conversion_rate === null || row.conversion_rate === undefined
+        ? "—"
+        : (Number(row.conversion_rate) * 100).toFixed(1) + "%";
+      var detail = document.createElement("span");
+      detail.className = "campaign-activity-detail";
+      detail.textContent = " qualified · " + joinsText + " joins · " + convText;
+      right.appendChild(qualified);
+      right.appendChild(detail);
 
       line.appendChild(left);
       line.appendChild(right);

@@ -155,3 +155,38 @@ def test_disabling_campaign_removes_it_from_all_surfaces_immediately(client, mon
         assert after_affiliate["state"] == "genuine_only"
     finally:
         _cleanup()
+
+
+def test_joins_and_qualified_are_identical_across_every_public_surface(client, monkeypatch):
+    """Manual 30/20 row + legacy row (joins unknown) + genuine row: Affiliate
+    page, Money Room endpoint and announcement preview must carry identical
+    joins/conversion values and an incomplete joins total."""
+    now = datetime.now(timezone.utc)
+    _seed_campaign(now)
+    main.db[CAMPAIGN_DISPLAY_OVERRIDE_COLLECTION].update_one(
+        {"_id": CAMPAIGN_ID},
+        {"$set": {"participants": [
+            {"entry_id": "m-new", "display_name": "N***w", "joins_count": 30, "qualified_count": 20, "visible": True},
+            {"entry_id": "m-old", "display_name": "O***d", "qualified_count": 7, "visible": True},
+        ]}},
+    )
+    _seed_genuine_referrer(now, 909090, 3, "GenuineFan")
+    monkeypatch.setenv("CAMPAIGN_DISPLAY_ACTIVE_CAMPAIGN_ID", CAMPAIGN_ID)
+    try:
+        affiliate = client.get("/api/affiliate/leaderboard?window=month").get_json()["campaign_activity"]
+        money_room = client.get("/api/campaign/active/activity").get_json()
+        with mock.patch.object(main, "require_admin_from_query", return_value=(True, None)):
+            preview = client.get("/api/admin/campaign/announcement-preview").get_json()
+
+        assert affiliate["leaderboard"] == money_room["leaderboard"] == preview["leaderboard"]
+        for key in ("qualified_total", "joins_total", "joins_total_complete"):
+            assert affiliate[key] == money_room[key] == preview[key]
+        assert affiliate["joins_total"] is None and affiliate["joins_total_complete"] is False
+
+        rows = {r["display_name"]: r for r in affiliate["leaderboard"]}
+        assert (rows["N***w"]["joins_count"], rows["N***w"]["qualified_count"], rows["N***w"]["conversion_rate"]) == (30, 20, 0.6667)
+        assert rows["O***d"]["joins_count"] is None and rows["O***d"]["conversion_rate"] is None
+        assert "N***w — 30 joins · 20 qualified invites · 66.7% conversion" in preview["preview_text"]
+        assert "O***d — — joins · 7 qualified invites · — conversion" in preview["preview_text"]
+    finally:
+        _cleanup()

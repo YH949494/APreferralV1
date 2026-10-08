@@ -7225,19 +7225,27 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
       if (!rows.length) return `<div class="leaderboard-empty">${t("no_affiliate_data")}</div>`;
       const meta = snapshotMeta ? `<div class="leaderboard-empty" style="margin-bottom:8px;">${escapeHtml(snapshotMeta)}</div>` : "";
       if (simpleColumns) {
-        // Campaign activity rows (genuine + manual combined) don't carry a
-        // per-row joins/conversion figure for manual entries -- render only
-        // the columns every row actually has rather than defaulting the
-        // rest to a fabricated 0 / 0.0%.
-        const simpleRows = rows.map((r) => `
+        // Campaign activity rows (genuine + manual combined) come from the
+        // shared server builder with joins_count / conversion_rate already
+        // resolved. null means "unknown" (legacy manual entry) or "no joins
+        // yet" -- shown as an em dash, never a fabricated 0 / 0.0%.
+        const simpleRows = rows.map((r) => {
+          const joinsDisplay = r.joins_count === null || r.joins_count === undefined ? "—" : Number(r.joins_count);
+          const convDisplay = r.conversion_rate === null || r.conversion_rate === undefined
+            ? "—"
+            : `${(Number(r.conversion_rate) * 100).toFixed(1)}%`;
+          return `
           <tr>
             <td>${Number(r.rank || 0)}</td>
             <td>${escapeHtml(String(r.display_name || r.username || r.referrer_id || "-"))}</td>
             <td>${Number(r.qualified_month ?? r.qualified_count ?? 0)}</td>
-          </tr>`).join("");
+            <td>${joinsDisplay}</td>
+            <td>${convDisplay}</td>
+          </tr>`;
+        }).join("");
         return `${meta}
           <table class="affiliate-table">
-            <thead><tr><th>Rank</th><th>Name</th><th>Qualified</th></tr></thead>
+            <thead><tr><th>Rank</th><th>Name</th><th>Qualified</th><th>Joins</th><th>Conversion %</th></tr></thead>
             <tbody>${simpleRows}</tbody>
           </table>`;
       }
