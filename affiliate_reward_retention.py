@@ -968,7 +968,7 @@ def _entitlement_inventory(db, *, release_demand: dict, review_demand: dict, now
                 "batch_id": str(batch.get("_id")),
                 "batch_name": batch.get("batch_name"),
                 "batch_window_closed": bool(ends_at and now_utc >= ends_at),
-                "available": _batch_claimable_available_count(db, batch),
+                "available": _batch_claimable_available_count(db, batch, now_utc),
             })
         elif not matches and legacy:
             entry.update({"source": "legacy_undated_pool",

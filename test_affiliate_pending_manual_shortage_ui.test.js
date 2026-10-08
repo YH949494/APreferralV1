@@ -59,7 +59,8 @@ test("renders required / available / need-to-upload per denomination and the hea
   assert.match(html, /<b>24<\/b> will become issuable/);
   assert.match(html, /Issuance blockers/);
   assert.match(html, /⚠ No batch exists for the entitlement month: <b>2<\/b>/);
-  assert.match(html, /Compatible Available/);
+  assert.match(html, /Usable Available/);
+  assert.match(html, /<th class="num">Expired<\/th>/);
   assert.match(html, /<td class="num">18<\/td><td class="num">5<\/td>/);
   assert.match(html, /<td class="num">47<\/td><td class="num">12<\/td>/);
   assert.match(html, /Upload \$5 Codes/);
@@ -120,7 +121,7 @@ test("a disabled batch shows the demand, names the blocker, and offers no upload
   assert.match(html, /\$1885/);
   assert.match(html, /<b>0<\/b> will become issuable after full replenishment \(0 issuable with current stock\)/);
   assert.match(html, /⚠ Historical target batch disabled: <b>40<\/b>/);
-  // Required / Compatible Available / Need To Upload are the real demand, not zeros.
+  // Required / Usable Available / Need To Upload are the real demand, not zeros.
   assert.match(html, /<td class="num">61<\/td><td class="num">0<\/td>/);
   assert.match(html, /<td class="num">22<\/td><td class="num">0<\/td>/);
   assert.match(html, /61 of this cannot be uploaded until its blocker is cleared/);
@@ -132,4 +133,26 @@ test("a disabled batch shows the demand, names the blocker, and offers no upload
 
 test("per-row Replenish Historical Batch is not offered on the Pending Manual tab", () => {
   assert.match(JS, /status !== "PENDING_MANUAL" && affpHistoricalReplenishVisible\(it\)/);
+});
+
+// September $5/$10 stock exists in the DB but every code is expired: it must show as
+// Expired (not Usable) and must not reduce Need To Upload.
+const expiredStock = {
+  pending_count: 92, total_reward_value: 1000, issuable_after_stock_replenishment: 92, issuable_now: 0, still_blocked: 0,
+  denominations: {
+    "5": { pool_id: "AFFILIATE_5", required: 9, raw_available: 9, usable_available: 0, expired_excluded: 9, available: 0, available_compatible: 0, shortage: 9, uploadable_shortage: 9 },
+    "10": { pool_id: "AFFILIATE_10", required: 59, raw_available: 59, usable_available: 0, expired_excluded: 59, available: 0, available_compatible: 0, shortage: 59, uploadable_shortage: 59 },
+    "50": { pool_id: "AFFILIATE_50", required: 24, raw_available: 0, usable_available: 0, expired_excluded: 0, available: 0, available_compatible: 0, shortage: 24, uploadable_shortage: 24 },
+  },
+  by_month: { "202609": { "5": { shortage: 9, uploadable_shortage: 9, historical: true } } },
+};
+
+test("expired stock gets its own column and never offsets Need To Upload", () => {
+  const html = load().affpShortageHtml(expiredStock);
+  const row = (v) => html.slice(html.indexOf("<b>$" + v + "</b>"), html.indexOf("Upload $" + v + " Codes"));
+  const cells = (r) => [...r.matchAll(/<td class="num"[^>]*>(.*?)<\/td>/g)].map((m) => m[1].replace(/<div.*?<\/div>/g, "").replace(/<[^>]+>/g, ""));
+  assert.deepEqual(cells(row("5")), ["9", "0", "9", "9"]);
+  assert.deepEqual(cells(row("10")), ["59", "0", "59", "59"]);
+  assert.deepEqual(cells(row("50")), ["24", "0", "0", "24"]);
+  assert.match(html, /data-denom="5"(?! disabled)/);
 });

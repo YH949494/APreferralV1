@@ -561,6 +561,7 @@ def test_routes_summary_upload_retry(client, monkeypatch):
     assert body["status"] == "ok" and body["pending_count"] == 1
     assert body["denominations"]["10"] == {
         "pool_id": P10, "required": 1, "available": 0, "available_compatible": 0, "available_total": 0,
+        "raw_available": 0, "usable_available": 0, "expired_excluded": 0,
         "shortage": 1, "uploadable_shortage": 1,
     }
     up = c.post("/v2/miniapp/admin/affiliate/pending-manual/upload-codes",
