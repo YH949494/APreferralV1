@@ -9288,6 +9288,31 @@
     return kl.toISOString().slice(0, 16).replace("T", " ") + " KL";
   }
 
+  // Strict whole-number parse for the participant forms: "" and decimals are
+  // invalid (Number("") would silently become 0). The server re-validates
+  // everything; this only gives immediate feedback.
+  function cdParseCount(raw) {
+    var s = String(raw == null ? "" : raw).trim();
+    return /^\d+$/.test(s) ? Number(s) : null;
+  }
+
+  function cdFmtJoins(v) { return v === null || v === undefined ? "—" : String(v); }
+
+  // A joins total is only a total when every displayed row has known joins;
+  // otherwise show the known sum explicitly marked as partial.
+  function cdFmtJoinsTotal(activity) {
+    if (!activity) return "—";
+    if (activity.joins_total_complete) return String(activity.joins_total);
+    return "≥ " + String(activity.joins_known_total) + " (partial — " + String(activity.joins_unknown_count) + " row(s) with unknown joins)";
+  }
+
+  function cdFmtConversion(v) { return v === null || v === undefined ? "—" : (Number(v) * 100).toFixed(1) + "%"; }
+
+  function cdApiError(res, fallback) {
+    var d = (res && res.d) || {};
+    return "❌ " + (d.message || d.code || fallback);
+  }
+
   function cdRenderSummary() {
     var settings = cdState.settings || {};
     var activeId = settings.active_campaign_id;
@@ -9304,6 +9329,7 @@
     }
     var activity = cdState.activeActivity;
     lines.push('<div class="summary-row"><span>Displayed qualified total</span><strong>' + esc(activity ? String(activity.qualified_total) : "—") + '</strong></div>');
+    lines.push('<div class="summary-row"><span>Displayed joins total</span><strong>' + esc(cdFmtJoinsTotal(activity)) + '</strong></div>');
     lines.push('<div class="summary-row"><span>Last updated</span><strong>' + esc(settings.updated_at ? cdFmtKl(settings.updated_at) : "—") + '</strong></div>');
     lines.push('<div class="summary-row"><span>Last updated by</span><strong>' + esc(settings.updated_by || "—") + '</strong></div>');
     $("#cd-summary").innerHTML = '<div class="leaderboard-summary">' + lines.join("") + '</div>';
@@ -9349,7 +9375,9 @@
     var rows = participants.map(function (p) {
       return '<tr>' +
         '<td>' + esc(p.display_name) + '</td>' +
+        '<td>' + esc(cdFmtJoins(p.joins_count)) + '</td>' +
         '<td>' + esc(String(p.qualified_count)) + '</td>' +
+        '<td>' + esc(cdFmtConversion(p.conversion_rate)) + '</td>' +
         '<td>' + (p.visible ? '<span class="pill approved">visible</span>' : '<span class="pill neutral">hidden</span>') + '</td>' +
         '<td>' +
         '<button class="btn" data-cd-p-action="edit" data-entry-id="' + esc(p.entry_id) + '">Edit</button> ' +
@@ -9357,7 +9385,7 @@
         '<button class="btn" data-cd-p-action="remove" data-entry-id="' + esc(p.entry_id) + '">Remove</button>' +
         '</td></tr>';
     }).join("");
-    body.innerHTML = '<table class="data-table"><thead><tr><th>Name</th><th>Qualified</th><th>Visibility</th><th>Actions</th></tr></thead><tbody>' + rows + '</tbody></table>';
+    body.innerHTML = '<table class="data-table"><thead><tr><th>Name</th><th>Joins</th><th>Qualified</th><th>Conversion</th><th>Visibility</th><th>Actions</th></tr></thead><tbody>' + rows + '</tbody></table>';
   }
 
   function cdRenderAll() {
@@ -9389,11 +9417,11 @@
       return;
     }
     var rows = activity.leaderboard.map(function (r) {
-      return '<tr><td>' + esc(String(r.rank)) + '</td><td>' + esc(r.display_name) + '</td><td>' + esc(String(r.qualified_count)) + '</td></tr>';
+      return '<tr><td>' + esc(String(r.rank)) + '</td><td>' + esc(r.display_name) + '</td><td>' + esc(cdFmtJoins(r.joins_count)) + '</td><td>' + esc(String(r.qualified_count)) + '</td><td>' + esc(cdFmtConversion(r.conversion_rate)) + '</td></tr>';
     }).join("");
     $("#cd-preview-body").innerHTML =
-      '<div class="sub" style="margin-bottom:6px;">Qualified total: ' + esc(String(activity.qualified_total)) + ' · State: ' + cdStatePill(activity.state) + '</div>' +
-      '<table class="data-table"><thead><tr><th>Rank</th><th>Name</th><th>Qualified</th></tr></thead><tbody>' + rows + '</tbody></table>';
+      '<div class="sub" style="margin-bottom:6px;">Qualified total: ' + esc(String(activity.qualified_total)) + ' · Joins total: ' + esc(cdFmtJoinsTotal(activity)) + ' · State: ' + cdStatePill(activity.state) + '</div>' +
+      '<table class="data-table"><thead><tr><th>Rank</th><th>Name</th><th>Joins</th><th>Qualified</th><th>Conversion</th></tr></thead><tbody>' + rows + '</tbody></table>';
   }
 
   function cdRefreshPreview() {
@@ -9467,7 +9495,9 @@
       '<h3>Edit Participant</h3>' +
       '<label class="sub">Display name</label>' +
       '<input class="filter-input" id="cd-pe-name" />' +
-      '<label class="sub">Qualified count</label>' +
+      '<label class="sub">Joins count</label>' +
+      '<input class="filter-input" id="cd-pe-joins" type="number" min="0" step="1" placeholder="Unknown — enter to set" />' +
+      '<label class="sub">Qualified count (cannot exceed joins)</label>' +
       '<input class="filter-input" id="cd-pe-count" type="number" min="0" step="1" />' +
       '<div class="modal-actions">' +
       '<button class="btn" id="cd-pe-cancel">Cancel</button>' +
@@ -9476,21 +9506,33 @@
     document.body.appendChild(overlay);
     $("#cd-pe-name", overlay).value = participant.display_name;
     $("#cd-pe-count", overlay).value = participant.qualified_count;
+    $("#cd-pe-joins", overlay).value = participant.joins_count === null || participant.joins_count === undefined ? "" : participant.joins_count;
 
     function close() { overlay.remove(); }
     overlay.querySelector("#cd-pe-cancel").addEventListener("click", close);
     overlay.addEventListener("click", function (e) { if (e.target === overlay) close(); });
     overlay.querySelector("#cd-pe-save").addEventListener("click", function () {
       var campaign = cdState.campaignsById[cdState.selectedId];
+      var qualified = cdParseCount($("#cd-pe-count", overlay).value);
+      var joinsRaw = $("#cd-pe-joins", overlay).value;
+      var joins = String(joinsRaw).trim() === "" ? undefined : cdParseCount(joinsRaw);
+      if (qualified === null) { toast("❌ Qualified count must be a non-negative whole number", "error"); return; }
+      if (joins === null) { toast("❌ Joins count must be a non-negative whole number", "error"); return; }
+      // Blank joins on a legacy row stays unknown (field omitted from the PATCH).
+      var effectiveJoins = joins !== undefined ? joins : participant.joins_count;
+      if (effectiveJoins !== null && effectiveJoins !== undefined && qualified > effectiveJoins) {
+        toast("❌ Qualified count cannot be greater than joins count", "error"); return;
+      }
       apiPatchJson(
         "/api/admin/campaign-display/campaigns/" + encodeURIComponent(cdState.selectedId) + "/participants/" + encodeURIComponent(participant.entry_id),
         {
           display_name: $("#cd-pe-name", overlay).value,
-          qualified_count: Number($("#cd-pe-count", overlay).value),
+          qualified_count: qualified,
+          joins_count: joins,
           expected_updated_at: campaign ? campaign.updated_at : undefined,
         }
       ).then(function (res) {
-        if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "update_failed"), "error"); return; }
+        if (!res.ok || res.d.status !== "ok") { toast(cdApiError(res, "update_failed"), "error"); return; }
         toast("✅ Participant updated", "success");
         close();
         loadCampaignDisplay(true);
@@ -9551,15 +9593,19 @@
       if (!cdState.selectedId) { toast("❌ Select a campaign first", "error"); return; }
       var campaign = cdState.campaignsById[cdState.selectedId];
       var name = ($("#cd-p-name").value || "").trim();
-      var count = Number($("#cd-p-count").value);
-      if (!name || !Number.isInteger(count) || count < 0) { toast("❌ Enter a display name and a non-negative whole number", "error"); return; }
+      var count = cdParseCount($("#cd-p-count").value);
+      var joins = cdParseCount($("#cd-p-joins").value);
+      if (!name) { toast("❌ Enter a display name", "error"); return; }
+      if (joins === null) { toast("❌ Joins count must be a non-negative whole number", "error"); return; }
+      if (count === null) { toast("❌ Qualified count must be a non-negative whole number", "error"); return; }
+      if (count > joins) { toast("❌ Qualified count cannot be greater than joins count", "error"); return; }
       apiPostJson("/api/admin/campaign-display/campaigns/" + encodeURIComponent(cdState.selectedId) + "/participants", {
-        display_name: name, qualified_count: count, visible: true,
+        display_name: name, joins_count: joins, qualified_count: count, visible: true,
         expected_updated_at: campaign ? campaign.updated_at : undefined,
       }).then(function (res) {
-        if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "add_failed"), "error"); return; }
+        if (!res.ok || res.d.status !== "ok") { toast(cdApiError(res, "add_failed"), "error"); return; }
         toast("✅ Participant added", "success");
-        $("#cd-p-name").value = ""; $("#cd-p-count").value = "";
+        $("#cd-p-name").value = ""; $("#cd-p-joins").value = ""; $("#cd-p-count").value = "";
         loadCampaignDisplay(true);
       });
     });

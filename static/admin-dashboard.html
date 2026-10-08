@@ -1963,8 +1963,10 @@
           <div class="section-title">Participants — <span id="cd-participants-campaign-label">select a campaign above</span></div>
           <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:8px;">
             <input class="filter-input" id="cd-p-name" placeholder="Display name (e.g. A***n)" style="margin:0;" />
+            <input class="filter-input" id="cd-p-joins" type="number" min="0" step="1" placeholder="Joins count" style="margin:0;" />
             <input class="filter-input" id="cd-p-count" type="number" min="0" step="1" placeholder="Qualified count" style="margin:0;" />
           </div>
+          <div class="sub" style="margin-top:4px;">Display-only values shown on public surfaces as manual entries; they never affect real referrals, XP, rewards or analytics. Qualified cannot exceed joins. Conversion is qualified ÷ joins (— when joins is 0 or unknown).</div>
           <button class="btn primary" id="cd-p-add-btn" style="margin-top:10px;">Add participant</button>
           <div id="cd-participants-body" style="margin-top:10px;"></div>
         </div>

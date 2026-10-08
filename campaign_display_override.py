@@ -69,6 +69,12 @@ MAX_OVERRIDE_PARTICIPANTS = 100
 # rewritten.
 MAX_DISPLAY_QUALIFIED_COUNT = 100_000
 
+# Same ceiling and same "ignored, not clamped" policy for a manual
+# participant's joins count. `joins_count` is optional: a participant stored
+# before this field existed has no such key, which means "joins unknown" --
+# never zero, and never inferred from qualified_count.
+MAX_DISPLAY_JOINS_COUNT = 100_000
+
 # Sensible display ceiling for a single manual participant's name. Without
 # this, the 100-participant cap does not actually bound response/render
 # size -- an operator could paste one arbitrarily long string into
@@ -241,16 +247,69 @@ def _check_participant_fields(raw: Any, *, seen_entry_ids: set[str]) -> tuple[di
     if qualified_count < 0 or qualified_count > MAX_DISPLAY_QUALIFIED_COUNT:
         return None, "qualified_count_out_of_range"
 
+    # Optional. Missing/None == "unknown" (legacy participant), which is
+    # deliberately distinct from an explicit 0. Same strict typing as
+    # qualified_count: no bool, float, or numeric-string coercion.
+    joins_count = raw.get("joins_count")
+    if joins_count is not None:
+        if isinstance(joins_count, bool) or not isinstance(joins_count, int):
+            return None, "bad_joins_count_type"
+        if joins_count < 0 or joins_count > MAX_DISPLAY_JOINS_COUNT:
+            return None, "joins_count_out_of_range"
+        if qualified_count > joins_count:
+            return None, "qualified_exceeds_joins"
+
     visible = raw.get("visible", True)
     if not isinstance(visible, bool):
         return None, "bad_visible_type"
 
-    return {
+    normalized = {
         "entry_id": entry_id,
         "display_name": display_name,
         "qualified_count": qualified_count,
         "visible": visible,
-    }, None
+    }
+    if joins_count is not None:
+        # Key is omitted (not stored as null) while joins are unknown, so a
+        # legacy document round-trips byte-identical through an edit that
+        # doesn't supply joins.
+        normalized["joins_count"] = joins_count
+    return normalized, None
+
+
+def compute_conversion_rate(joins_count: int | None, qualified_count: int | None) -> float | None:
+    """qualified / joins, only when joins are known and > 0; otherwise None
+    (rendered as "—"). Rounded to 4 dp like affiliate_leaderboard's
+    conversion_month so both kinds of row serialize identically."""
+    if joins_count is None or qualified_count is None or joins_count <= 0:
+        return None
+    return round(qualified_count / joins_count, 4)
+
+
+# Admin-facing text for each participant validation failure. The `code`
+# stays the machine contract; `message` is what the Dashboard shows.
+PARTICIPANT_ERROR_MESSAGES = {
+    "bad_qualified_count_type": "Qualified count must be a whole number (no decimals, text or true/false).",
+    "qualified_count_out_of_range": f"Qualified count must be between 0 and {MAX_DISPLAY_QUALIFIED_COUNT:,}.",
+    "bad_joins_count_type": "Joins count must be a whole number (no decimals, text or true/false).",
+    "joins_count_out_of_range": f"Joins count must be between 0 and {MAX_DISPLAY_JOINS_COUNT:,}.",
+    "qualified_exceeds_joins": "Qualified count cannot be greater than joins count.",
+    "missing_display_name": "Display name is required.",
+    "display_name_too_long": f"Display name must be at most {MAX_DISPLAY_NAME_LENGTH} characters.",
+    "bad_visible_type": "Visible must be true or false.",
+    "max_participants_reached": f"A campaign can hold at most {MAX_OVERRIDE_PARTICIPANTS} participants.",
+    "stale_update": "This campaign was changed elsewhere. Reload and try again.",
+    "participant_not_found": "Participant not found.",
+    "not_found": "Campaign not found.",
+}
+
+
+def _participant_error_response(code: str, status_code: int):
+    body = {"status": "error", "code": code}
+    message = PARTICIPANT_ERROR_MESSAGES.get(code)
+    if message:
+        body["message"] = message
+    return jsonify(body), status_code
 
 
 def _validate_participant(raw: Any, *, campaign_id: str, seen_entry_ids: set[str]) -> dict[str, Any] | None:
@@ -503,24 +562,40 @@ def build_public_campaign_activity(db, campaign_id: str, reference_utc: datetime
             referrer_id = int(row.get("referrer_id"))
         except (TypeError, ValueError):
             continue
+        genuine_joins = int(row.get("joins_month", 0) or 0)
+        genuine_conversion = row.get("conversion_month")
         combined.append(
             {
                 "entry_id": f"genuine:{referrer_id}",
                 "display_name": display_names.get(referrer_id) or f"Member #{str(referrer_id)[-4:]}",
                 "qualified_count": int(row.get("qualified_month", 0) or 0),
-                "_sort_joins": int(row.get("joins_month", 0) or 0),
-                "_sort_conversion": float(row.get("conversion_month") or 0.0),
+                # Genuine joins are always known. Conversion is passed
+                # through from the canonical leaderboard row (cohort-based,
+                # None when joins == 0) so genuine figures stay exactly what
+                # the real leaderboard computes.
+                "joins_count": genuine_joins,
+                "conversion_rate": float(genuine_conversion) if genuine_conversion is not None else None,
+                "_sort_joins": genuine_joins,
+                "_sort_conversion": float(genuine_conversion or 0.0),
                 "_source": "genuine",
             }
         )
     for participant in manual_participants:
+        # joins_count is None for a legacy manual row: unknown, NOT zero.
+        manual_joins = participant.get("joins_count")
+        manual_conversion = compute_conversion_rate(manual_joins, participant["qualified_count"])
         combined.append(
             {
                 "entry_id": f"manual:{participant['entry_id']}",
                 "display_name": participant["display_name"],
                 "qualified_count": participant["qualified_count"],
-                "_sort_joins": 0,
-                "_sort_conversion": 0.0,
+                "joins_count": manual_joins,
+                "conversion_rate": manual_conversion,
+                # Same tie-break rules as genuine rows (qualified, then
+                # joins, then conversion); an unknown value sorts as it did
+                # before this field existed (0), so legacy ranks are stable.
+                "_sort_joins": manual_joins or 0,
+                "_sort_conversion": manual_conversion or 0.0,
                 "_source": "manual",
             }
         )
@@ -537,15 +612,27 @@ def build_public_campaign_activity(db, campaign_id: str, reference_utc: datetime
 
     leaderboard = []
     qualified_total = 0
+    joins_known_total = 0
+    joins_unknown_count = 0
     for idx, row in enumerate(combined, start=1):
         qualified_total += row["qualified_count"]
+        if row["joins_count"] is None:
+            joins_unknown_count += 1
+        else:
+            joins_known_total += row["joins_count"]
         leaderboard.append(
             {
                 "rank": idx,
                 "display_name": row["display_name"],
                 "qualified_count": row["qualified_count"],
+                "joins_count": row["joins_count"],
+                "conversion_rate": row["conversion_rate"],
             }
         )
+    # Same row set as qualified_total. A joins total is only a real total
+    # when every included row has known joins; otherwise it is None and the
+    # partial sum is exposed separately under an explicit name.
+    joins_total_complete = joins_unknown_count == 0
 
     diagnostics = {
         "genuine_rows": len(genuine_rows),
@@ -567,6 +654,10 @@ def build_public_campaign_activity(db, campaign_id: str, reference_utc: datetime
         "state": "active" if override_active else "genuine_only",
         "participant_count": len(combined),
         "qualified_total": qualified_total,
+        "joins_total": joins_known_total if joins_total_complete else None,
+        "joins_total_complete": joins_total_complete,
+        "joins_known_total": joins_known_total,
+        "joins_unknown_count": joins_unknown_count,
         "leaderboard": leaderboard,
         "diagnostics": diagnostics,
         # Internal-only, stripped by the public API layer before
@@ -583,6 +674,8 @@ def public_campaign_activity_view(activity: dict[str, Any]) -> dict[str, Any]:
         "state": activity.get("state"),
         "participant_count": activity.get("participant_count"),
         "qualified_total": activity.get("qualified_total"),
+        "joins_total": activity.get("joins_total"),
+        "joins_total_complete": activity.get("joins_total_complete"),
         "leaderboard": activity.get("leaderboard"),
     }
 
@@ -607,7 +700,11 @@ def render_campaign_activity_announcement_text(activity: dict[str, Any], *, titl
         prefix = medals[rank - 1] if 1 <= rank <= 3 else f"#{rank}"
         name = html_escape(str(row.get("display_name") or "Anonymous"))
         count = int(row.get("qualified_count", 0) or 0)
-        lines.append(f"{prefix} {name} — {count} qualified invites")
+        joins = row.get("joins_count")
+        joins_text = str(int(joins)) if joins is not None else "—"
+        conversion = row.get("conversion_rate")
+        conversion_text = f"{float(conversion) * 100:.1f}%" if conversion is not None else "—"
+        lines.append(f"{prefix} {name} — {joins_text} joins · {count} qualified invites · {conversion_text} conversion")
     if not activity.get("leaderboard"):
         lines.append("No activity yet.")
     return "\n".join(lines)
@@ -700,8 +797,20 @@ def serialize_campaign_override_admin(doc: dict[str, Any], *, is_selected_active
     ends_at = _coerce_aware_utc(doc.get("ends_at"))
     created_at = _coerce_aware_utc(doc.get("created_at"))
     updated_at = _coerce_aware_utc(doc.get("updated_at"))
-    participants = doc.get("participants") if isinstance(doc.get("participants"), list) else []
-    visible_count = sum(1 for p in participants if isinstance(p, dict) and p.get("visible") is True)
+    raw_participants = doc.get("participants") if isinstance(doc.get("participants"), list) else []
+    visible_count = sum(1 for p in raw_participants if isinstance(p, dict) and p.get("visible") is True)
+    participants = []
+    for p in raw_participants:
+        if not isinstance(p, dict):
+            participants.append(p)
+            continue
+        # joins_count is None for a legacy row (unknown, not zero); the
+        # conversion is derived by the same helper the public path uses.
+        joins = p.get("joins_count")
+        joins = joins if isinstance(joins, int) and not isinstance(joins, bool) else None
+        qualified = p.get("qualified_count")
+        qualified = qualified if isinstance(qualified, int) and not isinstance(qualified, bool) else None
+        participants.append({**p, "joins_count": joins, "conversion_rate": compute_conversion_rate(joins, qualified)})
     return {
         "campaign_id": doc.get("campaign_id"),
         "enabled": bool(doc.get("enabled") is True),
@@ -863,6 +972,7 @@ def add_participant(
     *,
     display_name: Any,
     qualified_count: Any,
+    joins_count: Any = None,
     visible: Any = True,
     updated_by,
     expected_updated_at: str | None = None,
@@ -880,6 +990,8 @@ def add_participant(
     existing_ids = {p.get("entry_id") for p in participants if isinstance(p, dict) and isinstance(p.get("entry_id"), str)}
     entry_id = _generate_entry_id(existing_ids)
     candidate = {"entry_id": entry_id, "display_name": display_name, "qualified_count": qualified_count, "visible": visible}
+    if joins_count is not None:
+        candidate["joins_count"] = joins_count
     normalized, reason = _check_participant_fields(candidate, seen_entry_ids=set())
     if reason:
         return None, reason
@@ -904,6 +1016,7 @@ def update_participant(
     *,
     display_name: Any = None,
     qualified_count: Any = None,
+    joins_count: Any = None,
     visible: Any = None,
     updated_by,
     expected_updated_at: str | None = None,
@@ -911,7 +1024,10 @@ def update_participant(
     """Targets the participant by its stable entry_id (never array
     position/order), so a concurrent edit or a reordered array can never
     silently update the wrong row. Only the fields explicitly passed (not
-    None) are changed.
+    None) are changed. Passing joins_count on a legacy row (no joins stored)
+    supplies it; joins cannot be reverted to "unknown" once set. The
+    qualified <= joins rule is evaluated on the merged result, so editing
+    only qualified_count is checked against the already-stored joins.
 
     Rebuilds and writes back the whole `participants` array (rather than
     Mongo's positional `$`/`$[elem]` operators) locating the target purely
@@ -940,6 +1056,8 @@ def update_participant(
         candidate["display_name"] = display_name
     if qualified_count is not None:
         candidate["qualified_count"] = qualified_count
+    if joins_count is not None:
+        candidate["joins_count"] = joins_count
     if visible is not None:
         candidate["visible"] = visible
 
@@ -1159,13 +1277,14 @@ def api_admin_add_participant(campaign_id: str):
         campaign_id,
         display_name=body.get("display_name"),
         qualified_count=body.get("qualified_count"),
+        joins_count=body.get("joins_count"),
         visible=body.get("visible", True),
         updated_by=_admin_identity(admin),
         expected_updated_at=body.get("expected_updated_at"),
     )
     if code:
         status_code = {"not_found": 404, "stale_update": 409}.get(code, 400)
-        return jsonify({"status": "error", "code": code}), status_code
+        return _participant_error_response(code, status_code)
     settings = get_campaign_display_settings(db)
     is_active = settings.get("active_campaign_id") == campaign_id
     _log_admin_audit("participant_added", admin, campaign_id)
@@ -1186,13 +1305,14 @@ def api_admin_update_participant(campaign_id: str, entry_id: str):
         entry_id,
         display_name=body.get("display_name"),
         qualified_count=body.get("qualified_count"),
+        joins_count=body.get("joins_count"),
         visible=body.get("visible"),
         updated_by=_admin_identity(admin),
         expected_updated_at=body.get("expected_updated_at"),
     )
     if code:
         status_code = {"not_found": 404, "participant_not_found": 404, "stale_update": 409}.get(code, 400)
-        return jsonify({"status": "error", "code": code}), status_code
+        return _participant_error_response(code, status_code)
     settings = get_campaign_display_settings(db)
     is_active = settings.get("active_campaign_id") == campaign_id
     _log_admin_audit("participant_updated", admin, campaign_id, {"entry_id": entry_id})
