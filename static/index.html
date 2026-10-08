@@ -8165,7 +8165,7 @@ ${referral}`;
 
     // Rows from the currently loaded pending response. "Approve All" only ever
     // submits these ids (never a DB-wide sweep).
-    const affPendingState = { status: null, items: [], submitting: false };
+    const affPendingState = { status: null, items: [], submitting: false, busyKind: null };
     const AFF_BULK_APPROVABLE = ["PENDING_REVIEW", "PENDING_MANUAL"];
 
     function affRenderPendingBar(summaryText) {
@@ -8176,9 +8176,12 @@ ${referral}`;
       bar.style.display = show ? "flex" : "none";
       if (!show) { bar.innerHTML = ""; return; }
       const busy = affPendingState.submitting;
-      bar.innerHTML = `<button type="button" id="aff_approve_all_btn" ${busy ? "disabled" : ""}>${busy ? "Approving..." : `Approve All (${n})`}</button>`
+      const busyKind = affPendingState.busyKind;
+      bar.innerHTML = `<button type="button" id="aff_approve_all_btn" ${busy ? "disabled" : ""}>${busy && busyKind === "approve" ? "Approving..." : `Approve All (${n})`}</button>`
+        + `<button type="button" id="aff_reject_all_btn" ${busy ? "disabled" : ""}>${busy && busyKind === "reject" ? "Rejecting..." : `Reject All (${n})`}</button>`
         + `<span id="aff_approve_all_summary" style="font-size:12px; color:#555;">${escapeHtml(summaryText || "")}</span>`;
       document.getElementById("aff_approve_all_btn").addEventListener("click", affApproveAll);
+      document.getElementById("aff_reject_all_btn").addEventListener("click", affRejectAll);
     }
 
     async function affApproveAll() {
@@ -8187,6 +8190,7 @@ ${referral}`;
       if (!ids.length || !AFF_BULK_APPROVABLE.includes(affPendingState.status)) return;
       if (!window.confirm(`Approve all ${ids.length} pending affiliate rewards?`)) return;
       affPendingState.submitting = true;
+      affPendingState.busyKind = "approve";
       affRenderPendingBar();
       const status = affPendingState.status;
       let summary = "";
@@ -8207,6 +8211,49 @@ ${referral}`;
         summary = "Bulk approve failed: network error";
       } finally {
         affPendingState.submitting = false;
+      }
+      await affLoadPending(status, summary);
+    }
+
+    // Reject All: ONLY the ids of the loaded pending response, never a DB-wide sweep.
+    async function affRejectAll() {
+      if (affPendingState.submitting) return;
+      const ids = affPendingState.items.map((it) => it.ledger_id).filter(Boolean).slice(0, 200);
+      if (!ids.length || !AFF_BULK_APPROVABLE.includes(affPendingState.status)) return;
+      const n = ids.length;
+      if (!window.confirm(`Reject all ${n} pending affiliate rewards? This cannot be undone.`)) return;
+      const typed = window.prompt(`Second confirmation: type "REJECT ${n}" to proceed.`);
+      if (typed === null) return;
+      if (String(typed).trim() !== `REJECT ${n}`) {
+        affRenderPendingBar("Reject All cancelled: confirmation text did not match.");
+        return;
+      }
+      const reasonInput = window.prompt("Reason (optional):", "bulk_admin_reject");
+      if (reasonInput === null) return;
+      const reason = String(reasonInput).trim() || "bulk_admin_reject";
+      affPendingState.submitting = true;
+      affPendingState.busyKind = "reject";
+      affRenderPendingBar();
+      const status = affPendingState.status;
+      let summary = "";
+      try {
+        const res = await v2Fetch(`${API_V2}/admin/affiliate/reject-bulk${buildAdminQueryTail()}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ledger_ids: ids, reason }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data.status !== "ok") {
+          summary = `Bulk reject failed: ${data.reason || res.status}`;
+        } else {
+          summary = `Rejected: ${data.rejected || 0} | Skipped: ${(data.skipped || 0) + (data.already_final || 0)} | Failed: ${data.failed || 0}`;
+        }
+      } catch (e) {
+        console.error(e);
+        summary = "Bulk reject failed: network error";
+      } finally {
+        affPendingState.submitting = false;
+        affPendingState.busyKind = null;
       }
       await affLoadPending(status, summary);
     }

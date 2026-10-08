@@ -4660,9 +4660,66 @@ def affiliate_bundle_visible_cards(db, *, user_id: int) -> list[dict]:
     return cards
 
 
-def reject_affiliate_ledger(db, *, ledger_id, reason: str | None = None, now_utc: datetime | None = None):
+# Statuses a reject may ever start from. ISSUED / SETTLING / REJECTED are
+# deliberately absent: ISSUED has a voucher out the door, SETTLING is an
+# approval mid-issuance, REJECTED is already final.
+AFFILIATE_BULK_REJECTABLE_STATUSES = ("PENDING_REVIEW", "PENDING_MANUAL", "APPROVED")
+AFFILIATE_ADMIN_REJECTABLE_STATUSES = (
+    *AFFILIATE_BULK_REJECTABLE_STATUSES,
+    "SIMULATED_PENDING",
+    "OUT_OF_STOCK",
+    *sorted(RETENTION_HOLD_STATUSES),
+)
+
+
+def reject_affiliate_ledger(
+    db,
+    *,
+    ledger_id,
+    reason: str | None = None,
+    now_utc: datetime | None = None,
+    allowed_statuses=None,
+    protect_issued_vouchers: bool = False,
+):
+    """Reject a ledger only if its CURRENT status is rejectable.
+
+    The status guard lives in the update filter, so it is atomic against a
+    concurrent approval: approve claims APPROVED -> SETTLING with the mirror
+    guard, hence exactly one of the two wins and an ISSUED/SETTLING row can
+    never be flipped to REJECTED. A ledger that already carries a voucher
+    code is never rejected either.
+
+    ``allowed_statuses`` can only narrow ``AFFILIATE_ADMIN_REJECTABLE_STATUSES``
+    (bulk passes the strict three). ``protect_issued_vouchers`` additionally
+    refuses when the pool already holds an issued code for the ledger.
+
+    Returns the ledger as it was BEFORE the update, or ``None`` if nothing was
+    rejected (missing, already REJECTED, protected status, or lost a race).
+    """
     now_utc = now_utc or datetime.now(timezone.utc)
-    db.affiliate_ledger.update_one(
-        {"_id": ledger_id},
+    allowed = [s for s in (allowed_statuses or AFFILIATE_ADMIN_REJECTABLE_STATUSES) if s in AFFILIATE_ADMIN_REJECTABLE_STATUSES]
+    if not allowed:
+        return None
+    if protect_issued_vouchers and _has_issued_pool_voucher_for_ledger(db, ledger_id=ledger_id):
+        return None
+    return db.affiliate_ledger.find_one_and_update(
+        {"_id": ledger_id, "status": {"$in": allowed}, **_no_voucher_filter()},
         {"$set": {"status": "REJECTED", "review_reason": reason, "updated_at": now_utc}},
+        return_document=ReturnDocument.BEFORE,
     )
+
+
+def affiliate_reject_refusal_reason(ledger: dict | None, *, voucher_in_pool: bool = False) -> str:
+    """Why ``reject_affiliate_ledger`` returned ``None`` for this ledger."""
+    if not ledger:
+        return "not_found"
+    status = str(ledger.get("status") or "")
+    if status == "ISSUED":
+        return "already_issued"
+    if status == "REJECTED":
+        return "already_rejected"
+    if status == SETTLING_STATUS:
+        return "in_progress"
+    if ledger.get("voucher_code") or _ledger_has_affiliate_bundle(ledger) or voucher_in_pool:
+        return "voucher_already_attached"
+    return "status_not_rejectable"
