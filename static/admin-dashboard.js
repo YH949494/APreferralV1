@@ -12004,7 +12004,7 @@
 
   // ---------- Pending Affiliate Rewards (migrated from legacy MiniApp admin panel) ----------
   // Ids of the rows currently rendered; "Approve All" submits only these.
-  var affpLoaded = { status: null, ids: [], submitting: false };
+  var affpLoaded = { status: null, ids: [], submitting: false, seq: 0 };
 
   function affpApproveAll(btn) {
     if (affpLoaded.submitting) return;
@@ -12033,6 +12033,8 @@
   // Scope: ONLY the rows in the loaded pending response (affpLoaded.ids).
   function affpRejectAll(btn) {
     if (affpLoaded.submitting) return;
+    var activeBtn = $("#affp-status-filter .active");
+    if (!activeBtn || activeBtn.dataset.status !== affpLoaded.status) return; // list not in sync with the selected tab
     var ids = affpLoaded.ids.slice(0, 200);
     if (!ids.length) return;
     var n = ids.length;
@@ -12064,9 +12066,14 @@
     if (status === "PENDING_MANUAL") { affpLoadShortage(); }
     else if (shortageHost) { shortageHost.style.display = "none"; shortageHost.innerHTML = ""; }
     statePanel("affp-body", "loading", "Loading pending affiliate rewards…");
+    // Latest request wins: a slow response for a previously selected tab must
+    // never repopulate the ids that Approve All / Reject All submit.
+    var seq = ++affpLoaded.seq;
+    affpLoaded.ids = [];
     fetch("/v2/miniapp/admin/affiliate/pending?status=" + encodeURIComponent(status), { credentials: "same-origin", headers: { "Accept": "application/json" } })
       .then(function (r) { return r.json(); })
       .then(function (data) {
+        if (seq !== affpLoaded.seq) return;
         var items = data.items || [];
         affpLoaded.status = status;
         affpLoaded.ids = items.map(function (it) { return it.ledger_id; }).filter(Boolean);
@@ -12100,7 +12107,7 @@
           '<table class="data-table"><thead><tr><th>User ID</th><th>Tier</th><th>Month</th><th>Eligible Tier</th><th>Qualified (Month)</th><th>Risk Flags</th><th>Actions</th></tr></thead><tbody>' +
           rows + "</tbody></table>";
       })
-      .catch(function (e) { statePanel("affp-body", "error", "Failed to load pending rewards: " + e.message); });
+      .catch(function (e) { if (seq === affpLoaded.seq) statePanel("affp-body", "error", "Failed to load pending rewards: " + e.message); });
   }
 
   function bindAffiliatePending() {

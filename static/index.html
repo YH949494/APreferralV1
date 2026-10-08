@@ -8165,7 +8165,7 @@ ${referral}`;
 
     // Rows from the currently loaded pending response. "Approve All" only ever
     // submits these ids (never a DB-wide sweep).
-    const affPendingState = { status: null, items: [], submitting: false, busyKind: null };
+    const affPendingState = { status: null, items: [], submitting: false, busyKind: null, seq: 0 };
     const AFF_BULK_APPROVABLE = ["PENDING_REVIEW", "PENDING_MANUAL"];
 
     function affRenderPendingBar(summaryText) {
@@ -8259,8 +8259,13 @@ ${referral}`;
     }
 
     async function affLoadPending(status, summaryText) {
+      // Latest request wins: a slow response for a previously clicked tab must
+      // not repopulate the ids that Approve All / Reject All submit.
+      const seq = ++affPendingState.seq;
+      affPendingState.items = [];
       const res = await v2Fetch(`${API_V2}/admin/affiliate/pending${buildAdminQueryTail({ status })}`);
       const data = await res.json();
+      if (seq !== affPendingState.seq) return;
       affPendingState.status = status;
       affPendingState.items = res.ok && Array.isArray(data.items) ? data.items : [];
       document.getElementById("aff_pending").textContent = JSON.stringify(data, null, 2);
