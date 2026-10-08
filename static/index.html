@@ -1966,6 +1966,7 @@
               <button type="button" onclick="affLoadPending('SIMULATED_PENDING')">Simulated Pending</button>
             </div>
             <pre id="aff_pool_summary" style="margin-top:10px; background:#f8f8f8; border:1px solid #eee; padding:8px; border-radius:6px; white-space:pre-wrap;">No data.</pre>
+            <div id="aff_pending_bar" style="margin-top:8px; display:none; align-items:center; gap:8px; flex-wrap:wrap;"></div>
             <pre id="aff_pending" style="margin-top:8px; background:#f8f8f8; border:1px solid #eee; padding:8px; border-radius:6px; white-space:pre-wrap;">No pending ledger loaded.</pre>
             <div style="margin-top:12px; border-top:1px solid #eee; padding-top:12px;">
               <h5 style="margin:0 0 8px 0;">Affiliate KPI (Daily)</h5>
@@ -8162,10 +8163,61 @@ ${referral}`;
       }
     }
 
-    async function affLoadPending(status) {
+    // Rows from the currently loaded pending response. "Approve All" only ever
+    // submits these ids (never a DB-wide sweep).
+    const affPendingState = { status: null, items: [], submitting: false };
+    const AFF_BULK_APPROVABLE = ["PENDING_REVIEW", "PENDING_MANUAL"];
+
+    function affRenderPendingBar(summaryText) {
+      const bar = document.getElementById("aff_pending_bar");
+      if (!bar) return;
+      const n = affPendingState.items.length;
+      const show = AFF_BULK_APPROVABLE.includes(affPendingState.status) && n > 0;
+      bar.style.display = show ? "flex" : "none";
+      if (!show) { bar.innerHTML = ""; return; }
+      const busy = affPendingState.submitting;
+      bar.innerHTML = `<button type="button" id="aff_approve_all_btn" ${busy ? "disabled" : ""}>${busy ? "Approving..." : `Approve All (${n})`}</button>`
+        + `<span id="aff_approve_all_summary" style="font-size:12px; color:#555;">${escapeHtml(summaryText || "")}</span>`;
+      document.getElementById("aff_approve_all_btn").addEventListener("click", affApproveAll);
+    }
+
+    async function affApproveAll() {
+      if (affPendingState.submitting) return;
+      const ids = affPendingState.items.map((it) => it.ledger_id).filter(Boolean).slice(0, 200);
+      if (!ids.length || !AFF_BULK_APPROVABLE.includes(affPendingState.status)) return;
+      if (!window.confirm(`Approve all ${ids.length} pending affiliate rewards?`)) return;
+      affPendingState.submitting = true;
+      affRenderPendingBar();
+      const status = affPendingState.status;
+      let summary = "";
+      try {
+        const res = await v2Fetch(`${API_V2}/admin/affiliate/approve-bulk${buildAdminQueryTail()}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ledger_ids: ids }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data.status !== "ok") {
+          summary = `Bulk approve failed: ${data.reason || res.status}`;
+        } else {
+          summary = `Approved: ${data.processed} | Issued: ${data.issued} | Out of stock: ${data.out_of_stock} | Rejected: ${data.rejected || 0} | Failed: ${data.failed}`;
+        }
+      } catch (e) {
+        console.error(e);
+        summary = "Bulk approve failed: network error";
+      } finally {
+        affPendingState.submitting = false;
+      }
+      await affLoadPending(status, summary);
+    }
+
+    async function affLoadPending(status, summaryText) {
       const res = await v2Fetch(`${API_V2}/admin/affiliate/pending${buildAdminQueryTail({ status })}`);
       const data = await res.json();
+      affPendingState.status = status;
+      affPendingState.items = res.ok && Array.isArray(data.items) ? data.items : [];
       document.getElementById("aff_pending").textContent = JSON.stringify(data, null, 2);
+      affRenderPendingBar(summaryText);
     }
 
     function _affPct(value) {

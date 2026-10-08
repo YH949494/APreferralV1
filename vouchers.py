@@ -8311,6 +8311,107 @@ def admin_affiliate_approve_v2(ledger_id):
     })
 
 
+AFFILIATE_BULK_APPROVE_MAX = 200
+# Strictly narrower than approve_affiliate_ledger (which would also reopen
+# OUT_OF_STOCK): bulk never touches OUT_OF_STOCK, SIMULATED_PENDING, REJECTED,
+# ISSUED or SETTLING rows.
+_AFFILIATE_BULK_APPROVABLE = ("PENDING_REVIEW", "PENDING_MANUAL", "APPROVED")
+
+
+@vouchers_bp.route("/admin/affiliate/approve-bulk", methods=["POST"])
+def admin_affiliate_approve_bulk_v2():
+    admin, err = require_admin()
+    if err:
+        return err
+
+    data = request.get_json(silent=True)
+    raw_ids = data.get("ledger_ids") if isinstance(data, dict) else None
+    if not isinstance(raw_ids, list) or not raw_ids:
+        return jsonify({"status": "error", "reason": "ledger_ids_required"}), 400
+    if len(raw_ids) > AFFILIATE_BULK_APPROVE_MAX:
+        return jsonify({"status": "error", "reason": "too_many_ledger_ids", "max": AFFILIATE_BULK_APPROVE_MAX}), 400
+
+    oids = []
+    seen = set()
+    invalid = []
+    for raw in raw_ids:
+        try:
+            if not isinstance(raw, str):
+                raise TypeError
+            oid = ObjectId(raw)
+        except Exception:
+            invalid.append(str(raw)[:64])
+            continue
+        if oid not in seen:  # duplicates in one request are processed once
+            seen.add(oid)
+            oids.append(oid)
+    if invalid:
+        return jsonify({"status": "error", "reason": "bad_ledger_id", "invalid": invalid[:20]}), 400
+
+    admin = admin or {}
+    admin_identity = (
+        admin.get("usernameLower") or admin.get("username")
+        or (f"{admin.get('adminSource') or 'admin'}:{admin.get('id')}" if admin.get("id") is not None else "admin")
+    )
+
+    current_status = {
+        row["_id"]: row.get("status")
+        for row in db.affiliate_ledger.find({"_id": {"$in": oids}})
+    }
+    counts = {"processed": 0, "issued": 0, "out_of_stock": 0, "rejected": 0, "already_final": 0, "failed": 0}
+    results = []
+    for oid in oids:
+        lid = str(oid)
+        status_before = current_status.get(oid)
+        if status_before is None:
+            counts["failed"] += 1
+            results.append({"ledger_id": lid, "outcome": "failed", "reason": "not_found"})
+            continue
+        if status_before not in _AFFILIATE_BULK_APPROVABLE:
+            counts["already_final"] += 1
+            results.append({"ledger_id": lid, "outcome": "skipped", "reason": "status_not_approvable", "ledger_status": status_before})
+            continue
+        try:
+            ledger = approve_affiliate_ledger(db, ledger_id=oid, now_utc=datetime.now(timezone.utc))
+        except Exception:
+            logger.exception("[AFFILIATE][BULK_APPROVE_ITEM_FAILED] ledger_id=%s admin=%s", lid, admin_identity)
+            counts["failed"] += 1
+            results.append({"ledger_id": lid, "outcome": "failed", "reason": "exception"})
+            continue
+        if not ledger:
+            # Lost a race (another approve/reject got there first): final, untouched.
+            latest = db.affiliate_ledger.find_one({"_id": oid}) or {}
+            counts["already_final"] += 1
+            results.append({
+                "ledger_id": lid, "outcome": "skipped",
+                "reason": affiliate_approve_refusal_reason(latest) if latest else "not_found",
+                "ledger_status": latest.get("status"),
+            })
+            continue
+        counts["processed"] += 1
+        after = ledger.get("status")
+        reason = affiliate_approve_outcome_reason(ledger)
+        if after == "ISSUED":
+            counts["issued"] += 1
+            outcome = "issued"
+        elif reason == "no_stock":
+            counts["out_of_stock"] += 1
+            outcome = "out_of_stock"
+        elif after == "REJECTED":
+            counts["rejected"] += 1
+            outcome = "rejected"
+        else:
+            outcome = "pending"
+        results.append({"ledger_id": lid, "outcome": outcome, "ledger_status": after, "reason": reason})
+
+    logger.info(
+        "[AFFILIATE][BULK_APPROVE] requested=%s processed=%s issued=%s out_of_stock=%s rejected=%s already_final=%s failed=%s admin=%s",
+        len(oids), counts["processed"], counts["issued"], counts["out_of_stock"], counts["rejected"],
+        counts["already_final"], counts["failed"], admin_identity,
+    )
+    return jsonify({"status": "ok", "requested": len(oids), **counts, "results": results})
+
+
 _HISTORICAL_REPLENISH_HTTP_STATUS = {
     "ledger_not_found": 404,
     "batch_not_found": 404,
