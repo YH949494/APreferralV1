@@ -32,6 +32,8 @@ from affiliate_rewards import (
     affiliate_approve_outcome_reason,
     affiliate_approve_refusal_reason,
     affiliate_bundle_visible_cards,
+    AFFILIATE_BULK_REJECTABLE_STATUSES,
+    affiliate_reject_refusal_reason,
     approve_affiliate_ledger,
     reject_affiliate_ledger,
     issue_current_month_affiliate_rewards,
@@ -8412,6 +8414,117 @@ def admin_affiliate_approve_bulk_v2():
     return jsonify({"status": "ok", "requested": len(oids), **counts, "results": results})
 
 
+AFFILIATE_BULK_REJECT_MAX = 200
+AFFILIATE_BULK_REJECT_DEFAULT_REASON = "bulk_admin_reject"
+
+
+@vouchers_bp.route("/admin/affiliate/reject-bulk", methods=["POST"])
+def admin_affiliate_reject_bulk_v2():
+    """Reject the given ledgers one by one through reject_affiliate_ledger().
+
+    Never a blanket update_many: each ledger is re-checked against its CURRENT
+    status inside an atomic conditional update, so a ledger that was approved
+    or issued while this runs is skipped, not reversed. Retry-safe -- already
+    REJECTED rows are reported as such and left untouched.
+    """
+    admin, err = require_admin()
+    if err:
+        return err
+
+    data = request.get_json(silent=True)
+    data = data if isinstance(data, dict) else {}
+    raw_ids = data.get("ledger_ids")
+    if not isinstance(raw_ids, list) or not raw_ids:
+        return jsonify({"status": "error", "reason": "ledger_ids_required"}), 400
+    if len(raw_ids) > AFFILIATE_BULK_REJECT_MAX:
+        return jsonify({"status": "error", "reason": "too_many_ledger_ids", "max": AFFILIATE_BULK_REJECT_MAX}), 400
+
+    raw_reason = data.get("reason")
+    reason = str(raw_reason).strip()[:200] if isinstance(raw_reason, str) and raw_reason.strip() else AFFILIATE_BULK_REJECT_DEFAULT_REASON
+
+    oids = []
+    seen = set()
+    invalid = []
+    for raw in raw_ids:
+        try:
+            if not isinstance(raw, str):
+                raise TypeError
+            oid = ObjectId(raw)
+        except Exception:
+            invalid.append(str(raw)[:64])
+            continue
+        if oid not in seen:  # duplicates in one request are processed once
+            seen.add(oid)
+            oids.append(oid)
+    if invalid:
+        return jsonify({"status": "error", "reason": "bad_ledger_id", "invalid": invalid[:20]}), 400
+
+    admin = admin or {}
+    admin_identity = (
+        admin.get("usernameLower") or admin.get("username")
+        or (f"{admin.get('adminSource') or 'admin'}:{admin.get('id')}" if admin.get("id") is not None else "admin")
+    )
+
+    counts = {"processed": 0, "rejected": 0, "already_final": 0, "skipped": 0, "failed": 0}
+    results = []
+    for oid in oids:
+        lid = str(oid)
+        try:
+            current = db.affiliate_ledger.find_one({"_id": oid}, {"status": 1})
+            if current is None:
+                counts["failed"] += 1
+                results.append({"ledger_id": lid, "result": "failed", "previous_status": None, "current_status": None, "error": "not_found"})
+                continue
+            before = reject_affiliate_ledger(
+                db,
+                ledger_id=oid,
+                reason=reason,
+                now_utc=datetime.now(timezone.utc),
+                allowed_statuses=AFFILIATE_BULK_REJECTABLE_STATUSES,
+                protect_issued_vouchers=True,
+            )
+            if before is not None:
+                counts["processed"] += 1
+                counts["rejected"] += 1
+                results.append({
+                    "ledger_id": lid, "result": "rejected",
+                    "previous_status": before.get("status"), "current_status": "REJECTED",
+                })
+                continue
+            # Refused: re-read so the report reflects what is actually there now
+            # (this also covers a concurrent request that rejected it first).
+            latest = db.affiliate_ledger.find_one({"_id": oid}) or {}
+            latest_status = latest.get("status")
+            why = affiliate_reject_refusal_reason(latest)
+            if why == "already_rejected":
+                counts["processed"] += 1
+                counts["already_final"] += 1
+                results.append({
+                    "ledger_id": lid, "result": "already_rejected",
+                    "previous_status": latest_status, "current_status": latest_status,
+                })
+                continue
+            if why == "status_not_rejectable" and latest_status in AFFILIATE_BULK_REJECTABLE_STATUSES:
+                # Still rejectable by status, so a pool voucher is what blocked it.
+                why = "voucher_already_attached"
+            counts["skipped"] += 1
+            results.append({
+                "ledger_id": lid, "result": "skipped",
+                "previous_status": latest_status, "current_status": latest_status, "reason": why,
+            })
+        except Exception:
+            logger.exception("[AFFILIATE][BULK_REJECT_ITEM_FAILED] ledger_id=%s admin=%s", lid, admin_identity)
+            counts["failed"] += 1
+            results.append({"ledger_id": lid, "result": "failed", "previous_status": None, "current_status": None, "error": "exception"})
+
+    logger.info(
+        "[AFFILIATE][BULK_REJECT] requested=%s processed=%s rejected=%s already_final=%s skipped=%s failed=%s reason=%s admin=%s",
+        len(oids), counts["processed"], counts["rejected"], counts["already_final"],
+        counts["skipped"], counts["failed"], reason, admin_identity,
+    )
+    return jsonify({"status": "ok", "requested": len(oids), **counts, "results": results})
+
+
 _HISTORICAL_REPLENISH_HTTP_STATUS = {
     "ledger_not_found": 404,
     "batch_not_found": 404,
@@ -8567,8 +8680,16 @@ def admin_affiliate_reject_v2(ledger_id):
         return jsonify({"status": "error", "reason": "bad_ledger_id"}), 400
 
     data = request.get_json(silent=True) or {}
-    reject_affiliate_ledger(db, ledger_id=oid, reason=data.get("reason"), now_utc=datetime.now(timezone.utc))
-    return jsonify({"status": "ok"})
+    before = reject_affiliate_ledger(db, ledger_id=oid, reason=data.get("reason"), now_utc=datetime.now(timezone.utc))
+    if before is not None:
+        return jsonify({"status": "ok"})
+    current = db.affiliate_ledger.find_one({"_id": oid})
+    if not current:
+        return jsonify({"status": "error", "reason": "not_found"}), 404
+    why = affiliate_reject_refusal_reason(current)
+    if why == "already_rejected":
+        return jsonify({"status": "ok", "already_rejected": True})  # idempotent double-click
+    return jsonify({"status": "error", "reason": why, "ledger_status": current.get("status")}), 409
 
 
 @vouchers_bp.route("/admin/affiliate/issue-current-month", methods=["POST"])

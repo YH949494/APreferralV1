@@ -12004,7 +12004,7 @@
 
   // ---------- Pending Affiliate Rewards (migrated from legacy MiniApp admin panel) ----------
   // Ids of the rows currently rendered; "Approve All" submits only these.
-  var affpLoaded = { status: null, ids: [], submitting: false };
+  var affpLoaded = { status: null, ids: [], submitting: false, seq: 0 };
 
   function affpApproveAll(btn) {
     if (affpLoaded.submitting) return;
@@ -12025,6 +12025,40 @@
       .finally(function () { affpLoaded.submitting = false; btnStop(btn); loadAffiliatePending(true); });
   }
 
+  function affpSetBulkBusy(busy) {
+    var btns = document.querySelectorAll('#affp-body [data-affp-op="approve-all"], #affp-body [data-affp-op="reject-all"]');
+    for (var i = 0; i < btns.length; i++) btns[i].disabled = !!busy;
+  }
+
+  // Scope: ONLY the rows in the loaded pending response (affpLoaded.ids).
+  function affpRejectAll(btn) {
+    if (affpLoaded.submitting) return;
+    var activeBtn = $("#affp-status-filter .active");
+    if (!activeBtn || activeBtn.dataset.status !== affpLoaded.status) return; // list not in sync with the selected tab
+    var ids = affpLoaded.ids.slice(0, 200);
+    if (!ids.length) return;
+    var n = ids.length;
+    if (!confirm("Reject all " + n + " pending affiliate rewards? This cannot be undone.")) return;
+    var typed = prompt('Second confirmation: type "REJECT ' + n + '" to proceed.');
+    if (typed === null) return;
+    if (String(typed).trim() !== "REJECT " + n) { banner("Reject All cancelled: confirmation text did not match.", "error"); return; }
+    var reason = prompt("Reason (optional):", "bulk_admin_reject");
+    if (reason === null) return;
+    reason = String(reason).trim() || "bulk_admin_reject";
+    affpLoaded.submitting = true;
+    affpSetBulkBusy(true);
+    btnStart(btn, "Rejecting...");
+    apiPostJson("/v2/miniapp/admin/affiliate/reject-bulk", { ledger_ids: ids, reason: reason })
+      .then(function (res) {
+        var d = res.d || {};
+        if (!res.ok || d.status !== "ok") { banner("❌ Bulk reject failed: " + esc(d.reason || res.status), "error"); return; }
+        var msg = "Rejected: " + (d.rejected || 0) + " | Skipped: " + ((d.skipped || 0) + (d.already_final || 0)) + " | Failed: " + (d.failed || 0);
+        if (d.failed || d.skipped) banner("⚠️ " + msg, "error"); else toast("✅ " + msg, "success");
+      })
+      .catch(function (e) { banner("❌ Bulk reject failed: " + e.message, "error"); })
+      .finally(function () { affpLoaded.submitting = false; btnStop(btn); affpSetBulkBusy(false); loadAffiliatePending(true); });
+  }
+
   function loadAffiliatePending(force) {
     var activeBtn = $("#affp-status-filter .active");
     var status = (activeBtn && activeBtn.dataset.status) || "PENDING_REVIEW";
@@ -12032,9 +12066,14 @@
     if (status === "PENDING_MANUAL") { affpLoadShortage(); }
     else if (shortageHost) { shortageHost.style.display = "none"; shortageHost.innerHTML = ""; }
     statePanel("affp-body", "loading", "Loading pending affiliate rewards…");
+    // Latest request wins: a slow response for a previously selected tab must
+    // never repopulate the ids that Approve All / Reject All submit.
+    var seq = ++affpLoaded.seq;
+    affpLoaded.ids = [];
     fetch("/v2/miniapp/admin/affiliate/pending?status=" + encodeURIComponent(status), { credentials: "same-origin", headers: { "Accept": "application/json" } })
       .then(function (r) { return r.json(); })
       .then(function (data) {
+        if (seq !== affpLoaded.seq) return;
         var items = data.items || [];
         affpLoaded.status = status;
         affpLoaded.ids = items.map(function (it) { return it.ledger_id; }).filter(Boolean);
@@ -12061,13 +12100,14 @@
             "</td></tr>";
         }).join("");
         var bulkBar = (status === "PENDING_REVIEW" || status === "PENDING_MANUAL")
-          ? '<div style="margin-bottom:8px;"><button class="btn primary" data-affp-op="approve-all">Approve All (' + affpLoaded.ids.length + ")</button></div>"
+          ? '<div style="margin-bottom:8px;display:flex;gap:8px;"><button class="btn primary" data-affp-op="approve-all">Approve All (' + affpLoaded.ids.length + ')</button>' +
+            '<button class="btn danger" data-affp-op="reject-all">Reject All (' + affpLoaded.ids.length + ")</button></div>"
           : "";
         $("#affp-body").innerHTML = bulkBar +
           '<table class="data-table"><thead><tr><th>User ID</th><th>Tier</th><th>Month</th><th>Eligible Tier</th><th>Qualified (Month)</th><th>Risk Flags</th><th>Actions</th></tr></thead><tbody>' +
           rows + "</tbody></table>";
       })
-      .catch(function (e) { statePanel("affp-body", "error", "Failed to load pending rewards: " + e.message); });
+      .catch(function (e) { if (seq === affpLoaded.seq) statePanel("affp-body", "error", "Failed to load pending rewards: " + e.message); });
   }
 
   function bindAffiliatePending() {
@@ -12094,6 +12134,9 @@
       var ledgerId = btn.dataset.ledgerId;
       if (op === "approve-all") {
         affpApproveAll(btn);
+        if (affpLoaded.submitting) affpSetBulkBusy(true); // lock Reject All while approving
+      } else if (op === "reject-all") {
+        affpRejectAll(btn);
       } else if (op === "hist-replenish") {
         affpOpenHistoricalReplenishModal(ledgerId);
       } else if (op === "reject") {
