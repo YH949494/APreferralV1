@@ -196,6 +196,8 @@ are optional overrides only. `DATABOT_ENABLED` (Phase-1 shadow client) does NOT 
 See Databot `docs/uim_welcome_redemption_feed.md` §0 for the integration audit.
 
 ```bash
+# <k>: generate one fresh key (openssl rand -hex 32) and set the SAME value on both apps. Fly never reveals
+# an existing secret's plaintext, so an existing DATABOT_API_KEY is rotated, not reused (harmless today).
 # Databot: fly secrets set DATABOT_API_KEY=<k> DASHBOARD_BIND_HOST=::
 fly secrets set -a apreferralv1 DATABOT_API_KEY=<k> DATABOT_BASE_URL=http://databot.internal:8080 \
   UIM_REDEMPTION_SYNC_ENABLED=true
