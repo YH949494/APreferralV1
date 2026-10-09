@@ -171,8 +171,8 @@ def _resolve_recipients(db, codes: set[str]) -> dict[str, dict]:
     for chunk in _chunks(codes):
         for row in db.voucher_pools.find({"pool_id": aq.WELCOME_POOL_ID, "code": {"$in": chunk}}):
             pool_rows[row["code"]] = row
-        for row in db.new_joiner_claims.find({"code": {"$in": chunk}}, {"code": 1, "uid": 1}):
-            claims[row["code"]].append(row.get("uid"))
+        for row in db.new_joiner_claims.find({"code": {"$in": chunk}}, {"code": 1, "uid": 1, "claimed_at": 1}):
+            claims[row["code"]].append(row)
         for row in db.voucher_pools.find({"code": {"$in": chunk}, "pool_id": {"$ne": aq.WELCOME_POOL_ID}}, {"code": 1}):
             other_pool.add(row["code"])
     ledger_codes = {}
@@ -184,14 +184,15 @@ def _resolve_recipients(db, codes: set[str]) -> dict[str, dict]:
         except (TypeError, ValueError):
             continue
     for chunk in _chunks(f"WELCOME:{u}" for u in uids):
-        for row in db.affiliate_ledger.find({"dedup_key": {"$in": chunk}}, {"dedup_key": 1, "voucher_code": 1}):
-            ledger_codes[row["dedup_key"]] = row.get("voucher_code")
+        for row in db.affiliate_ledger.find({"dedup_key": {"$in": chunk}},
+                                          {"dedup_key": 1, "voucher_code": 1, "issued_at": 1}):
+            ledger_codes[row["dedup_key"]] = row
     return {
         code: aq.decide_recipient(
             code=code,
             pool_row=pool_rows.get(code),
-            ledger_code_for=lambda uid: ledger_codes.get(f"WELCOME:{uid}"),
-            claim_uids=claims.get(code, []),
+            ledger_for=lambda uid: ledger_codes.get(f"WELCOME:{uid}"),
+            claims=claims.get(code, []),
             other_pool_exists=code in other_pool,
         )
         for code in codes

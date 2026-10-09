@@ -10,18 +10,30 @@ import argparse
 import json
 import os
 from collections import defaultdict
+from datetime import datetime, timezone
 
 from pymongo import MongoClient
+import affiliate_qualification as qualification
 
 from referral_rules import (
     REFERRAL_BONUS_EVENT,
     REFERRAL_BONUS_INTERVAL,
     REFERRAL_BONUS_XP,
     REFERRAL_SUCCESS_EVENT,
-    current_bonus_count,
     grant_referral_rewards,
 )
 from xp import grant_xp
+
+
+def current_bonus_count(events, user_id):
+    return events.count_documents({"user_id": user_id, "type": REFERRAL_BONUS_EVENT})
+
+
+def _require_legacy_awards_allowed(db):
+    # Read failures propagate before any award. A persisted cutoff disables
+    # this old-rule writer even if the new rule is paused/disabled afterwards.
+    if not qualification.legacy_award_allowed(qualification.get_control(db), datetime.now(timezone.utc)):
+        raise RuntimeError("legacy referral XP backfill is disabled after the qualification launch cutoff")
 
 
 def _collect_referral_counts(referrals):
@@ -36,6 +48,8 @@ def _collect_referral_counts(referrals):
 
 
 def backfill(db, dry_run: bool = True):
+    if not dry_run:
+        _require_legacy_awards_allowed(db)
     referrals = list(
         db.referrals.find(
             {"$or": [{"status": {"$exists": False}}, {"status": {"$nin": ["pending", "inactive"]}}]}
@@ -57,6 +71,7 @@ def backfill(db, dry_run: bool = True):
     for referrer_id, referred_user_id in missing_base:
         if dry_run:
             continue
+        _require_legacy_awards_allowed(db)
         grant_referral_rewards(db, db.users, referrer_id, referred_user_id)
 
     missing_bonus = {}
@@ -71,6 +86,7 @@ def backfill(db, dry_run: bool = True):
             continue
         current = current_bonus_count(db.xp_events, uid)
         for idx in range(current + 1, current + to_award + 1):
+            _require_legacy_awards_allowed(db)
             grant_xp(
                 db,
                 uid,

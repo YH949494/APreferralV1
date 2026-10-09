@@ -18,7 +18,9 @@ reported before and after and must be identical.
 "Reliable" means: the invitee's Welcome code(s) map to exactly one recipient
 (that invitee), the committed source rows for those codes report a successful
 redemption on exactly one canonical account, and that account does not
-contradict the invitee's verified UIM linkage. Everything else is reported as
+contradict the invitee's verified UIM linkage. Issuance must precede redemption,
+and redemption must not exceed the live five-minute future-time tolerance.
+Everything else is reported as
 unresolved or conflicting and left out — no mapping is guessed.
 ``--seed-from-linkage`` additionally seeds invitees with no redemption rows
 but exactly one verified linked account (off by default).
@@ -115,7 +117,7 @@ def _welcome_codes(db) -> dict[str, set[int]]:
     return codes
 
 
-def _redemptions_by_code(db, config: dict, welcome_codes: dict) -> dict[str, set]:
+def _redemptions_by_code(db, config: dict, welcome_codes: dict, *, now_utc: datetime) -> dict[str, set]:
     """code -> {account_key | "!<reason>"} from successful, committed rows of
     the configured source. Uses the live parser (aq.parse_source_row) and the
     live identity rule (aq.build_evidence_doc), so a seeded account key is
@@ -127,6 +129,7 @@ def _redemptions_by_code(db, config: dict, welcome_codes: dict) -> dict[str, set
     out even if a later batch re-observes it."""
     out: dict[str, set] = defaultdict(set)
     removed: dict[str, set] = defaultdict(set)
+    recipients: dict[str, dict] = {}
     for _batch_id, row in aq.iter_committed_source_rows(db, config):
         obs = aq.parse_source_row(row, config)
         if obs is None:
@@ -135,8 +138,18 @@ def _redemptions_by_code(db, config: dict, welcome_codes: dict) -> dict[str, set
         is_removal = obs.get("observation") == aq.OBS_REMOVED
         if not code or code not in welcome_codes or not (is_removal or obs["redemption_successful"]):
             continue
+        if not is_removal:
+            if code not in recipients:
+                recipients[code] = aq.resolve_welcome_recipient(db, code)
+            problem = aq.welcome_issuance_problem(recipients[code], obs.get("redeemed_at"))
+            if problem:
+                out[code].add(f"!{problem}")
+                continue
+            if obs["redeemed_at"] > now_utc + aq.FUTURE_REDEMPTION_TOLERANCE:
+                out[code].add("!future_redemption_time")
+                continue
         doc = aq.build_evidence_doc(
-            source=aq.source_name(config), code=code, recipient={}, now_utc=datetime.now(timezone.utc),
+            source=aq.source_name(config), code=code, recipient={}, now_utc=now_utc,
             **{k: v for k, v in obs.items() if k != "code"},
         )
         key = doc["account_key"] or f"!{doc['account_reason']}"
@@ -151,14 +164,15 @@ def _redemptions_by_code(db, config: dict, welcome_codes: dict) -> dict[str, set
     return out
 
 
-def build_plan(db, *, config: dict | None, seed_from_linkage: bool) -> dict:
+def build_plan(db, *, config: dict | None, seed_from_linkage: bool, now_utc: datetime | None = None) -> dict:
+    now_utc = aq._aware_utc(now_utc or datetime.now(timezone.utc))
     problems = aq.validate_source_config(config)
     welcome_codes = _welcome_codes(db)
     codes_by_user: dict[int, set[str]] = defaultdict(set)
     for code, uids in welcome_codes.items():
         for uid in uids:
             codes_by_user[uid].add(code)
-    redemptions = _redemptions_by_code(db, config, welcome_codes) if not problems else {}
+    redemptions = _redemptions_by_code(db, config, welcome_codes, now_utc=now_utc) if not problems else {}
 
     counts = defaultdict(int)
     samples = defaultdict(list)
@@ -270,7 +284,8 @@ def run(db, *, apply: bool, seed_from_linkage: bool, now_utc: datetime) -> dict:
     report["indexes_before"] = aq.index_readiness(db)
     if apply:
         report["indexes_created"] = aq.ensure_indexes(db)
-    plan = build_plan(db, config=control.get("source_config"), seed_from_linkage=seed_from_linkage)
+    plan = build_plan(db, config=control.get("source_config"), seed_from_linkage=seed_from_linkage,
+                      now_utc=now_utc)
     seeds = plan.pop("_seeds")
     report["plan"] = plan
     if apply:
