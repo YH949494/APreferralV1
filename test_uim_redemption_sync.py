@@ -8,11 +8,10 @@ provenance bases, ``deleted`` observations for stale-row removals.
 The qualification rule stays DISABLED in every test except the explicit parity
 test, which activates it on its own copy to prove preview == live.
 
-Real-MongoDB concurrency test: set UIM_SYNC_TEST_MONGO_URI to an ISOLATED server.
+The multi-threaded real-MongoDB variant lives in test_uim_redemption_sync_real_mongo.py.
 """
 from __future__ import annotations
 
-import os
 import re
 import threading
 import uuid
@@ -313,55 +312,42 @@ def test_lease_blocks_a_concurrent_run_and_expires():
     assert sync(w, feed, now=NOW + timedelta(minutes=6))["ok"] is True
 
 
-def test_concurrent_syncs_on_real_mongo_are_idempotent():
-    uri = os.environ.get("UIM_SYNC_TEST_MONGO_URI")
-    if not uri:
-        pytest.skip("UIM_SYNC_TEST_MONGO_URI not set (isolated MongoDB required)")
-    from pymongo import MongoClient
+def test_interleaved_runs_never_double_count_or_skip():
+    """Deterministic cursor race: while run A holds a page, run B syncs the
+    same batch to completion. A's conditional cursor update must lose (no
+    double-counted counters), and nothing is skipped or duplicated.
+    (A real multi-threaded run against MongoDB: test_uim_redemption_sync_real_mongo.py.)"""
+    w = disabled_world()
+    for i in range(20):
+        w.welcome_code(100 + i, f"W{i}")
+    feed = FakeFeed()
+    feed.add_batch([urow(f"W{i}", f"0{i:04d}", "2026-10-05 10:00:00") for i in range(20)])
+    page = usync.ROW_PAGE
+    usync.ROW_PAGE = 6
+    nested = {"done": False}
 
-    client = MongoClient(uri, tz_aware=True, serverSelectionTimeoutMS=2000)
-    db = client[f"uimsync_{uuid.uuid4().hex[:10]}"]
+    def fresh():
+        return {"batches_listed": 0, "rollbacks_propagated": 0, "rows_received": 0, "rows_stored": 0,
+                "batches_completed": 0, "batches_unavailable": 0, "cursor_races": 0}
+
+    def racing_fetch(path, params=None):
+        body = feed(path, params)
+        if path.endswith("/rows") and not nested["done"]:
+            nested["done"] = True
+            usync._sync_rows(w.db, feed, now_utc=NOW, max_rows=1000, out=fresh())  # run B
+        return body
+
     try:
-        aq.ensure_indexes(db)
-        usync._indexes_ready = False
-        for i in range(500):
-            db.voucher_pools.insert_one({"pool_id": "WELCOME", "code": f"W{i}", "status": "issued", "issued_to_user_id": i})
-        feed = FakeFeed()
-        feed.add_batch([urow(f"W{i}", f"0{i:05d}", "2026-10-05 10:00:00") for i in range(500)])
-        feed.add_batch([urow(f"W{i}", f"0{i:05d}", "2026-10-05 10:00:00") for i in range(0, 500, 2)])
-        page = usync.ROW_PAGE
-        usync.ROW_PAGE = 37
-        errors = []
-
-        def worker(k):
-            try:
-                out = {"batches_listed": 0, "rollbacks_propagated": 0, "rows_received": 0, "rows_stored": 0,
-                       "batches_completed": 0, "batches_unavailable": 0, "cursor_races": 0}
-                usync._sync_batches(db, feed, now_utc=NOW, out=out)   # bypass the lease on purpose
-                usync._sync_rows(db, feed, now_utc=NOW, max_rows=100000, out=out)
-            except Exception as exc:  # pragma: no cover
-                errors.append(exc)
-
-        threads = [threading.Thread(target=worker, args=(k,)) for k in range(8)]
-        try:
-            [t.start() for t in threads]
-            [t.join() for t in threads]
-            out = {"batches_listed": 0, "rollbacks_propagated": 0, "rows_received": 0, "rows_stored": 0,
-                   "batches_completed": 0, "batches_unavailable": 0, "cursor_races": 0}
-            usync._sync_rows(db, feed, now_utc=NOW, max_rows=100000, out=out)  # finish anything a race left
-        finally:
-            usync.ROW_PAGE = page
-        assert not errors
-        assert db[usync.ROWS_COLLECTION].count_documents({}) == 750
-        batches = list(db[usync.BATCHES_COLLECTION].find())
-        assert all(b["rows_complete"] for b in batches)
-        # Counters advance with the cursor only: exactly one count per row, no double counting.
-        assert sum(b["counters"]["received"] for b in batches) == 750
-        evidence_keys = {(r["coupon_code"], r["account"]) for r in db[usync.ROWS_COLLECTION].find()}
-        assert len(evidence_keys) == 500 and ("W7", "000007") in evidence_keys
+        usync._sync_batches(w.db, feed, now_utc=NOW, out=fresh())
+        out_a = fresh()
+        usync._sync_rows(w.db, racing_fetch, now_utc=NOW, max_rows=1000, out=out_a)  # run A
     finally:
-        client.drop_database(db.name)
-        client.close()
+        usync.ROW_PAGE = page
+    assert out_a["cursor_races"] == 1
+    batch = w.db[usync.BATCHES_COLLECTION].find_one()
+    assert batch["rows_complete"] is True
+    assert batch["counters"]["received"] == 20                     # counted exactly once
+    assert w.db[usync.ROWS_COLLECTION].count_documents({}) == 20   # stored exactly once
 
 
 # 6 — leading zeros and GMT+8 ---------------------------------------------------
