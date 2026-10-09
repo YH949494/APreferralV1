@@ -37,7 +37,7 @@ Persisted switch: `affiliate_qualification_control` `{_id: "welcome_redemption_v
 
 Evidence (`welcome_redemption_evidence`, unique `(source, source_ref)`, `source_ref = sha256(source|code_hash|account_key)`) is extracted **only from committed upload batches** (batch doc is written after the rows), resumably (`_id` cursor, 5 000 rows/tick). Re-imports are no-ops. Non-Welcome / unknown coupon rows are counted on the batch, not stored.
 
-Validation order (`evaluate_evidence`): voided → `redemption_successful` → `redeemed_at` → account → Welcome campaign filter → recipient (unknown / non-Welcome / not issued / **ambiguous** → reject/review) → conflicting records for the same code → invitee already qualified → attribution (no record / self-referral / referral after redemption / pre-existing user) → ownership (account linked to inviter = self-referral; invitee linked to other accounts or account linked only to other users = review; no linkage = `unlinked_account_policy`, default accept with `ownership_basis=code_recipient_only`). No deposit/turnover/IP/device/Voucher-Hunter gates.
+Validation order (`evaluate_evidence`): voided → `redemption_successful` → `redeemed_at` (missing or later than processing time + 5 min → review) → account → Welcome campaign filter → recipient (unknown / non-Welcome / not issued / **ambiguous** → reject/review) → conflicting records for the same code → invitee already qualified → attribution (no record / self-referral / referral after redemption / pre-existing user) → ownership (account linked to inviter = self-referral; invitee linked to other accounts or account linked only to other users = review; no linkage = `unlinked_account_policy`, default accept with `ownership_basis=code_recipient_only`). No deposit/turnover/IP/device/Voucher-Hunter gates.
 
 Atomic qualification without transactions:
 
@@ -62,7 +62,8 @@ Canonical account identity: `"<namespace>:<account>"`, NFKC + trim, **case and l
 
 * `void-batch`: batch marked `rolled_back_at` (never re-extracted). Evidence seen only in that batch: unprocessed/review → `voided` (reservation released). Already qualified → **not revoked, account not released**; `qualified_events.evidence_status=voided_pending_reconciliation` for manual review. Issued rewards are never touched.
 * A re-observation with a different status/time: unprocessed → `pending_review: conflicting_source_observations`; qualified → flagged `disputed_pending_reconciliation`.
-* `requeue` re-runs full validation only; there is no force-qualify path. Admin approval only issues ledgers whose counts already justify them.
+* `requeue` re-reads the code from its committed source row, re-resolves the recipient from current voucher records, and re-runs full validation; there is no force-qualify path.
+* Account identity config (`code_column`, `account_column`, `account_namespace`, `namespace_column`) is frozen once the registry is seeded or the rule launched: `configure-source` refuses changes and `preflight` fails if it differs from the identity recorded at seeding (a new namespace would mint new keys for already-credited accounts). Admin approval only issues ledgers whose counts already justify them.
 
 ## 6. Integration blocker (why the rule stays disabled)
 

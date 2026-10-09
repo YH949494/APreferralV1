@@ -282,6 +282,7 @@ def run(db, *, apply: bool, seed_from_linkage: bool, now_utc: datetime) -> dict:
             {
                 "$set": {
                     "seed_completed_at": now_utc,
+                    "seeded_identity_config": aq.identity_config(control.get("source_config")),
                     "seed_summary": {
                         "accounts_seeded": report["seed_result"]["seeded"],
                         "accounts_already_seeded": report["seed_result"]["already_seeded"],

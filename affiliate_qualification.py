@@ -103,6 +103,7 @@ UNLINKED_POLICY_REVIEW = "review"
 EVIDENCE_LEASE = timedelta(minutes=5)
 BATCH_EXTRACT_LEASE = timedelta(minutes=10)
 MAX_EVIDENCE_ATTEMPTS = 10
+FUTURE_REDEMPTION_TOLERANCE = timedelta(minutes=5)
 STALE_RESERVATION_AFTER = timedelta(minutes=15)
 
 # Column aliases marketing_upload accepts as a "redeem time" but which are
@@ -376,6 +377,17 @@ REQUIRED_SOURCE_KEYS = (
     "success_values",
     "source_timezone",
 )
+
+
+IDENTITY_CONFIG_KEYS = ("account_column", "account_namespace", "namespace_column", "code_column")
+
+
+def identity_config(config: dict | None) -> dict:
+    """The part of the source config that defines canonical account keys.
+    Changing it after the registry is seeded would mint new keys for
+    already-credited accounts, so it is frozen from seeding on."""
+    cfg = config or {}
+    return {k: cfg.get(k) or None for k in IDENTITY_CONFIG_KEYS}
 
 
 def validate_source_config(config: dict | None) -> list[str]:
@@ -832,6 +844,10 @@ def evaluate_evidence(db, evidence: dict, *, control: dict, now_utc: datetime) -
     redeemed_at = _aware_utc(evidence.get("redeemed_at"))
     if redeemed_at is None:
         return _finalize(db, evidence, EV_REVIEW, "missing_redeemed_at", now_utc=now_utc)
+    if redeemed_at > _aware_utc(now_utc) + FUTURE_REDEMPTION_TOLERANCE:
+        # A redemption cannot postdate its own processing; never attribute
+        # (or reward) a future month on a bad source timestamp.
+        return _finalize(db, evidence, EV_REVIEW, "redeemed_at_in_future", now_utc=now_utc)
     account_key = evidence.get("account_key")
     if not account_key:
         reason = evidence.get("account_reason") or "missing_account"
@@ -1164,12 +1180,39 @@ def void_upload_batch(db, *, upload_batch_id: str, reason: str, now_utc: datetim
     return out
 
 
-def requeue_evidence(db, *, evidence_id, now_utc: datetime) -> bool:
+def _code_from_source_rows(db, evidence: dict, config: dict | None) -> str | None:
+    """The raw code for an evidence row, re-read from its committed source
+    row (evidence itself stores only a hash). Verified against that hash."""
+    code_col = _norm_column((config or {}).get("code_column"))
+    for row_id in evidence.get("source_row_ids") or []:
+        row = db.marketing_raw_data.find_one({"_id": row_id})
+        if not row:
+            continue
+        code = normalize_code({_norm_column(k): v for k, v in row.items()}.get(code_col))
+        if code and code_hash(code) == evidence.get("code_hash"):
+            return code
+    return None
+
+
+def requeue_evidence(db, *, evidence_id, now_utc: datetime, config: dict | None = None) -> bool:
     """Send a reviewed/rejected evidence row back through FULL validation
-    (after the underlying data was fixed). Never forces a qualification."""
+    (after the underlying data was fixed). The code -> recipient mapping is
+    re-resolved from current voucher records, since that is usually what was
+    fixed; if the source row can no longer be read, the row is not requeued.
+    Never forces a qualification."""
+    evidence = db[EVIDENCE_COLLECTION].find_one({"_id": evidence_id, "status": {"$in": [EV_REVIEW, EV_REJECTED]}})
+    if not evidence:
+        return False
+    if config is None:
+        config = (get_control(db) or {}).get("source_config")
+    code = _code_from_source_rows(db, evidence, config)
+    if code is None:
+        logger.warning("[AFF_QUAL][REQUEUE_REFUSED] evidence_id=%s reason=source_row_unavailable", evidence_id)
+        return False
     res = db[EVIDENCE_COLLECTION].update_one(
         {"_id": evidence_id, "status": {"$in": [EV_REVIEW, EV_REJECTED]}},
-        {"$set": {"status": EV_RECEIVED, "requeued_at": now_utc, "updated_at": now_utc},
+        {"$set": {"status": EV_RECEIVED, "requeued_at": now_utc, "updated_at": now_utc,
+                  "recipient_resolution": resolve_welcome_recipient(db, code)},
          "$unset": {"lease_until": "", "reason": ""}},
     )
     return bool(getattr(res, "modified_count", 0))

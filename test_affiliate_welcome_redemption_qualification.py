@@ -61,7 +61,7 @@ class World:
         db.voucher_pools.create_index([("pool_id", 1), ("code", 1)], unique=True)
         referral_invitee_lock.ensure_indexes(db)
         control = {"_id": aq.CONTROL_ID, "mode": mode, "source_config": dict(SOURCE_CONFIG),
-                   "seed_completed_at": CUTOFF}
+                   "seed_completed_at": CUTOFF, "seeded_identity_config": aq.identity_config(SOURCE_CONFIG)}
         if cutoff is not None:
             control["launch_cutoff_utc"] = cutoff
         db[aq.CONTROL_COLLECTION].insert_one(control)
@@ -634,7 +634,8 @@ def test_admin_cli_activation_guards(capsys):
     # Preflight fails (not seeded, no committed batches) -> refused, nothing written.
     rc = admin_cli.main(["activate", "--cutoff", "2026-11-01T00:00:00+08:00", "--commit"], db_factory=factory, now_fn=now)
     assert rc == 2 and aq.launch_cutoff(aq.get_control(w.db)) is None
-    w.db[aq.CONTROL_COLLECTION].update_one({"_id": aq.CONTROL_ID}, {"$set": {"seed_completed_at": NOW}})
+    w.db[aq.CONTROL_COLLECTION].update_one({"_id": aq.CONTROL_ID}, {"$set": {
+        "seed_completed_at": NOW, "seeded_identity_config": aq.identity_config(SOURCE_CONFIG)}})
     w.upload([w.row("X", "acct", NOW)])
     # Dry run writes nothing.
     assert admin_cli.main(["activate", "--cutoff", "2026-11-01T00:00:00+08:00"], db_factory=factory, now_fn=now) == 0
@@ -686,3 +687,45 @@ def test_large_upload_is_extracted_in_budgeted_resumable_slices():
     assert batch["welcome_evidence_summary"]["recorded"] == 7 and batch.get("welcome_evidence_extracted_at")
     assert w.db[aq.EVIDENCE_COLLECTION].count_documents({}) == 7
     assert aq.extract_committed_batches(w.db, config=SOURCE_CONFIG, now_utc=NOW)["rows"] == 0
+
+
+def test_future_redemption_timestamp_goes_to_review(monkeypatch, _scheduler):
+    w = World()
+    w.join(1, 181)
+    w.welcome_code(181, "WELC181")
+    w.upload([w.row("WELC181", "acct181", NOW + timedelta(days=20))])
+    run(w, monkeypatch)
+    assert ev_status(w) == [(aq.EV_REVIEW, "redeemed_at_in_future")]
+    assert w.qualified() == [] and _scheduler["tier"] == []
+
+
+def test_requeue_re_resolves_recipient_after_data_fix(monkeypatch):
+    w = World()
+    w.join(1, 182)
+    w.welcome_code(182, "WELC182")
+    w.db.new_joiner_claims.insert_one({"uid": 99, "code": "WELC182"})  # bad legacy row -> ambiguous
+    w.upload([w.row("WELC182", "acct182", datetime(2026, 10, 5, tzinfo=timezone.utc))])
+    run(w, monkeypatch)
+    assert ev_status(w) == [(aq.EV_REVIEW, "ambiguous_recipient")]
+    w.db.new_joiner_claims.delete_many({"uid": 99})  # operator fixes the source data
+    ev = w.db[aq.EVIDENCE_COLLECTION].find_one()
+    assert aq.requeue_evidence(w.db, evidence_id=ev["_id"], now_utc=NOW) is True
+    run(w, monkeypatch)
+    assert [d["invitee_id"] for d in w.qualified()] == [182]
+
+
+def test_account_identity_config_is_frozen_after_seeding():
+    w = World(mode=aq.MODE_PAUSED)
+    base = ["configure-source", "--code-column", "coupon_code", "--account-column", "account",
+            "--redeemed-at-column", "coupon_redeem_time", "--status-column", "redeem_status",
+            "--success-values", "success", "--commit"]
+    factory = lambda: w.db  # noqa: E731
+    assert admin_cli.main(base + ["--account-namespace", "othertenant"], db_factory=factory, now_fn=lambda: NOW) == 2
+    assert aq.get_control(w.db)["source_config"]["account_namespace"] == "advantplay"
+    # Non-identity fields (e.g. success values) may still be corrected.
+    assert admin_cli.main(base + ["--account-namespace", "advantplay", "--success-values", "success,ok"],
+                          db_factory=factory, now_fn=lambda: NOW) == 0
+    # And a changed identity can never pass preflight against the seeded registry.
+    w.db[aq.CONTROL_COLLECTION].update_one({"_id": aq.CONTROL_ID},
+                                           {"$set": {"source_config.account_namespace": "othertenant"}})
+    assert admin_cli.preflight_report(w.db, now_utc=NOW)["identity_config_matches_seed"] is False

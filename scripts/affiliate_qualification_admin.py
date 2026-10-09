@@ -83,12 +83,15 @@ def preflight_report(db, *, now_utc: datetime) -> dict:
         "indexes": aq.index_readiness(db),
         "integration": aq.integration_readiness(db, control.get("source_config")),
         "migration_seeded": bool(control.get("seed_completed_at")),
+        "identity_config_matches_seed": bool(control.get("seed_completed_at"))
+        and control.get("seeded_identity_config") == aq.identity_config(control.get("source_config")),
         "consistency": aq.consistency_report(db, now_utc=now_utc),
     }
     report["ok"] = bool(
         report["indexes"]["ok"]
         and report["integration"]["ok"]
         and report["migration_seeded"]
+        and report["identity_config_matches_seed"]
         and report["consistency"]["ok"]
     )
     return report
@@ -194,6 +197,14 @@ def main(argv=None, *, db_factory=None, read_only_db_factory=None, now_fn=_now) 
         problems = aq.validate_source_config(source_config)
         if problems:
             print(f"refused: invalid source config {problems}", file=sys.stderr)
+            return 2
+        frozen = control.get("seeded_identity_config")
+        if (control.get("seed_completed_at") or cutoff is not None) and aq.identity_config(source_config) != (
+            frozen if frozen is not None else aq.identity_config(control.get("source_config"))
+        ):
+            print("refused: account identity (account/code column, namespace) is frozen once the registry is "
+                  "seeded or the rule launched; changing it would let credited accounts qualify again",
+                  file=sys.stderr)
             return 2
         return _apply(
             db, args,
