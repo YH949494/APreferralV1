@@ -697,10 +697,14 @@ def acquire_scheduler_lock(name: str, ttl_seconds: int) -> tuple[bool, dict | No
                 "$or": [
                     {"expireAt": {"$lte": now}},
                     {"expireAt": {"$exists": False}},
+                    {"released": True},
                 ],
             },
             {
-                "$set": {"expireAt": expires_at, "owner": INSTANCE_ID, "updatedAt": now, "token": token},
+                "$set": {
+                    "expireAt": expires_at, "owner": INSTANCE_ID, "updatedAt": now,
+                    "token": token, "released": False,
+                },
                 "$setOnInsert": {"createdAt": now},
             },
             upsert=True,
@@ -713,12 +717,14 @@ def acquire_scheduler_lock(name: str, ttl_seconds: int) -> tuple[bool, dict | No
 
 
 def release_scheduler_lock(name: str, lock_doc: dict | None) -> bool:
-    """Expire the lease now, only if this acquisition still holds it.
+    """Mark the lease released, only if this acquisition still holds it.
 
     Filters on the acquisition token, so a run whose lease already expired (and
-    was taken over) matches nothing and cannot free the newer run's lock. The
-    doc is kept (``updatedAt`` heartbeat feeds runtime_status); the TTL index
-    reaps it later. Never raises: the lease expires on its own anyway.
+    was taken over) matches nothing and cannot free the newer run's lock.
+    ``expireAt`` is left alone on purpose: the TTL index keeps the doc until the
+    original lease end, so the ``updatedAt`` heartbeat that runtime_status reads
+    survives exactly as before. ``acquire_scheduler_lock`` treats
+    ``released: True`` as acquirable. Never raises: the lease expires anyway.
     """
     token = (lock_doc or {}).get("token")
     if not token:
@@ -726,7 +732,7 @@ def release_scheduler_lock(name: str, lock_doc: dict | None) -> bool:
     try:
         res = scheduler_locks_collection.update_one(
             {"_id": name, "token": token},
-            {"$set": {"expireAt": datetime.now(timezone.utc)}},
+            {"$set": {"released": True}},
         )
         return bool(res.modified_count)
     except Exception as exc:

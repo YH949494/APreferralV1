@@ -23,15 +23,17 @@ LOCK = "tick_5min"
 
 
 @pytest.fixture(autouse=True)
-def _clean():
-    main.scheduler_locks_collection.delete_many({})
+def _clean(monkeypatch):
+    # Own collection: the full suite shares `main` with modules that swap its db.
+    coll = mongomock.MongoClient()["t"]["scheduler_locks"]
+    coll.create_index("expireAt", expireAfterSeconds=0)
+    monkeypatch.setattr(main, "scheduler_locks_collection", coll)
     yield
-    main.scheduler_locks_collection.delete_many({})
 
 
 def _held():
     doc = main.scheduler_locks_collection.find_one({"_id": LOCK})
-    if doc is None:  # mongomock reaps TTL-expired docs on read, like Mongo's TTL monitor
+    if doc is None or doc.get("released"):
         return False
     exp = doc["expireAt"]
     if exp.tzinfo is None:
@@ -97,14 +99,18 @@ def test_stale_owner_cannot_release_newer_lock():
     assert not _held()
 
 
-def test_release_without_token_is_noop_and_only_touches_expireAt():
+def test_release_keeps_doc_and_heartbeat_for_runtime_status():
+    ok, doc = main.acquire_scheduler_lock(LOCK, 900)
+    assert main.release_scheduler_lock(LOCK, doc) is True
+    kept = main.scheduler_locks_collection.find_one({"_id": LOCK})
+    # TTL (expireAt) untouched -> doc not reaped early; updatedAt still readable
+    assert kept["updatedAt"] and kept["expireAt"] == main.scheduler_locks_collection.find_one({"_id": LOCK})["expireAt"]
+    assert kept["expireAt"].replace(tzinfo=timezone.utc) > datetime.now(timezone.utc) + timedelta(seconds=800)
+
+
+def test_release_without_token_is_noop():
     assert main.release_scheduler_lock(LOCK, None) is False
-    coll = mock.MagicMock()
-    with mock.patch.object(main, "scheduler_locks_collection", coll):
-        main.release_scheduler_lock(LOCK, {"token": "t1"})
-    filt, upd = coll.update_one.call_args.args
-    assert filt == {"_id": LOCK, "token": "t1"}
-    assert list(upd) == ["$set"] and list(upd["$set"]) == ["expireAt"]  # updatedAt heartbeat kept
+    assert main.release_scheduler_lock(LOCK, {}) is False
 
 
 def test_release_failure_never_raises():
