@@ -11254,13 +11254,50 @@
     var params = aqpQuery();
     if (refresh) params.push("refresh=1");
     statePanel("aqp-body", "loading", "Running read-only shadow validation… (scans committed redemption uploads; may take a few seconds)");
-    ["aqp-status", "aqp-hist-cards", "aqp-launch-cards", "aqp-reasons", "aqp-review", "aqp-hist-note", "aqp-launch-note"].forEach(function (id) { $("#" + id).innerHTML = ""; });
+    ["aqp-status", "aqp-source-note", "aqp-source-cards", "aqp-hist-cards", "aqp-launch-cards", "aqp-reasons", "aqp-review", "aqp-hist-note", "aqp-launch-note"].forEach(function (id) { $("#" + id).innerHTML = ""; });
     api("/api/admin/dashboard/affiliate/qualification-preview" + (params.length ? "?" + params.join("&") : ""))
       .then(function (d) { renderAffiliateQualPreview(d); })
       .catch(function (e) {
         setMeta("Failed to load");
         statePanel("aqp-body", "banner error", "Failed to run preview: " + e.message);
       });
+  }
+
+  // Evidence source health. Stale / never-synced evidence is shown as
+  // incomplete or unavailable — never as zero redemptions.
+  function renderAqpSource(src, ev) {
+    var sync = src.sync || null;
+    var sb = src.success_basis || {};
+    var notes = ["Source: <strong>" + esc(src.label || src.name || "—") + "</strong>."];
+    if (sync) {
+      notes.push("Last successful sync: <strong>" + (sync.last_success_at ? esc(dt(sync.last_success_at)) : "never") + "</strong>" +
+        (sync.last_error ? " · last error: " + esc(sync.last_error) : "") + ".");
+      notes.push("Coverage (redeem time, " + esc(sync.coverage_timezone || "GMT+8") + "): " +
+        (sync.coverage_start ? esc(sync.coverage_start.replace("T", " ")) + " → " + esc(sync.coverage_end.replace("T", " ")) : "—") +
+        " · latest UIM batch committed " + (sync.latest_batch_committed_at ? esc(dt(sync.latest_batch_committed_at)) : "—") + ".");
+    }
+    if (sb.basis === "source_contract_successful_only") {
+      notes.push(sb.attested ? "Success basis: UIM export attested successful-only by " + esc(sb.attested_by) + " (" + esc(sb.reference) + ")."
+        : '<span class="tag heuristic">Success basis ASSUMED for this preview — not attested by the data owner.</span>');
+    }
+    var incomplete = (src.evidence_incomplete || []).length;
+    var banner = src.blocked ? '<div class="banner error">Evidence unavailable — new-rule figures are not computed (this is not zero).</div>'
+      : incomplete ? '<div class="banner warn">Evidence incomplete (' + esc(src.evidence_incomplete.join(", ")) + ') — figures below may be understated; they are not final.</div>' : "";
+    $("#aqp-source-note").innerHTML = banner + notes.join(" ");
+    var na = !!src.blocked;
+    $("#aqp-source-cards").innerHTML =
+      kpiCard("Rows received", ev.rows_received, "all committed rows read", na) +
+      kpiCard("Matched to a Welcome recipient", ev.matched_to_one_welcome_recipient, null, na) +
+      kpiCard("Unmatched (not a Welcome code)", ev.unmatched_not_welcome, null, na) +
+      kpiCard("Requiring review", ev.requiring_review, "all time", na) +
+      kpiCard("Would qualify", ev.would_qualify, "all time, lifetime Account ID dedupe", na) +
+      kpiCard("Duplicate Account IDs excluded", ev.duplicate_account_excluded, "all time", na);
+    var rr = ev.review_reasons || {};
+    var rk = Object.keys(rr);
+    if (rk.length) {
+      $("#aqp-source-cards").innerHTML += '<div class="note" style="grid-column:1/-1;">Review reasons (all time): ' +
+        rk.map(function (k) { return esc(aqpReasonLabel(k)) + " " + fmt(rr[k]); }).join(" · ") + "</div>";
+    }
   }
 
   function renderAffiliateQualPreview(d) {
@@ -11277,6 +11314,7 @@
       '<br>Preview writes nothing.' + (src.using_preview_mapping ? " Using an <strong>unsaved preview mapping</strong>." : "") +
       (src.blocked ? '<br><strong>BLOCKER:</strong> ' + esc(src.blocker) : "") + '</div>';
     $("#aqp-status").innerHTML = status;
+    renderAqpSource(src, d.evidence_summary || {});
 
     var t = d.totals || {};
     $("#aqp-hist-note").innerHTML = "Period: <strong>" + esc(p.label) + "</strong> (" + esc((p.start_kl || "").replace("T", " ").slice(0, 16)) +

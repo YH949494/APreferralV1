@@ -1099,9 +1099,15 @@
             <input class="filter-input aqp-map" data-field="source_timezone" placeholder="source timezone (Asia/Kuala_Lumpur)" />
             <input class="filter-input aqp-map" data-field="account_namespace" placeholder="account namespace / provider" />
             <input class="filter-input aqp-map" data-field="campaign_ids" placeholder="Welcome campaign ids (optional)" />
+            <select class="filter-input aqp-map" data-field="source"><option value="">source: saved</option><option value="databot_uim">Databot UIM imports</option><option value="marketing_raw_data">Marketing uploads</option></select>
+            <select class="filter-input aqp-map" data-field="success_basis"><option value="">success basis: saved</option><option value="source_contract_successful_only">Databot: assume successful-only export (preview only)</option></select>
+            <select class="filter-input aqp-map" data-field="legacy_time_basis"><option value="">legacy redeem times: saved</option><option value="review">legacy times → review</option><option value="naive_wallclock">legacy times = naive wall clock</option></select>
           </div>
         </details>
         <div id="aqp-status"></div>
+        <div class="section-title">Redemption evidence source</div>
+        <div class="note" id="aqp-source-note"></div>
+        <div class="card-grid" id="aqp-source-cards"></div>
         <div class="section-title">Historical comparison — preview period</div>
         <div class="note" id="aqp-hist-note"></div>
         <div class="card-grid" id="aqp-hist-cards"></div>

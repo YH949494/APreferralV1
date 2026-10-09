@@ -81,7 +81,7 @@ def preflight_report(db, *, now_utc: datetime) -> dict:
     control = aq.get_control(db) or {}
     report = {
         "indexes": aq.index_readiness(db),
-        "integration": aq.integration_readiness(db, control.get("source_config")),
+        "integration": aq.integration_readiness(db, control.get("source_config"), now_utc=now_utc),
         "migration_seeded": bool(control.get("seed_completed_at")),
         "identity_config_matches_seed": bool(control.get("seed_completed_at"))
         and control.get("seeded_identity_config") == aq.identity_config(control.get("source_config")),
@@ -148,6 +148,27 @@ def main(argv=None, *, db_factory=None, read_only_db_factory=None, now_fn=_now) 
     cfg.add_argument("--unlinked-account-policy", choices=[aq.UNLINKED_POLICY_ACCEPT, aq.UNLINKED_POLICY_REVIEW],
                      default=aq.UNLINKED_POLICY_ACCEPT)
 
+    dcfg = sub.add_parser(
+        "configure-databot-source",
+        help="use Databot's committed UIM imports (synced by uim_redemption_sync) as the redemption source",
+    )
+    dcfg.add_argument("--account-namespace", required=True, help="provider/tenant of the UIM gaming accounts")
+    dcfg.add_argument("--source-timezone", default="Asia/Kuala_Lumpur",
+                      help="timezone of UIM's naive Coupon Redeem Time wall clock")
+    dcfg.add_argument("--attested-by", required=True,
+                      help="data owner attesting the UIM export lists SUCCESSFUL redemptions only")
+    dcfg.add_argument("--attestation-ref", required=True, help="where that attestation is recorded (ticket/email)")
+    dcfg.add_argument("--legacy-time-basis", choices=[aq.LEGACY_TIME_REVIEW, aq.LEGACY_TIME_NAIVE],
+                      default=aq.LEGACY_TIME_REVIEW,
+                      help="rows imported before Databot recorded time provenance: review (default) or "
+                           "naive_wallclock (attested: Coupon Redeem Time is naive wall clock in --source-timezone)")
+    dcfg.add_argument("--campaign-ids", default=None, help="comma-separated UIM campaign labels (optional filter)")
+    dcfg.add_argument("--unlinked-account-policy", choices=[aq.UNLINKED_POLICY_ACCEPT, aq.UNLINKED_POLICY_REVIEW],
+                      default=aq.UNLINKED_POLICY_ACCEPT)
+    sync = sub.add_parser("sync-evidence", help="one Databot evidence sync pass (writes only uim_redemption_*)")
+    sync.add_argument("--max-rows", type=int, default=5000)
+    sub.add_parser("sync-status")
+
     act = sub.add_parser("activate")
     act.add_argument("--cutoff", required=True, help="ISO-8601 with offset")
     pause = sub.add_parser("pause")
@@ -159,11 +180,18 @@ def main(argv=None, *, db_factory=None, read_only_db_factory=None, now_fn=_now) 
     vb = sub.add_parser("void-batch")
     vb.add_argument("--upload-batch-id", required=True)
     vb.add_argument("--reason", required=True)
-    for p in (cfg, act, pause, sub.choices["resume"], sub.choices["cancel-scheduled"], rq, vb):
+    for p in (cfg, dcfg, sync, act, pause, sub.choices["resume"], sub.choices["cancel-scheduled"], rq, vb):
         p.add_argument("--commit", action="store_true", help="write (default: dry run)")
         p.add_argument("--operator", default=os.environ.get("USER") or "unknown")
     args = parser.parse_args(argv)
     now_utc = now_fn()
+
+    if args.cmd == "sync-status":
+        import uim_redemption_sync
+
+        db = (read_only_db_factory or _read_only_db)()
+        print(json.dumps(uim_redemption_sync.sync_health(db, now_utc=now_utc), indent=2, default=str))
+        return 0
 
     if args.cmd in ("status", "preflight"):
         db = (read_only_db_factory or _read_only_db)()
@@ -213,6 +241,60 @@ def main(argv=None, *, db_factory=None, read_only_db_factory=None, now_fn=_now) 
              "$setOnInsert": {"mode": aq.MODE_DISABLED, "rule_version": aq.RULE_VERSION, "created_at": now_utc}},
             upsert=True,
         )
+
+    if args.cmd == "configure-databot-source":
+        if mode == aq.MODE_ACTIVE:
+            print("refused: pause the rule before changing its source", file=sys.stderr)
+            return 2
+        source_config = {
+            "source": aq.SOURCE_DATABOT_UIM,
+            **aq.DATABOT_FIXED_COLUMNS,
+            "namespace_column": None,
+            "account_namespace": aq.normalize_namespace(args.account_namespace),
+            "source_timezone": args.source_timezone,
+            "success_basis": aq.SUCCESS_BASIS_SOURCE_CONTRACT,
+            "success_attestation": {"by": args.attested_by, "reference": args.attestation_ref,
+                                    "recorded_at": now_utc, "recorded_by": args.operator},
+            "legacy_time_basis": args.legacy_time_basis,
+            "campaign_ids": [c.strip() for c in (args.campaign_ids or "").split(",") if c.strip()],
+            "configured_at": now_utc,
+            "configured_by": args.operator,
+        }
+        problems = aq.validate_source_config(source_config)
+        if problems:
+            print(f"refused: invalid source config {problems}", file=sys.stderr)
+            return 2
+        frozen = control.get("seeded_identity_config")
+        if (control.get("seed_completed_at") or cutoff is not None) and aq.identity_config(source_config) != (
+            frozen if frozen is not None else aq.identity_config(control.get("source_config"))
+        ):
+            print("refused: account identity is frozen once the registry is seeded or the rule launched",
+                  file=sys.stderr)
+            return 2
+        return _apply(
+            db, args,
+            {"$set": {"source_config": source_config, "unlinked_account_policy": args.unlinked_account_policy,
+                      "updated_at": now_utc},
+             "$setOnInsert": {"mode": aq.MODE_DISABLED, "rule_version": aq.RULE_VERSION, "created_at": now_utc}},
+            upsert=True,
+        )
+
+    if args.cmd == "sync-evidence":
+        import uim_redemption_sync
+
+        if not args.commit:
+            print(json.dumps({"dry_run": True, "sync": uim_redemption_sync.sync_health(db, now_utc=now_utc)},
+                             indent=2, default=str))
+            return 0
+        cfg = uim_redemption_sync.feed_config()
+        try:
+            fetch = uim_redemption_sync.http_fetcher(cfg["base_url"], cfg["token"], timeout=cfg["timeout"])
+        except uim_redemption_sync.FeedUnavailable as exc:
+            print(f"refused: {exc}", file=sys.stderr)
+            return 2
+        result = uim_redemption_sync.sync_once(db, fetch=fetch, now_utc=now_utc, max_rows=args.max_rows)
+        print(json.dumps(result, indent=2, default=str))
+        return 0 if result.get("ok") else 1
 
     if args.cmd in ("activate", "resume"):
         if args.cmd == "activate" and cutoff is not None:
