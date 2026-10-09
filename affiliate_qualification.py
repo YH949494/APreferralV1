@@ -534,16 +534,23 @@ def integration_readiness(db, config: dict | None, *, sample_batches: int = 3, n
 # Code -> original recipient
 # ---------------------------------------------------------------------------
 
-def decide_recipient(*, code: str, pool_row: dict | None, ledger_code_for, claim_uids, other_pool_exists: bool) -> dict:
+def decide_recipient(*, code: str, pool_row: dict | None, ledger_for, claims, other_pool_exists: bool) -> dict:
     """Map a redeemed code to its ORIGINAL Welcome recipient (pure decision,
     shared by live per-code lookups and the bulk shadow preview).
 
     Sources: the canonical WELCOME pool (``voucher_pools`` issued_to_user_id,
     cross-checked against the user's ``affiliate_ledger`` WELCOME row via
-    ``ledger_code_for(uid)``) and the legacy ``new_joiner_claims`` uids.
+    ``ledger_for(uid)``) and the legacy ``new_joiner_claims`` rows.
     Any disagreement is ``ambiguous``.
     """
     recipients: dict[int, set] = {}
+    issuance_times: list[tuple[datetime, str]] = []
+
+    def issued(value, source):
+        when = _aware_utc(value)
+        if when is not None:
+            issuance_times.append((when, source))
+
     if pool_row:
         raw_uid = pool_row.get("issued_to_user_id")
         if raw_uid in (None, ""):
@@ -555,14 +562,19 @@ def decide_recipient(*, code: str, pool_row: dict | None, ledger_code_for, claim
         except (TypeError, ValueError):
             return {"status": "ambiguous", "detail": "unparseable_recipient"}
         recipients.setdefault(uid, set()).add("voucher_pools")
-        ledger_code = ledger_code_for(uid)
+        issued(pool_row.get("issued_at"), "voucher_pools.issued_at")
+        ledger = ledger_for(uid) or {}
+        ledger_code = ledger.get("voucher_code")
         if ledger_code and ledger_code != code:
             return {"status": "ambiguous", "detail": "ledger_code_mismatch"}
-    for raw in claim_uids:
+        if ledger_code == code:
+            issued(ledger.get("issued_at"), "affiliate_ledger.issued_at")
+    for claim in claims:
         try:
-            recipients.setdefault(int(raw), set()).add("new_joiner_claims")
+            recipients.setdefault(int(claim.get("uid")), set()).add("new_joiner_claims")
         except (TypeError, ValueError):
             return {"status": "ambiguous", "detail": "unparseable_recipient"}
+        issued(claim.get("claimed_at"), "new_joiner_claims.claimed_at")
     if not recipients:
         return {"status": "non_welcome" if other_pool_exists else "unknown"}
     if len(recipients) > 1:
@@ -570,7 +582,11 @@ def decide_recipient(*, code: str, pool_row: dict | None, ledger_code_for, claim
     if other_pool_exists:
         return {"status": "ambiguous", "detail": "code_in_multiple_pools"}
     uid, sources = next(iter(recipients.items()))
-    return {"status": "ok", "user_id": uid, "sources": sorted(sources)}
+    # A matching issuance/claim timestamp proves when this recipient first
+    # held the code. Generic created_at/updated_at fields are not issuance.
+    return {"status": "ok", "user_id": uid, "sources": sorted(sources),
+            "issued_at": min(t for t, _ in issuance_times) if issuance_times else None,
+            "issuance_time_sources": sorted({s for _, s in issuance_times})}
 
 
 def resolve_welcome_recipient(db, code: str) -> dict:
@@ -578,14 +594,28 @@ def resolve_welcome_recipient(db, code: str) -> dict:
     return decide_recipient(
         code=code,
         pool_row=db.voucher_pools.find_one({"pool_id": WELCOME_POOL_ID, "code": code}),
-        ledger_code_for=lambda uid: (
-            db.affiliate_ledger.find_one({"dedup_key": f"WELCOME:{uid}"}, {"voucher_code": 1}) or {}
-        ).get("voucher_code"),
-        claim_uids=[c.get("uid") for c in db.new_joiner_claims.find({"code": code}, {"uid": 1})],
+        ledger_for=lambda uid: db.affiliate_ledger.find_one(
+            {"dedup_key": f"WELCOME:{uid}"}, {"voucher_code": 1, "issued_at": 1}),
+        claims=list(db.new_joiner_claims.find({"code": code}, {"uid": 1, "claimed_at": 1})),
         other_pool_exists=bool(
             db.voucher_pools.find_one({"code": code, "pool_id": {"$ne": WELCOME_POOL_ID}}, {"pool_id": 1})
         ),
     )
+
+
+def welcome_issuance_problem(recipient: dict, redeemed_at: datetime | None) -> str | None:
+    """Shared, read-only chronology check for live, preview and history seeding."""
+    if recipient.get("status") != "ok":
+        return "unproven_welcome_recipient"
+    issued_at = _aware_utc(recipient.get("issued_at"))
+    if issued_at is None:
+        return "missing_welcome_issued_at"
+    when = _aware_utc(redeemed_at)
+    if when is None:
+        return "missing_redeemed_at"
+    if when < issued_at:
+        return "redemption_before_welcome_issuance"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1175,6 +1205,10 @@ def assess_evidence(evidence: dict, *, control: dict, now_utc: datetime, lookup)
     if rstatus != "ok":
         return verdict(EV_REVIEW, "ambiguous_recipient")
     invitee_id = int(recipient["user_id"])
+
+    issuance_problem = welcome_issuance_problem(recipient, redeemed_at)
+    if issuance_problem:
+        return verdict(EV_REVIEW, issuance_problem, invitee_id=invitee_id)
 
     if lookup.conflicting_record(evidence):
         return verdict(EV_REVIEW, "conflicting_redemption_records", invitee_id=invitee_id)
