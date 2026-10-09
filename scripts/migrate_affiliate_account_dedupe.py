@@ -119,20 +119,35 @@ def _redemptions_by_code(db, config: dict, welcome_codes: dict) -> dict[str, set
     """code -> {account_key | "!<reason>"} from successful, committed rows of
     the configured source. Uses the live parser (aq.parse_source_row) and the
     live identity rule (aq.build_evidence_doc), so a seeded account key is
-    byte-identical to the key live processing later computes."""
+    byte-identical to the key live processing later computes.
+
+    A later committed ``removed`` observation (Databot stale deletion)
+    cancels that code+account, exactly as live/preview route it to review
+    (``source_row_removed_by_later_import``): it is never seeded, and stays
+    out even if a later batch re-observes it."""
     out: dict[str, set] = defaultdict(set)
+    removed: dict[str, set] = defaultdict(set)
     for _batch_id, row in aq.iter_committed_source_rows(db, config):
         obs = aq.parse_source_row(row, config)
-        if obs is None or obs.get("observation") == aq.OBS_REMOVED:
+        if obs is None:
             continue
         code = aq.normalize_code(obs["code"])
-        if not code or code not in welcome_codes or not obs["redemption_successful"]:
+        is_removal = obs.get("observation") == aq.OBS_REMOVED
+        if not code or code not in welcome_codes or not (is_removal or obs["redemption_successful"]):
             continue
         doc = aq.build_evidence_doc(
             source=aq.source_name(config), code=code, recipient={}, now_utc=datetime.now(timezone.utc),
             **{k: v for k, v in obs.items() if k != "code"},
         )
-        out[code].add(doc["account_key"] or f"!{doc['account_reason']}")
+        key = doc["account_key"] or f"!{doc['account_reason']}"
+        if is_removal:
+            removed[code].add(key)
+        else:
+            out[code].add(key)
+    for code, keys in removed.items():
+        if out.get(code, set()) & keys:
+            out[code] -= keys
+            out[code].add("!source_row_removed_by_later_import")
     return out
 
 

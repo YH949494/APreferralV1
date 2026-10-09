@@ -564,6 +564,13 @@ def build_preview(db, *, month: str | None, now_utc: datetime, source_config: di
     payload["review_cases_total"] = sum(1 for o in historical if in_period(o) and o["status"] == aq.EV_REVIEW)
     payload["source_stats"] = dict(stats)
     payload["evidence_summary"] = _evidence_summary(stats, evidences, historical, payload["source"].get("sync"))
+    if stats["truncated"]:
+        # Row cap hit: every new-rule figure above is a lower bound, not complete.
+        payload["source"]["evidence_incomplete"].append("preview_row_limit_reached")
+        payload["evidence_summary"]["truncated"] = True
+        payload["evidence_summary"]["basis"] = (
+            f"first {PREVIEW_MAX_SOURCE_ROWS:,} committed rows only (row limit reached) — figures are lower bounds"
+        )
     return payload
 
 

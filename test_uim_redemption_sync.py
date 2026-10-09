@@ -518,3 +518,34 @@ def test_configure_databot_source_keeps_rule_disabled(capsys):
     assert aq.validate_source_config(control["source_config"]) == []
     assert control["source_config"]["success_attestation"]["reference"] == "OPS-1234"
     assert not aq.new_rule_active(control, NOW) and aq.legacy_award_allowed(control, NOW)
+
+
+def test_migration_never_seeds_a_removed_redemption():
+    w = disabled_world()
+    w.welcome_code(11, "WELC11")
+    w.welcome_code(12, "WELC12")
+    feed = FakeFeed()
+    feed.add_batch([urow("WELC11", "acctA", "2026-10-05 10:00:00"), urow("WELC12", "acctB", "2026-10-05 10:00:00")])
+    feed.add_batch([urow("WELC11", "acctA", "2026-10-05 10:00:00", observation="deleted")])
+    feed.add_batch([urow("WELC11", "acctA", "2026-10-05 10:00:00")])  # re-observed later: still not seeded
+    sync(w, feed)
+    by_code = migration._redemptions_by_code(w.db, DATABOT_CONFIG, migration._welcome_codes(w.db))
+    assert by_code == {"WELC11": {"!source_row_removed_by_later_import"}, "WELC12": {"advantplay:acctB"}}
+    # Same verdict as the preview for that redemption.
+    reasons = preview(w.db)["evidence_summary"]["review_reasons"]
+    assert reasons == {"source_row_removed_by_later_import": 1}
+
+
+def test_preview_row_limit_is_reported_as_incomplete(monkeypatch):
+    w = disabled_world()
+    for i in range(3):
+        w.join(1, 11 + i)
+        w.welcome_code(11 + i, f"WELC{11 + i}")
+    feed = FakeFeed()
+    feed.add_batch([urow(f"WELC{11 + i}", f"acct{i}", "2026-10-05 10:00:00") for i in range(3)])
+    sync(w, feed)
+    monkeypatch.setattr(aqp, "PREVIEW_MAX_SOURCE_ROWS", 2)
+    out = preview(w.db)
+    assert "preview_row_limit_reached" in out["source"]["evidence_incomplete"]
+    assert out["evidence_summary"]["truncated"] is True and out["evidence_summary"]["would_qualify"] == 2
+    assert out["source"]["blocked"] is False
