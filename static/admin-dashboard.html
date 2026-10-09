@@ -1079,6 +1079,44 @@
       </section>
 
       <!-- PENDING AFFILIATE REWARDS VIEW -->
+      <!-- AFFILIATE QUALIFICATION PREVIEW (read-only shadow of welcome_redemption_v1) -->
+      <section id="view-affiliateQualPreview" class="hidden">
+        <div style="margin-bottom:12px;"><span class="tag heuristic" style="font-size:12px;padding:4px 12px;">READ-ONLY SHADOW PREVIEW — validates the Welcome-redemption rule against committed redemption data. Writes nothing: no qualification events, no Account ID reservations, no XP, no reward entitlements, no cutoff. Live qualification is unchanged until explicit activation.</span></div>
+        <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:12px;">
+          <label class="note" for="aqp-month" style="margin:0;">Preview period (GMT+8 month)</label>
+          <input class="filter-input" id="aqp-month" type="month" style="width:auto;margin:0;" />
+          <button class="btn" id="aqp-run-btn" type="button">Run preview</button>
+        </div>
+        <details style="margin-bottom:16px;">
+          <summary class="note" style="cursor:pointer;">Redemption source mapping (preview only — not saved)</summary>
+          <div class="note">Leave blank to use the saved source configuration. Values here are only applied to this preview; saving still requires <code>scripts/affiliate_qualification_admin.py configure-source</code>.</div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px;margin-top:8px;">
+            <input class="filter-input aqp-map" data-field="code_column" placeholder="code column (e.g. coupon_code)" />
+            <input class="filter-input aqp-map" data-field="account_column" placeholder="account column (e.g. account)" />
+            <input class="filter-input aqp-map" data-field="redeemed_at_column" placeholder="redemption time column" />
+            <input class="filter-input aqp-map" data-field="status_column" placeholder="redemption status column" />
+            <input class="filter-input aqp-map" data-field="success_values" placeholder="success values (comma-separated)" />
+            <input class="filter-input aqp-map" data-field="source_timezone" placeholder="source timezone (Asia/Kuala_Lumpur)" />
+            <input class="filter-input aqp-map" data-field="account_namespace" placeholder="account namespace / provider" />
+            <input class="filter-input aqp-map" data-field="campaign_ids" placeholder="Welcome campaign ids (optional)" />
+          </div>
+        </details>
+        <div id="aqp-status"></div>
+        <div class="section-title">Historical comparison — preview period</div>
+        <div class="note" id="aqp-hist-note"></div>
+        <div class="card-grid" id="aqp-hist-cards"></div>
+        <div class="section-title">New qualifications eligible after launch — not period-bound</div>
+        <div class="note" id="aqp-launch-note"></div>
+        <div class="card-grid" id="aqp-launch-cards"></div>
+        <div class="section-title">Per affiliate</div>
+        <input class="filter-input" id="aqp-filter" placeholder="Filter by affiliate user id…" />
+        <div id="aqp-body"></div>
+        <div class="section-title">Excluded and review outcomes — preview period</div>
+        <div id="aqp-reasons"></div>
+        <div class="section-title">Cases requiring review — preview period</div>
+        <div id="aqp-review"></div>
+      </section>
+
       <section id="view-affiliatePending" class="hidden">
         <div style="margin-bottom:16px;"><span class="tag heuristic" style="font-size:12px;padding:4px 12px;">LIVE CONTROL — approve/reject issues or blocks affiliate reward vouchers immediately. Migrated from legacy MiniApp admin panel; same backend endpoints.</span></div>
         <div class="controls" style="margin-bottom:16px;">

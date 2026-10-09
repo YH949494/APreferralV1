@@ -7,6 +7,7 @@ is enforced by the index, not by a pre-check.
 from __future__ import annotations
 
 import os
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 import mongomock
@@ -729,3 +730,177 @@ def test_account_identity_config_is_frozen_after_seeding():
     w.db[aq.CONTROL_COLLECTION].update_one({"_id": aq.CONTROL_ID},
                                            {"$set": {"source_config.account_namespace": "othertenant"}})
     assert admin_cli.preflight_report(w.db, now_utc=NOW)["identity_config_matches_seed"] is False
+
+
+# Admin shadow preview ----------------------------------------------------------
+
+import affiliate_qualification_preview as aqp  # noqa: E402
+
+_WRITE_METHODS = {
+    "insert_one", "insert_many", "update_one", "update_many", "replace_one", "delete_one", "delete_many",
+    "find_one_and_update", "find_one_and_replace", "find_one_and_delete", "bulk_write", "create_index",
+    "create_indexes", "drop", "drop_index", "drop_indexes", "rename",
+}
+
+
+class _ReadOnlyCollection:
+    def __init__(self, col):
+        self._col = col
+
+    def __getattr__(self, name):
+        if name in _WRITE_METHODS:
+            raise AssertionError(f"preview attempted a write: {self._col.name}.{name}")
+        return getattr(self._col, name)
+
+
+class _ReadOnlyDb:
+    """Any write through this handle fails the test."""
+
+    def __init__(self, db):
+        self._db = db
+
+    def __getitem__(self, name):
+        return _ReadOnlyCollection(self._db[name])
+
+    def __getattr__(self, name):
+        return _ReadOnlyCollection(getattr(self._db, name))
+
+
+def _snapshot(db):
+    return {name: sorted(map(str, db[name].find())) for name in db.list_collection_names()}
+
+
+def _preview_world():
+    w = World()
+    oct5 = datetime(2026, 10, 5, tzinfo=timezone.utc)
+    for invitee in (11, 12, 13, 14, 15, 16):
+        w.join(1, invitee)
+    w.join(2, 21)
+    for invitee in (11, 12, 14, 16, 21):
+        w.welcome_code(invitee, f"WELC{invitee}")
+    w.user(16, linked=["someOtherAcct"], created=datetime(2026, 10, 2, tzinfo=timezone.utc))
+    # Legacy qualification in the period with no redemption behind it.
+    w.db.qualified_events.insert_one({"invitee_id": 15, "referrer_id": 1, "qualified_at": oct5})
+    w.upload([
+        w.row("WELC11", "acctA", oct5),
+        w.row("WELC12", "acctA", oct5 + timedelta(hours=1)),        # same account -> duplicate
+        w.row("WELC14", "acct14", oct5, status="failed"),          # failed redemption
+        w.row("WELC16", "acct16", oct5),                            # UIM linkage conflict -> review
+        w.row("WELC21", "acctB", oct5),
+        w.row("NOTWELCOME", "acctZ", oct5),                         # unknown code, counted only
+    ])
+    return w
+
+
+def test_preview_is_read_only_and_reports_per_affiliate(monkeypatch):
+    w = _preview_world()
+    before = _snapshot(w.db)
+    out = aqp.build_preview(_ReadOnlyDb(w.db), month="202610", now_utc=NOW)
+    assert _snapshot(w.db) == before  # nothing written anywhere
+    assert out["read_only"] is True and out["source"]["blocked"] is False
+    assert out["period"]["month"] == "202610" and out["period"]["label"] == "October 2026 (GMT+8)"
+    rows = {r["referrer_id"]: r for r in out["affiliates"]}
+    a1 = rows["1"]
+    assert (a1["joined"], a1["current_qualified"], a1["current_qualified_without_redemption"]) == (6, 1, 1)
+    assert a1["historical"] == {"would_qualify": 1, "duplicate_account_excluded": 1, "review": 1,
+                                "rejected": 1, "awaiting_redemption": 3}
+    assert a1["at_launch"] == {"eligible": 1, "duplicate_account_excluded": 1, "already_qualified": 0, "review": 1}
+    assert rows["2"]["at_launch"]["eligible"] == 1
+    assert out["source_stats"]["unknown_code"] == 1
+    assert out["review_cases"] == [{
+        "referrer_id": "1", "invitee_id": 16, "reason": "account_not_linked_to_invitee",
+        "redeemed_at": "2026-10-05T00:00:00+00:00", "account": aq.mask_value("advantplay:acct16"),
+        "code": aq.mask_value("WELC16"),
+    }]
+    assert "acctA" not in str(out) and "WELC11" not in str(out)  # codes / accounts masked
+
+
+def test_preview_after_launch_matches_live_processing(monkeypatch):
+    w = _preview_world()
+    preview = aqp.build_preview(w.db, month="202610", now_utc=NOW)
+    run(w, monkeypatch)  # the real pipeline on the same data
+    live = Counter()
+    for q in w.db.qualified_events.find({"rule_version": aq.RULE_VERSION}):
+        live[str(q["referrer_id"])] += 1
+    shadow = {r["referrer_id"]: r["at_launch"]["eligible"] for r in preview["affiliates"] if r["at_launch"]["eligible"]}
+    assert shadow == dict(live) == {"1": 1, "2": 1}
+    statuses = Counter(e["status"] for e in w.db[aq.EVIDENCE_COLLECTION].find())
+    assert statuses[aq.EV_DUPLICATE_ACCOUNT] == preview["totals"]["at_launch_duplicate_account_excluded"] == 1
+    assert statuses[aq.EV_REVIEW] == preview["totals"]["at_launch_review"] == 1
+
+
+def test_preview_honours_seeded_and_legacy_credited_accounts():
+    w = _preview_world()
+    w.db[aq.REGISTRY_COLLECTION].insert_one({"account_key": "advantplay:acctB", "state": aq.REG_SEEDED, "invitee_id": 999})
+    out = aqp.build_preview(_ReadOnlyDb(w.db), month="202610", now_utc=NOW)
+    rows = {r["referrer_id"]: r for r in out["affiliates"]}
+    # Historical comparison ignores legacy credits; after-launch honours the real registry.
+    assert rows["2"]["historical"]["would_qualify"] == 1
+    assert rows["2"]["at_launch"] == {"eligible": 0, "duplicate_account_excluded": 1, "already_qualified": 0, "review": 0}
+
+
+def test_preview_shows_blocker_when_redemption_data_unavailable():
+    w = World(mode=aq.MODE_DISABLED, cutoff=None)
+    w.db[aq.CONTROL_COLLECTION].update_one({"_id": aq.CONTROL_ID}, {"$unset": {"source_config": ""}})
+    w.join(1, 31)
+    w.db.qualified_events.insert_one({"invitee_id": 31, "referrer_id": 1, "qualified_at": datetime(2026, 10, 5, tzinfo=timezone.utc)})
+    out = aqp.build_preview(_ReadOnlyDb(w.db), month="202610", now_utc=NOW)
+    assert out["source"]["blocked"] is True and "No authoritative Welcome redemption data" in out["source"]["blocker"]
+    assert "missing:status_column" in out["source"]["problems"]
+    assert out["affiliates"] == [{"referrer_id": "1", "joined": 1, "current_qualified": 1, "historical": None, "at_launch": None}]
+    assert out["control"]["legacy_award_allowed"] is True
+
+
+def test_preview_blocks_when_configured_columns_absent_from_uploads():
+    w = World()
+    w.db.marketing_raw_data.insert_one({"upload_batch_id": "b0", "account": "a", "coupon_code": "C",
+                                        "coupon_redeem_time": "2026-10-05 10:00:00"})  # no status column
+    w.db.marketing_upload_batches.insert_one({"upload_batch_id": "b0", "status": "completed", "uploaded_at": NOW})
+    out = aqp.build_preview(_ReadOnlyDb(w.db), month="202610", now_utc=NOW)
+    assert out["source"]["blocked"] and "column_absent_in_recent_batch:redeem_status" in out["source"]["problems"]
+
+
+def test_preview_mapping_override_is_not_persisted():
+    w = _preview_world()
+    saved = aq.get_control(w.db)["source_config"]
+    config, overridden = aqp.source_config_from_args({"status_column": "Redeem Status", "success_values": "SUCCESS, ok"}, saved)
+    assert overridden and config["success_values"] == ["success", "ok"] and config["code_column"] == "coupon_code"
+    out = aqp.build_preview(_ReadOnlyDb(w.db), month="202610", now_utc=NOW, source_config=config, config_overridden=True)
+    assert out["source"]["using_preview_mapping"] is True
+    assert aq.get_control(w.db)["source_config"] == saved
+    with pytest.raises(ValueError):
+        aqp.month_window("2026-13", now_utc=NOW)
+
+
+def _import_main():
+    import database
+    from unittest import mock
+
+    os.environ.setdefault("MONGO_URL", "mongodb://localhost:27017")
+    os.environ.setdefault("BOT_TOKEN", "123:ABC")
+    os.environ.setdefault("FLASK_SECRET_KEY", "test-secret")
+    with mock.patch.object(database, "MongoClient", lambda url: mongomock.MongoClient()):
+        import main
+    return main
+
+
+def test_preview_endpoint_is_admin_guarded_and_read_only(monkeypatch):
+    main = _import_main()
+
+    w = _preview_world()
+    before = _snapshot(w.db)
+    monkeypatch.setattr(main, "db", _ReadOnlyDb(w.db))
+    monkeypatch.setattr(main, "_utc_now", lambda: NOW)
+    main._DASHBOARD_CACHE.clear()
+    monkeypatch.setattr(main, "require_admin_from_query", lambda: (False, ("Admins only", 403)))
+    with main.app.test_request_context("/api/admin/dashboard/affiliate/qualification-preview?month=202610"):
+        body, code = main.dashboard_affiliate_qualification_preview()
+    assert code == 403
+    monkeypatch.setattr(main, "require_admin_from_query", lambda: (True, None))
+    with main.app.test_request_context("/api/admin/dashboard/affiliate/qualification-preview?month=202610"):
+        payload = main.dashboard_affiliate_qualification_preview().get_json()
+    assert payload["period"]["month"] == "202610" and payload["totals"]["at_launch_eligible"] == 2
+    with main.app.test_request_context("/api/admin/dashboard/affiliate/qualification-preview?month=bad"):
+        _, code = main.dashboard_affiliate_qualification_preview()
+    assert code == 400
+    assert _snapshot(w.db) == before

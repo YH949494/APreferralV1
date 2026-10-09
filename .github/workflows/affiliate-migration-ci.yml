@@ -28,6 +28,7 @@ on:
       - "affiliate_voucher_batches.py"
       - "affiliate_denomination_shortage.py"
       - "affiliate_qualification.py"
+      - "affiliate_qualification_preview.py"
       - "referral_rules.py"
       - "scripts/affiliate_qualification_admin.py"
       - "scripts/migrate_affiliate_account_dedupe.py"

@@ -11206,6 +11206,165 @@
     if (refreshBtn) refreshBtn.addEventListener("click", function () { loadAffiliatePools(true); });
   }
 
+  // ---------- Welcome-redemption qualification preview (read-only shadow) ----------
+  var AQP_REASON_LABELS = {
+    account_already_credited: "Gaming Account ID already credited",
+    invitee_already_qualified: "Invitee already qualified",
+    redemption_not_successful: "Redemption not successful",
+    missing_redeemed_at: "Missing redemption time",
+    redeemed_at_in_future: "Redemption time in the future",
+    missing_account: "Missing Account ID",
+    account_numeric_coerced: "Account ID stored as a number (leading zeros may be lost)",
+    invalid_account: "Invalid Account ID",
+    missing_account_namespace: "Missing account namespace",
+    non_welcome_campaign: "Not a Welcome campaign",
+    unknown_code: "Unknown code",
+    non_welcome_code: "Not a Welcome code",
+    welcome_code_not_issued: "Welcome code never issued",
+    ambiguous_recipient: "Ambiguous code recipient",
+    conflicting_redemption_records: "Same code redeemed on different accounts",
+    conflicting_source_observations: "Source rows disagree (status/time)",
+    no_referral_attribution: "No referral record (missing inviter)",
+    self_referral: "Self-referral",
+    self_referral_account: "Account linked to the inviter (self-referral)",
+    referral_after_redemption: "Referral joined after redemption",
+    invitee_preexisting_user: "Invitee existed before the referral",
+    account_not_linked_to_invitee: "Account not linked to invitee (UIM)",
+    account_linked_to_other_users: "Account linked to other Telegram users (UIM)",
+    unverified_account_ownership: "Account ownership unverified"
+  };
+
+  function aqpReasonLabel(r) { return AQP_REASON_LABELS[r] || r || "—"; }
+
+  function aqpQuery() {
+    var params = [];
+    var m = ($("#aqp-month") || {}).value || "";
+    if (m) params.push("month=" + encodeURIComponent(m.replace("-", "")));
+    Array.prototype.forEach.call(document.querySelectorAll(".aqp-map"), function (el) {
+      var v = (el.value || "").trim();
+      if (v) params.push(encodeURIComponent(el.getAttribute("data-field")) + "=" + encodeURIComponent(v));
+    });
+    return params;
+  }
+
+  function aqpNum(v) { return v === null || v === undefined ? "—" : fmt(v); }
+
+  function loadAffiliateQualPreview(refresh) {
+    setMeta("Loading…");
+    var params = aqpQuery();
+    if (refresh) params.push("refresh=1");
+    statePanel("aqp-body", "loading", "Running read-only shadow validation… (scans committed redemption uploads; may take a few seconds)");
+    ["aqp-status", "aqp-hist-cards", "aqp-launch-cards", "aqp-reasons", "aqp-review", "aqp-hist-note", "aqp-launch-note"].forEach(function (id) { $("#" + id).innerHTML = ""; });
+    api("/api/admin/dashboard/affiliate/qualification-preview" + (params.length ? "?" + params.join("&") : ""))
+      .then(function (d) { renderAffiliateQualPreview(d); })
+      .catch(function (e) {
+        setMeta("Failed to load");
+        statePanel("aqp-body", "banner error", "Failed to run preview: " + e.message);
+      });
+  }
+
+  function renderAffiliateQualPreview(d) {
+    renderMeta(d);
+    var p = d.period || {};
+    var monthInput = $("#aqp-month");
+    if (monthInput && p.month && !monthInput.value) monthInput.value = p.month.slice(0, 4) + "-" + p.month.slice(4);
+    var c = d.control || {};
+    var src = d.source || {};
+    var status = '<div class="banner ' + (src.blocked ? "error" : "warn") + '">' +
+      '<strong>Rule ' + esc(d.rule_version) + ':</strong> mode <strong>' + esc(c.mode) + '</strong> · ' +
+      (c.launch_cutoff_utc ? "cutoff " + esc(dt(c.launch_cutoff_utc)) : "no launch cutoff persisted") +
+      ' · live qualification currently uses the <strong>' + (c.legacy_award_allowed ? "legacy (check-in/channel) rule" : "Welcome-redemption rule") + '</strong>.' +
+      '<br>Preview writes nothing.' + (src.using_preview_mapping ? " Using an <strong>unsaved preview mapping</strong>." : "") +
+      (src.blocked ? '<br><strong>BLOCKER:</strong> ' + esc(src.blocker) : "") + '</div>';
+    $("#aqp-status").innerHTML = status;
+
+    var t = d.totals || {};
+    $("#aqp-hist-note").innerHTML = "Period: <strong>" + esc(p.label) + "</strong> (" + esc((p.start_kl || "").replace("T", " ").slice(0, 16)) +
+      " → " + esc((p.end_kl || "").replace("T", " ").slice(0, 16)) + "). Current = live qualified_events in the period. " +
+      "New rule = every redemption to date replayed as if the rule had always applied (lifetime Account ID dedupe from the first redemption); counted by redemption time.";
+    var blocked = !!src.blocked;
+    $("#aqp-hist-cards").innerHTML =
+      kpiCard("Joined", t.joined) +
+      kpiCard("Current qualified (live rule)", t.current_qualified) +
+      kpiCard("…of which without redemption evidence", t.current_qualified_without_redemption, null, blocked) +
+      kpiCard("Would qualify (new rule)", t.historical_would_qualify, null, blocked) +
+      kpiCard("Duplicate Account IDs excluded", t.historical_duplicate_account_excluded, null, blocked) +
+      kpiCard("Awaiting redemption evidence", t.historical_awaiting_redemption, "joined in period, no successful Welcome redemption", blocked) +
+      kpiCard("Requires review", t.historical_review, null, blocked);
+    $("#aqp-launch-note").innerHTML = "Launch assumption: " + esc(d.launch_assumption) + ". Existing qualifications and rewards are preserved; " +
+      "these invitees are not yet qualified and would be newly qualified on activation (pre-launch redemptions are credited to the launch month).";
+    $("#aqp-launch-cards").innerHTML =
+      kpiCard("Eligible after launch", t.at_launch_eligible, null, blocked) +
+      kpiCard("Duplicate Account IDs excluded", t.at_launch_duplicate_account_excluded, null, blocked) +
+      kpiCard("Already qualified (kept)", t.at_launch_already_qualified, null, blocked) +
+      kpiCard("Requires review", t.at_launch_review, null, blocked);
+
+    var rows = (d.affiliates || []).map(function (a) {
+      var h = a.historical || {}, l = a.at_launch || {};
+      var isUn = a.referrer_id === "unattributed";
+      return {
+        search: String(a.referrer_id),
+        cells: [
+          { html: isUn ? '<span class="note">Unattributed</span>' : userLink(a.referrer_id) },
+          { text: aqpNum(a.joined), num: true },
+          { text: aqpNum(a.current_qualified), num: true },
+          { text: aqpNum(h.would_qualify), num: true },
+          { text: aqpNum(h.duplicate_account_excluded), num: true },
+          { text: aqpNum(h.awaiting_redemption), num: true },
+          { text: aqpNum(h.review), num: true },
+          { text: aqpNum(l.eligible), num: true },
+          { text: aqpNum(l.duplicate_account_excluded), num: true },
+          { text: aqpNum(l.review), num: true }
+        ]
+      };
+    });
+    var head = '<thead><tr><th>Affiliate</th><th class="num">Joined</th><th class="num">Current qualified</th>' +
+      '<th class="num">New rule: would qualify</th><th class="num">Dup. Account IDs excluded</th>' +
+      '<th class="num">Awaiting redemption</th><th class="num">Review</th>' +
+      '<th class="num">After launch: eligible</th><th class="num">After launch: dup. excluded</th><th class="num">After launch: review</th></tr></thead>';
+    function renderRows(filter) {
+      var f = (filter || "").trim().toLowerCase();
+      var shown = rows.filter(function (r) { return !f || r.search.toLowerCase().indexOf(f) !== -1; });
+      if (!shown.length) { $("#aqp-body").innerHTML = emptyState("No affiliate activity for this period."); return; }
+      $("#aqp-body").innerHTML = '<div class="note">Columns 3–7: preview period. Columns 8–10: after launch, all redemptions to date.' +
+        (d.affiliates_total > rows.length ? " Showing " + fmt(rows.length) + " of " + fmt(d.affiliates_total) + " affiliates." : "") + '</div>' +
+        '<table class="data-table">' + head + '<tbody>' + shown.map(function (r) {
+          return "<tr>" + r.cells.map(function (cell) {
+            return '<td' + (cell.num ? ' class="num"' : "") + ">" + (cell.html !== undefined ? cell.html : esc(cell.text)) + "</td>";
+          }).join("") + "</tr>";
+        }).join("") + "</tbody></table>";
+    }
+    state.aqpRenderRows = renderRows;
+    renderRows(($("#aqp-filter") || {}).value);
+
+    var reasons = d.outcome_reasons || {};
+    var reasonKeys = Object.keys(reasons);
+    $("#aqp-reasons").innerHTML = reasonKeys.length
+      ? '<table class="mini-table"><thead><tr><th>Outcome</th><th>Reason</th><th class="num">Count</th></tr></thead><tbody>' +
+        reasonKeys.map(function (k) {
+          var parts = k.split(":");
+          return "<tr><td>" + esc(parts[0]) + "</td><td>" + esc(aqpReasonLabel(parts.slice(1).join(":"))) + '</td><td class="num">' + fmt(reasons[k]) + "</td></tr>";
+        }).join("") + "</tbody></table>"
+      : (blocked ? "" : emptyState("No excluded or review outcomes in this period."));
+    var cases = d.review_cases || [];
+    $("#aqp-review").innerHTML = cases.length
+      ? '<table class="data-table"><thead><tr><th>Affiliate</th><th>Invitee</th><th>Reason</th><th>Redeemed at</th><th>Account ID</th><th>Code</th></tr></thead><tbody>' +
+        cases.map(function (r) {
+          return "<tr><td>" + (r.referrer_id ? userLink(r.referrer_id) : "—") + "</td><td>" + (r.invitee_id ? userLink(r.invitee_id) : "—") +
+            "</td><td>" + esc(aqpReasonLabel(r.reason)) + "</td><td>" + esc(dt(r.redeemed_at)) + "</td><td>" + esc(r.account || "—") +
+            "</td><td>" + esc(r.code || "—") + "</td></tr>";
+        }).join("") + "</tbody></table>" +
+        (d.review_cases_total > cases.length ? '<div class="note">Showing ' + fmt(cases.length) + " of " + fmt(d.review_cases_total) + " review cases.</div>" : "")
+      : (blocked ? "" : emptyState("No cases requiring review in this period."));
+  }
+
+  function bindAffiliateQualPreview() {
+    var run = $("#aqp-run-btn");
+    if (run) run.addEventListener("click", function () { loadAffiliateQualPreview(true); });
+    var filter = $("#aqp-filter");
+    if (filter) filter.addEventListener("input", function () { if (state.aqpRenderRows) state.aqpRenderRows(filter.value); });
+  }
+
   // ---------- Voucher Batches (the single voucher-code upload entry point) ----------
   var abItemsCache = {};
   state.abEditingBatchId = null;
@@ -12272,7 +12431,7 @@
     });
   }
 
-  var VIEWS =["summary", "moduleOverview", "funnel", "abuse", "campaignBuilder", "campaignPerformance", "campaignIntelligence", "activeCampaigns", "compiledDrops", "campaigns", "gcCampaigns", "gcCampaignWizard", "campaignDetail", "campaignRegistrations", "deepLinks", "missionPool", "gcProviders", "gcResults", "gcRewards", "gcVerification", "gcActivity", "campaignDisplay", "eventBanners", "luckyGames", "vouchers", "drops", "referrals", "affiliate", "affiliatePools", "affiliateBatches", "affiliatePending", "reactivation", "audit", "segmentProbabilityConfig", "segmentRoi", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "voucherHunterFalsePositive", "voucherHunterRuleSimulator", "vhPriorityImpact", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "joinRequests", "xpAdjust", "settings", "referralShareContent", "referralShareEngagement", "ccComposer", "ccCalendar", "ccBoard", "ccPollResults"];
+  var VIEWS =["summary", "moduleOverview", "funnel", "abuse", "campaignBuilder", "campaignPerformance", "campaignIntelligence", "activeCampaigns", "compiledDrops", "campaigns", "gcCampaigns", "gcCampaignWizard", "campaignDetail", "campaignRegistrations", "deepLinks", "missionPool", "gcProviders", "gcResults", "gcRewards", "gcVerification", "gcActivity", "campaignDisplay", "eventBanners", "luckyGames", "vouchers", "drops", "referrals", "affiliate", "affiliatePools", "affiliateBatches", "affiliatePending", "affiliateQualPreview", "reactivation", "audit", "segmentProbabilityConfig", "segmentRoi", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "voucherHunterFalsePositive", "voucherHunterRuleSimulator", "vhPriorityImpact", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "joinRequests", "xpAdjust", "settings", "referralShareContent", "referralShareEngagement", "ccComposer", "ccCalendar", "ccBoard", "ccPollResults"];
 
   // ---------------------------------------------------------------------
   // Information architecture: sidebar Business Modules, each with its own
@@ -12328,6 +12487,7 @@
       { label: "Pending Approval", view: "affiliatePending", live: true },
       { label: "Voucher Pools", view: "affiliatePools", live: true },
       { label: "Voucher Batches", view: "affiliateBatches", live: true },
+      { label: "Qualification Preview", view: "affiliateQualPreview" },
       { label: "Campaign Display", view: "campaignDisplay", live: true }
     ]},
     { key: "referral", icon: "🔗", label: "Referral Centre", tabs: [
@@ -12596,7 +12756,7 @@
       eventBanners: "Event Banner",
       luckyGames: "Lucky Games",
       vouchers: "Vouchers", drops: "Voucher Drops", referrals: "Referrals", affiliate: "Affiliate",
-      affiliatePools: "Affiliate Voucher Pools", affiliateBatches: "Affiliate Voucher Batches", affiliatePending: "Pending Affiliate Rewards", reactivation: "Reactivation",
+      affiliatePools: "Affiliate Voucher Pools", affiliateBatches: "Affiliate Voucher Batches", affiliatePending: "Pending Affiliate Rewards", affiliateQualPreview: "Welcome-Redemption Qualification Preview (Shadow)", reactivation: "Reactivation",
       audit: "Audit", segmentProbabilityConfig: "Segment Probability Configuration (Read Only)",
       segmentRoi: "Segment ROI Dashboard",
       segments: "Segment Overview", validation: "Data → Validation / UIM Compare",
@@ -12654,6 +12814,7 @@
     else if (state.view === "affiliatePools") loadAffiliatePools(force);
     else if (state.view === "affiliateBatches") loadAffiliateBatches(force);
     else if (state.view === "affiliatePending") loadAffiliatePending(force);
+    else if (state.view === "affiliateQualPreview") loadAffiliateQualPreview(force);
     else if (state.view === "reactivation") { loadReactivation(force); loadReactivationJourneyConfig(); }
     else if (state.view === "audit") loadAudit(force);
     else if (state.view === "segmentProbabilityConfig") loadSegmentProbabilityConfig(force);
@@ -12731,6 +12892,7 @@
     bindAffiliatePools();
     bindAffiliateBatches();
     bindAffiliatePending();
+    bindAffiliateQualPreview();
     bindGcCampaigns();
     bindGcCampaignWizard();
     bindCampaignDetail();

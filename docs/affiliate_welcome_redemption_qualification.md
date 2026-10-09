@@ -105,3 +105,34 @@ python scripts/affiliate_qualification_admin.py activate --cutoff 2026-11-01T00:
 Verification after the cutoff: `status` shows `legacy_award_allowed=false`, `new_rule_active=true`; logs show `[SCHED][REFERRAL] settle ... parked=N awarded=0` and `[AFF_QUAL][EVIDENCE_DONE]`; `preflight` consistency stays `ok`; `qualified_events` rows with `rule_version` have `effects_applied_at` within one tick.
 
 Rollback / repair: `pause --reason ... --commit` (new qualifications stop; legacy stays off; credited accounts stay credited), fix data (`void-batch`, `requeue`), `resume --commit` (re-runs preflight). Before the cutoff only: `cancel-scheduled --commit`.
+
+## 9. Admin shadow preview (before activation)
+
+Admin Dashboard → Affiliate Centre → **Qualification Preview**
+(`GET /api/admin/dashboard/affiliate/qualification-preview?month=YYYYMM`, admin-guarded,
+`affiliate_qualification_preview.build_preview`).
+
+* **Read-only.** Only find/aggregate/count/list_indexes. No evidence rows, `qualified_events`,
+  registry reservations, XP, reward ledgers, control-doc or cutoff writes (enforced by a test that
+  runs it through a write-refusing DB handle). Live qualification is untouched.
+* **Same rules.** Rows go through the live `parse_source_row` → `decide_recipient` →
+  `build_evidence_doc` → `assess_evidence`; only data access differs (bulk in-memory lookups) and the
+  lifetime registry is simulated. A parity test asserts the after-launch figures equal what the live
+  pipeline then writes on the same data.
+* **Two clearly separated views.**
+  * *Historical comparison — preview period (GMT+8 month):* current live qualified count vs. every
+    redemption to date replayed as if the rule had always applied (empty registry, legacy
+    qualifications ignored), counted by redemption time inside the period; plus duplicate Account IDs
+    excluded, invitees joined in the period still awaiting redemption evidence, live qualifications in
+    the period with no redemption evidence, and review cases with reasons.
+  * *New qualifications eligible after launch — not period-bound:* legacy qualifications kept (their
+    verified accounts count as credited), real registry honoured, persisted cutoff or "if activated
+    now"; pre-launch redemptions credited to the launch month.
+* **Blocker shown explicitly.** Without a valid source mapping, or if recent committed uploads lack a
+  mapped column, the page shows the blocker with each missing item; live counts still render and
+  new-rule figures read "Data Not Available".
+* **Preview-only mapping.** The collapsible mapping form overrides the saved source config for that
+  request only (never persisted, never cached), so a candidate export layout can be checked before
+  `configure-source`.
+* Bounded: at most 200 000 source rows per run (`source_stats.truncated` flags it), 500 affiliate rows,
+  200 review cases. Codes and Account IDs are masked in the payload.

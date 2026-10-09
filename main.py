@@ -5136,6 +5136,39 @@ def dashboard_affiliate_detail():
     )
 
 
+@admin_bp.get("/api/admin/dashboard/affiliate/qualification-preview")
+def dashboard_affiliate_qualification_preview():
+    """Read-only shadow preview of the welcome_redemption_v1 rule. Writes
+    nothing (no evidence, qualifications, reservations, XP, ledgers or
+    cutoff); optional mapping query params are preview-only, never saved."""
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+    import affiliate_qualification as _aq
+    import affiliate_qualification_preview as _aqp
+
+    now = _utc_now()
+    try:
+        window = _aqp.month_window(request.args.get("month"), now_utc=now)
+    except ValueError as exc:
+        return jsonify({"success": False, "message": str(exc)}), 400
+    saved = (_aq.get_control(db) or {}).get("source_config")
+    config, overridden = _aqp.source_config_from_args(request.args, saved)
+
+    def build():
+        payload = _aqp.build_preview(
+            db, month=window["month"], now_utc=now, source_config=config, config_overridden=overridden
+        )
+        payload["data_source"] = "marketing_raw_data (shadow)"
+        payload["window_label"] = payload["period"]["label"]
+        return payload
+
+    if overridden:
+        return jsonify(build())
+    return _panel_cached(f"panel:affiliate_qualification_preview:{window['month']}", build)
+
+
 @admin_bp.get("/api/admin/dashboard/audit")
 def dashboard_audit():
     ok, err = require_admin_from_query()

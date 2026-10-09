@@ -443,15 +443,16 @@ def integration_readiness(db, config: dict | None, *, sample_batches: int = 3) -
 # Code -> original recipient
 # ---------------------------------------------------------------------------
 
-def resolve_welcome_recipient(db, code: str) -> dict:
-    """Map a redeemed code to its ORIGINAL Welcome recipient.
+def decide_recipient(*, code: str, pool_row: dict | None, ledger_code_for, claim_uids, other_pool_exists: bool) -> dict:
+    """Map a redeemed code to its ORIGINAL Welcome recipient (pure decision,
+    shared by live per-code lookups and the bulk shadow preview).
 
     Sources: the canonical WELCOME pool (``voucher_pools`` issued_to_user_id,
-    cross-checked against the user's ``affiliate_ledger`` WELCOME row) and the
-    legacy ``new_joiner_claims`` record. Any disagreement is ``ambiguous``.
+    cross-checked against the user's ``affiliate_ledger`` WELCOME row via
+    ``ledger_code_for(uid)``) and the legacy ``new_joiner_claims`` uids.
+    Any disagreement is ``ambiguous``.
     """
     recipients: dict[int, set] = {}
-    pool_row = db.voucher_pools.find_one({"pool_id": WELCOME_POOL_ID, "code": code})
     if pool_row:
         raw_uid = pool_row.get("issued_to_user_id")
         if raw_uid in (None, ""):
@@ -463,24 +464,37 @@ def resolve_welcome_recipient(db, code: str) -> dict:
         except (TypeError, ValueError):
             return {"status": "ambiguous", "detail": "unparseable_recipient"}
         recipients.setdefault(uid, set()).add("voucher_pools")
-        ledger = db.affiliate_ledger.find_one({"dedup_key": f"WELCOME:{uid}"}, {"voucher_code": 1})
-        ledger_code = (ledger or {}).get("voucher_code")
+        ledger_code = ledger_code_for(uid)
         if ledger_code and ledger_code != code:
             return {"status": "ambiguous", "detail": "ledger_code_mismatch"}
-    for claim in db.new_joiner_claims.find({"code": code}, {"uid": 1}):
+    for raw in claim_uids:
         try:
-            recipients.setdefault(int(claim.get("uid")), set()).add("new_joiner_claims")
+            recipients.setdefault(int(raw), set()).add("new_joiner_claims")
         except (TypeError, ValueError):
             return {"status": "ambiguous", "detail": "unparseable_recipient"}
-    other_pool = db.voucher_pools.find_one({"code": code, "pool_id": {"$ne": WELCOME_POOL_ID}}, {"pool_id": 1})
     if not recipients:
-        return {"status": "non_welcome" if other_pool else "unknown"}
+        return {"status": "non_welcome" if other_pool_exists else "unknown"}
     if len(recipients) > 1:
         return {"status": "ambiguous", "detail": "multiple_recipients"}
-    if other_pool:
+    if other_pool_exists:
         return {"status": "ambiguous", "detail": "code_in_multiple_pools"}
     uid, sources = next(iter(recipients.items()))
     return {"status": "ok", "user_id": uid, "sources": sorted(sources)}
+
+
+def resolve_welcome_recipient(db, code: str) -> dict:
+    """Live, per-code form of :func:`decide_recipient`."""
+    return decide_recipient(
+        code=code,
+        pool_row=db.voucher_pools.find_one({"pool_id": WELCOME_POOL_ID, "code": code}),
+        ledger_code_for=lambda uid: (
+            db.affiliate_ledger.find_one({"dedup_key": f"WELCOME:{uid}"}, {"voucher_code": 1}) or {}
+        ).get("voucher_code"),
+        claim_uids=[c.get("uid") for c in db.new_joiner_claims.find({"code": code}, {"uid": 1})],
+        other_pool_exists=bool(
+            db.voucher_pools.find_one({"code": code, "pool_id": {"$ne": WELCOME_POOL_ID}}, {"pool_id": 1})
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -490,6 +504,42 @@ def resolve_welcome_recipient(db, code: str) -> dict:
 def _observation_fingerprint(successful: bool, redeemed_at: datetime | None) -> str:
     stamp = redeemed_at.isoformat() if redeemed_at else ""
     return hashlib.sha256(f"{int(bool(successful))}|{stamp}".encode()).hexdigest()[:16]
+
+
+def build_evidence_doc(
+    *,
+    source: str,
+    code: str,
+    recipient: dict,
+    account_raw,
+    namespace,
+    redeemed_at: datetime | None,
+    redemption_successful: bool,
+    campaign_id=None,
+    now_utc: datetime,
+) -> dict:
+    """The evidence document for one normalised observation (no I/O).
+    ``source_ref`` is its idempotency key: same code + account = same row."""
+    account_key, account_reason = canonical_account_key(account_raw, namespace)
+    chash = code_hash(code)
+    return {
+        "source": source,
+        "source_ref": hashlib.sha256(f"{source}|{chash}|{account_key or account_reason}".encode()).hexdigest()[:40],
+        "rule_version": RULE_VERSION,
+        "code_hash": chash,
+        "code_masked": mask_value(code),
+        "account_key": account_key,
+        "account_key_masked": mask_value(account_key) if account_key else None,
+        "account_reason": account_reason,
+        "redeemed_at": redeemed_at,
+        "redemption_successful": bool(redemption_successful),
+        "observation_fingerprint": _observation_fingerprint(redemption_successful, redeemed_at),
+        "campaign_id": None if campaign_id is None else str(campaign_id),
+        "recipient_resolution": recipient,
+        "status": EV_RECEIVED,
+        "attempts": 0,
+        "created_at": now_utc,
+    }
 
 
 def record_redemption_evidence(
@@ -517,28 +567,13 @@ def record_redemption_evidence(
         # Not a Welcome code: rejected here and only counted, so the
         # evidence collection does not mirror every campaign's coupon rows.
         return {"recorded": False, "reason": f"{recipient['status']}_code"}
-    account_key, account_reason = canonical_account_key(account_raw, namespace)
-    chash = code_hash(code_n)
-    source_ref = hashlib.sha256(f"{source}|{chash}|{account_key or account_reason}".encode()).hexdigest()[:40]
-    fingerprint = _observation_fingerprint(redemption_successful, redeemed_at)
-    insert_doc = {
-        "source": source,
-        "source_ref": source_ref,
-        "rule_version": RULE_VERSION,
-        "code_hash": chash,
-        "code_masked": mask_value(code_n),
-        "account_key": account_key,
-        "account_key_masked": mask_value(account_key) if account_key else None,
-        "account_reason": account_reason,
-        "redeemed_at": redeemed_at,
-        "redemption_successful": bool(redemption_successful),
-        "observation_fingerprint": fingerprint,
-        "campaign_id": None if campaign_id is None else str(campaign_id),
-        "recipient_resolution": recipient,
-        "status": EV_RECEIVED,
-        "attempts": 0,
-        "created_at": now_utc,
-    }
+    insert_doc = build_evidence_doc(
+        source=source, code=code_n, recipient=recipient, account_raw=account_raw, namespace=namespace,
+        redeemed_at=redeemed_at, redemption_successful=redemption_successful, campaign_id=campaign_id,
+        now_utc=now_utc,
+    )
+    source_ref = insert_doc["source_ref"]
+    fingerprint = insert_doc["observation_fingerprint"]
     update = {
         "$setOnInsert": insert_doc,
         "$addToSet": {"source_batch_ids": source_batch_id},
@@ -592,20 +627,35 @@ def _flag_conflicting_observation(db, evidence: dict, *, now_utc: datetime) -> N
     )
 
 
+def parse_source_row(row: dict, config: dict) -> dict | None:
+    """One committed source row -> observation kwargs for
+    :func:`record_redemption_evidence` / :func:`build_evidence_doc`, or None
+    when the row is outside the configured Welcome campaigns. Pure."""
+    cfg = config or {}
+    values = {_norm_column(k): v for k, v in row.items()}
+    campaign_id = values.get("campaign_id")
+    campaign_ids = {str(c).strip() for c in cfg.get("campaign_ids") or []}
+    if campaign_ids and str(campaign_id or "").strip() not in campaign_ids:
+        return None
+    success_values = {str(v).strip().lower() for v in cfg.get("success_values") or []}
+    status_raw = str(values.get(_norm_column(cfg["status_column"])) or "").strip().lower()
+    ns_col = _norm_column(cfg["namespace_column"]) if cfg.get("namespace_column") else None
+    return {
+        "code": values.get(_norm_column(cfg["code_column"])),
+        "account_raw": values.get(_norm_column(cfg["account_column"])),
+        "namespace": values.get(ns_col) if ns_col else cfg.get("account_namespace"),
+        "redeemed_at": parse_redeemed_at(values.get(_norm_column(cfg["redeemed_at_column"])), cfg["source_timezone"]),
+        "redemption_successful": bool(status_raw) and status_raw in success_values,
+        "campaign_id": campaign_id,
+    }
+
+
 def extract_marketing_batch(
     db, *, upload_batch_id: str, config: dict, now_utc: datetime, after_id=None, max_rows: int | None = None
 ) -> dict:
     """Turn (part of) one committed marketing upload into evidence, in
     ``_id`` order from ``after_id``. Idempotent, so a resumed or repeated
     pass over the same rows changes nothing."""
-    cfg = config or {}
-    code_col = _norm_column(cfg["code_column"])
-    account_col = _norm_column(cfg["account_column"])
-    time_col = _norm_column(cfg["redeemed_at_column"])
-    status_col = _norm_column(cfg["status_column"])
-    ns_col = _norm_column(cfg["namespace_column"]) if cfg.get("namespace_column") else None
-    success_values = {str(v).strip().lower() for v in cfg.get("success_values") or []}
-    campaign_ids = {str(c).strip() for c in cfg.get("campaign_ids") or []}
     summary = {"rows": 0, "recorded": 0, "new": 0, "conflicts": 0, "missing_code": 0,
                "unknown_code": 0, "non_welcome_code": 0, "skipped_campaign": 0}
     query = {"upload_batch_id": upload_batch_id}
@@ -618,24 +668,17 @@ def extract_marketing_batch(
     for row in cursor:
         last_id = row.get("_id")
         summary["rows"] += 1
-        values = {_norm_column(k): v for k, v in row.items()}
-        campaign_id = values.get("campaign_id")
-        if campaign_ids and str(campaign_id or "").strip() not in campaign_ids:
+        obs = parse_source_row(row, config)
+        if obs is None:
             summary["skipped_campaign"] += 1
             continue
-        status_raw = str(values.get(status_col) or "").strip().lower()
         out = record_redemption_evidence(
             db,
             source=SOURCE_MARKETING,
-            code=values.get(code_col),
-            account_raw=values.get(account_col),
-            namespace=values.get(ns_col) if ns_col else cfg.get("account_namespace"),
-            redeemed_at=parse_redeemed_at(values.get(time_col), cfg["source_timezone"]),
-            redemption_successful=bool(status_raw) and status_raw in success_values,
             source_batch_id=upload_batch_id,
             source_row_id=row.get("_id"),
-            campaign_id=campaign_id,
             now_utc=now_utc,
+            **obs,
         )
         if not out.get("recorded"):
             summary[out["reason"]] += 1
@@ -705,6 +748,48 @@ def extract_committed_batches(db, *, config: dict, now_utc: datetime, max_rows: 
 # Attribution and ownership
 # ---------------------------------------------------------------------------
 
+class DbLookup:
+    """Read-only lookups the validation rules need, one query each (live).
+    The shadow preview supplies an in-memory implementation of the same
+    methods, so both run identical rules."""
+
+    def __init__(self, db):
+        self.db = db
+
+    def pending_referrals(self, invitee_id: int) -> list[dict]:
+        return list(
+            self.db.pending_referrals.find(
+                {"invitee_user_id": int(invitee_id)},
+                {"inviter_user_id": 1, "status": 1, "revoked_reason": 1, "created_at_utc": 1, "destination_type": 1},
+            ).sort("created_at_utc", 1)
+        )
+
+    def user(self, uid: int) -> dict | None:
+        return self.db.users.find_one(
+            {"user_id": int(uid)}, {"joined_main_at": 1, "created_at": 1, "linked_gaming_accounts": 1}
+        )
+
+    def account_linked_to_other_user(self, account_id: str, invitee_id: int) -> bool:
+        return bool(self.db.users.find_one(
+            {"linked_gaming_accounts": account_id, "user_id": {"$ne": int(invitee_id)}}, {"_id": 1}
+        ))
+
+    def existing_qualification(self, invitee_id: int) -> dict | None:
+        return self.db.qualified_events.find_one({"invitee_id": int(invitee_id)})
+
+    def conflicting_record(self, evidence: dict) -> bool:
+        return bool(self.db[EVIDENCE_COLLECTION].find_one(
+            {
+                "code_hash": evidence["code_hash"],
+                "_id": {"$ne": evidence.get("_id")},
+                "account_key": {"$ne": evidence.get("account_key")},
+                "redemption_successful": True,
+                "status": {"$ne": EV_VOIDED},
+            },
+            {"_id": 1},
+        ))
+
+
 def _preexisting_community_user(pending: dict, user_doc: dict | None) -> bool:
     """Same rule scheduler.settle_pending_referrals applies to community-group
     referrals ("already_in_db"): the invitee existed well before the join."""
@@ -717,19 +802,14 @@ def _preexisting_community_user(pending: dict, user_doc: dict | None) -> bool:
     return reference < join_seen - timedelta(minutes=10)
 
 
-def resolve_attribution(db, *, invitee_id: int, redeemed_at: datetime) -> dict:
+def resolve_attribution(lookup, *, invitee_id: int, redeemed_at: datetime) -> dict:
     """The original referral record for this invitee, frozen.
 
     Earliest ``pending_referrals`` row that is a valid attribution (any
     status except a revocation that invalidates the record itself). Its
     inviter is used verbatim; nothing reads a mutable "current inviter".
     """
-    rows = list(
-        db.pending_referrals.find(
-            {"invitee_user_id": int(invitee_id)},
-            {"inviter_user_id": 1, "status": 1, "revoked_reason": 1, "created_at_utc": 1, "destination_type": 1},
-        ).sort("created_at_utc", 1)
-    )
+    rows = lookup.pending_referrals(invitee_id)
     saw_self = False
     for row in rows:
         inviter = row.get("inviter_user_id")
@@ -749,8 +829,7 @@ def resolve_attribution(db, *, invitee_id: int, redeemed_at: datetime) -> dict:
             continue
         if created > _aware_utc(redeemed_at):
             return {"ok": False, "status": EV_REJECTED, "reason": "referral_after_redemption"}
-        user_doc = db.users.find_one({"user_id": int(invitee_id)}, {"joined_main_at": 1, "created_at": 1})
-        if _preexisting_community_user(row, user_doc):
+        if _preexisting_community_user(row, lookup.user(invitee_id)):
             return {"ok": False, "status": EV_REJECTED, "reason": "invitee_preexisting_user"}
         return {"ok": True, "inviter_id": inviter, "pending_id": row.get("_id"), "referral_created_at": created}
     if saw_self:
@@ -766,25 +845,20 @@ def _linked_accounts(user_doc: dict | None) -> set[str]:
     return out
 
 
-def check_account_ownership(db, *, invitee_id: int, inviter_id: int | None, account_key: str, policy: str) -> dict:
+def check_account_ownership(lookup, *, invitee_id: int, inviter_id: int | None, account_key: str, policy: str) -> dict:
     """Validate the redeemed account against existing verified linkage
     (``users.linked_gaming_accounts``, synced from UIM). Conflicts never
     qualify; they stay in review."""
     account_id = account_id_from_key(account_key)
     if inviter_id is not None:
-        inviter_doc = db.users.find_one({"user_id": int(inviter_id)}, {"linked_gaming_accounts": 1})
-        if account_id in _linked_accounts(inviter_doc):
+        if account_id in _linked_accounts(lookup.user(inviter_id)):
             return {"ok": False, "status": EV_REJECTED, "reason": "self_referral_account"}
-    invitee_doc = db.users.find_one({"user_id": int(invitee_id)}, {"linked_gaming_accounts": 1})
-    invitee_links = _linked_accounts(invitee_doc)
+    invitee_links = _linked_accounts(lookup.user(invitee_id))
     if invitee_links:
         if account_id in invitee_links:
             return {"ok": True, "basis": "verified_linkage"}
         return {"ok": False, "status": EV_REVIEW, "reason": "account_not_linked_to_invitee"}
-    other = db.users.find_one(
-        {"linked_gaming_accounts": account_id, "user_id": {"$ne": int(invitee_id)}}, {"_id": 1}
-    )
-    if other:
+    if lookup.account_linked_to_other_user(account_id, invitee_id):
         return {"ok": False, "status": EV_REVIEW, "reason": "account_linked_to_other_users"}
     if policy == UNLINKED_POLICY_REVIEW:
         return {"ok": False, "status": EV_REVIEW, "reason": "unverified_account_ownership"}
@@ -835,91 +909,108 @@ def _record_legacy_credit(db, evidence: dict, existing_q: dict, *, now_utc: date
         pass
 
 
-def evaluate_evidence(db, evidence: dict, *, control: dict, now_utc: datetime) -> dict:
-    """Validate one evidence row and, if eligible, qualify atomically."""
+ELIGIBLE = "eligible"
+
+
+def assess_evidence(evidence: dict, *, control: dict, now_utc: datetime, lookup) -> dict:
+    """Every validation rule of welcome_redemption_v1, with NO writes.
+
+    Returns ``{"status": ELIGIBLE, ...qualification fields}`` or a final
+    evidence status + reason. Live processing (:func:`evaluate_evidence`) and
+    the admin shadow preview both call exactly this function; only what they
+    do with the verdict differs. The lifetime account check is not here: live
+    it is the registry insert in :func:`_qualify`, in the preview a simulated
+    registry.
+    """
+    def verdict(status, reason, **fields):
+        return {"status": status, "reason": reason, **fields}
+
     if evidence.get("voided_at"):
-        return _finalize(db, evidence, EV_VOIDED, evidence.get("void_reason") or "voided", now_utc=now_utc)
+        return verdict(EV_VOIDED, evidence.get("void_reason") or "voided")
     if not evidence.get("redemption_successful"):
-        return _finalize(db, evidence, EV_REJECTED, "redemption_not_successful", now_utc=now_utc)
+        return verdict(EV_REJECTED, "redemption_not_successful")
     redeemed_at = _aware_utc(evidence.get("redeemed_at"))
     if redeemed_at is None:
-        return _finalize(db, evidence, EV_REVIEW, "missing_redeemed_at", now_utc=now_utc)
+        return verdict(EV_REVIEW, "missing_redeemed_at")
     if redeemed_at > _aware_utc(now_utc) + FUTURE_REDEMPTION_TOLERANCE:
         # A redemption cannot postdate its own processing; never attribute
         # (or reward) a future month on a bad source timestamp.
-        return _finalize(db, evidence, EV_REVIEW, "redeemed_at_in_future", now_utc=now_utc)
+        return verdict(EV_REVIEW, "redeemed_at_in_future")
     account_key = evidence.get("account_key")
     if not account_key:
         reason = evidence.get("account_reason") or "missing_account"
-        status = EV_REJECTED if reason == "missing_account" else EV_REVIEW
-        return _finalize(db, evidence, status, reason, now_utc=now_utc)
+        return verdict(EV_REJECTED if reason == "missing_account" else EV_REVIEW, reason)
     cfg_campaigns = {str(c) for c in ((control.get("source_config") or {}).get("campaign_ids") or [])}
     if cfg_campaigns and str(evidence.get("campaign_id") or "") not in cfg_campaigns:
-        return _finalize(db, evidence, EV_REJECTED, "non_welcome_campaign", now_utc=now_utc)
+        return verdict(EV_REJECTED, "non_welcome_campaign")
 
     recipient = evidence.get("recipient_resolution") or {}
     rstatus = recipient.get("status")
     if rstatus == "unknown":
-        return _finalize(db, evidence, EV_REJECTED, "unknown_code", now_utc=now_utc)
+        return verdict(EV_REJECTED, "unknown_code")
     if rstatus == "non_welcome":
-        return _finalize(db, evidence, EV_REJECTED, "non_welcome_code", now_utc=now_utc)
+        return verdict(EV_REJECTED, "non_welcome_code")
     if rstatus == "not_issued":
-        return _finalize(db, evidence, EV_REVIEW, "welcome_code_not_issued", now_utc=now_utc)
+        return verdict(EV_REVIEW, "welcome_code_not_issued")
     if rstatus != "ok":
-        return _finalize(db, evidence, EV_REVIEW, "ambiguous_recipient", now_utc=now_utc)
+        return verdict(EV_REVIEW, "ambiguous_recipient")
     invitee_id = int(recipient["user_id"])
 
-    other = db[EVIDENCE_COLLECTION].find_one(
-        {
-            "code_hash": evidence["code_hash"],
-            "_id": {"$ne": evidence["_id"]},
-            "account_key": {"$ne": account_key},
-            "redemption_successful": True,
-            "status": {"$ne": EV_VOIDED},
-        },
-        {"_id": 1},
-    )
-    if other:
-        return _finalize(db, evidence, EV_REVIEW, "conflicting_redemption_records", now_utc=now_utc)
+    if lookup.conflicting_record(evidence):
+        return verdict(EV_REVIEW, "conflicting_redemption_records", invitee_id=invitee_id)
 
     policy = control.get("unlinked_account_policy") or UNLINKED_POLICY_ACCEPT
-    existing_q = db.qualified_events.find_one({"invitee_id": invitee_id})
-    if existing_q and existing_q.get("evidence_id") != evidence["_id"]:
+    existing_q = lookup.existing_qualification(invitee_id)
+    if existing_q and existing_q.get("evidence_id") != evidence.get("_id"):
         own = check_account_ownership(
-            db, invitee_id=invitee_id, inviter_id=existing_q.get("referrer_id"), account_key=account_key, policy=policy
+            lookup, invitee_id=invitee_id, inviter_id=existing_q.get("referrer_id"), account_key=account_key, policy=policy
         )
-        if own["ok"] and existing_q.get("rule_version") != RULE_VERSION:
-            _record_legacy_credit(db, evidence, existing_q, now_utc=now_utc)
-        return _finalize(
-            db, evidence, EV_INVITEE_ALREADY_QUALIFIED, "invitee_already_qualified",
-            now_utc=now_utc, extra={"invitee_id": invitee_id},
+        return verdict(
+            EV_INVITEE_ALREADY_QUALIFIED, "invitee_already_qualified", invitee_id=invitee_id,
+            inviter_id=existing_q.get("referrer_id"), existing_qualification=existing_q,
+            # The account is tied to a pre-rule qualification: it counts as credited.
+            legacy_credit=bool(own["ok"] and existing_q.get("rule_version") != RULE_VERSION),
         )
 
-    attribution = resolve_attribution(db, invitee_id=invitee_id, redeemed_at=redeemed_at)
+    attribution = resolve_attribution(lookup, invitee_id=invitee_id, redeemed_at=redeemed_at)
     if not attribution["ok"]:
-        return _finalize(db, evidence, attribution["status"], attribution["reason"], now_utc=now_utc,
-                         extra={"invitee_id": invitee_id})
+        return verdict(attribution["status"], attribution["reason"], invitee_id=invitee_id)
     inviter_id = attribution["inviter_id"]
-    own = check_account_ownership(db, invitee_id=invitee_id, inviter_id=inviter_id, account_key=account_key, policy=policy)
+    own = check_account_ownership(lookup, invitee_id=invitee_id, inviter_id=inviter_id, account_key=account_key, policy=policy)
     if not own["ok"]:
-        return _finalize(db, evidence, own["status"], own["reason"], now_utc=now_utc,
-                         extra={"invitee_id": invitee_id, "inviter_id": inviter_id})
+        return verdict(own["status"], own["reason"], invitee_id=invitee_id, inviter_id=inviter_id)
 
     cutoff = launch_cutoff(control)
     if cutoff is not None and redeemed_at < cutoff:
         qualified_at, basis = cutoff, "launch_cutoff_clamp"
     else:
         qualified_at, basis = redeemed_at, "redeemed_at"
+    return verdict(
+        ELIGIBLE, None, invitee_id=invitee_id, inviter_id=inviter_id, pending_id=attribution.get("pending_id"),
+        redeemed_at=redeemed_at, qualified_at=qualified_at, attribution_basis=basis, ownership_basis=own["basis"],
+    )
+
+
+def evaluate_evidence(db, evidence: dict, *, control: dict, now_utc: datetime) -> dict:
+    """Validate one evidence row and, if eligible, qualify atomically."""
+    a = assess_evidence(evidence, control=control, now_utc=now_utc, lookup=DbLookup(db))
+    extra = {k: a[k] for k in ("invitee_id", "inviter_id") if a.get(k) is not None}
+    if a["status"] == EV_INVITEE_ALREADY_QUALIFIED:
+        if a["legacy_credit"]:
+            _record_legacy_credit(db, evidence, a["existing_qualification"], now_utc=now_utc)
+        return _finalize(db, evidence, a["status"], a["reason"], now_utc=now_utc, extra={"invitee_id": a["invitee_id"]})
+    if a["status"] != ELIGIBLE:
+        return _finalize(db, evidence, a["status"], a["reason"], now_utc=now_utc, extra=extra)
     return _qualify(
         db,
         evidence,
-        invitee_id=invitee_id,
-        inviter_id=inviter_id,
-        pending_id=attribution.get("pending_id"),
-        redeemed_at=redeemed_at,
-        qualified_at=qualified_at,
-        attribution_basis=basis,
-        ownership_basis=own["basis"],
+        invitee_id=a["invitee_id"],
+        inviter_id=a["inviter_id"],
+        pending_id=a["pending_id"],
+        redeemed_at=a["redeemed_at"],
+        qualified_at=a["qualified_at"],
+        attribution_basis=a["attribution_basis"],
+        ownership_basis=a["ownership_basis"],
         now_utc=now_utc,
     )
 
