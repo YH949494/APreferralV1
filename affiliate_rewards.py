@@ -3474,11 +3474,28 @@ def _eligible_tiers_for_count(qualified_count: int) -> list[str]:
     ]
 
 
-def evaluate_monthly_affiliate_reward(db, *, referrer_id: int, now_utc: datetime | None = None):
+# A tier entitlement that only became reachable through a qualification
+# attributed to an already-closed GMT+8 month (delayed redemption import).
+# Created as PENDING_REVIEW and never auto-issued: month-end settle skips
+# PENDING_REVIEW, so only an explicit admin approve/reject resolves it.
+LATE_REDEMPTION_REVIEW_REASON = "late_redemption_closed_month"
+
+
+def evaluate_monthly_affiliate_reward(
+    db,
+    *,
+    referrer_id: int,
+    now_utc: datetime | None = None,
+    month_reference_utc: datetime | None = None,
+    closed_month_review: bool = False,
+):
+    """``month_reference_utc`` picks the entitlement month (default: the
+    month of ``now_utc``); ``closed_month_review`` creates any newly reached
+    tier for that month as PENDING_REVIEW and issues nothing."""
     now_utc = now_utc or datetime.now(timezone.utc)
     user_doc = db.users.find_one({"user_id": int(referrer_id)}, {"blocked": 1}) or {}
 
-    start_utc, end_utc, yyyymm = _month_window_utc(now_utc)
+    start_utc, end_utc, yyyymm = _month_window_utc(month_reference_utc or now_utc)
     qualified_count = db.qualified_events.count_documents(
         {"referrer_id": int(referrer_id), "qualified_at": {"$gte": start_utc, "$lt": end_utc}}
     )
@@ -3574,7 +3591,9 @@ def evaluate_monthly_affiliate_reward(db, *, referrer_id: int, now_utc: datetime
         # Built only when this tier has no ledger yet, so a re-evaluation of
         # an existing entitlement costs no extra read.
         insert_fields = {"status": "APPROVED"}
-        if existing_ledger is None:
+        if closed_month_review:
+            insert_fields = {"status": "PENDING_REVIEW", "review_reason": LATE_REDEMPTION_REVIEW_REASON}
+        elif existing_ledger is None:
             retention_state = _initial_retention_state(db, user_id=int(referrer_id), now_utc=now_utc)
             if retention_state:
                 insert_fields = retention_state
@@ -3638,6 +3657,13 @@ def evaluate_monthly_affiliate_reward(db, *, referrer_id: int, now_utc: datetime
         )
 
         status = ledger.get("status")
+        if closed_month_review:
+            logger.info(
+                "[AFFILIATE][LEDGER_SKIP] user_id=%s tier=%s year_month=%s reason=closed_month_review status=%s",
+                int(referrer_id), eligible_tier, yyyymm, status,
+            )
+            last_ledger = ledger
+            continue
         if status in FINAL_STATUSES:
             logger.info("[AFFILIATE][LEDGER_SKIP] user_id=%s tier=%s year_month=%s reason=final_status status=%s", int(referrer_id), eligible_tier, yyyymm, status)
             last_ledger = ledger

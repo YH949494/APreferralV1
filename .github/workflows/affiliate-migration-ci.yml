@@ -27,6 +27,11 @@ on:
       - "affiliate_reward_plans.py"
       - "affiliate_voucher_batches.py"
       - "affiliate_denomination_shortage.py"
+      - "affiliate_qualification.py"
+      - "affiliate_qualification_preview.py"
+      - "referral_rules.py"
+      - "scripts/affiliate_qualification_admin.py"
+      - "scripts/migrate_affiliate_account_dedupe.py"
       - "vouchers.py"
       - "dashboard_panels.py"
       - "database.py"
@@ -76,6 +81,7 @@ env:
     test_affiliate_pending_manual_shortage.py
     test_affiliate_retention_rollback.py
     test_affiliate_congrats_gating.py
+    test_affiliate_welcome_redemption_qualification.py
 
 jobs:
   migration-tests:
