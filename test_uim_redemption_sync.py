@@ -384,7 +384,7 @@ def test_seeding_and_live_use_the_same_account_identity():
     feed = FakeFeed()
     feed.add_batch([urow("WELC11", "000123", "2026-10-05 10:00:00")])
     sync(w, feed)
-    by_code = migration._redemptions_by_code(w.db, DATABOT_CONFIG, migration._welcome_codes(w.db))
+    by_code = migration._redemptions_by_code(w.db, DATABOT_CONFIG, migration._welcome_codes(w.db), now_utc=NOW)
     assert by_code == {"WELC11": {"advantplay:000123"}}
 
 
@@ -572,7 +572,7 @@ def test_migration_never_seeds_a_removed_redemption():
     feed.add_batch([urow("WELC11", "acctA", "2026-10-05 10:00:00", observation="deleted")])
     feed.add_batch([urow("WELC11", "acctA", "2026-10-05 10:00:00")])  # re-observed later: still not seeded
     sync(w, feed)
-    by_code = migration._redemptions_by_code(w.db, DATABOT_CONFIG, migration._welcome_codes(w.db))
+    by_code = migration._redemptions_by_code(w.db, DATABOT_CONFIG, migration._welcome_codes(w.db), now_utc=NOW)
     assert by_code == {"WELC11": {"!source_row_removed_by_later_import"}, "WELC12": {"advantplay:acctB"}}
     # Same verdict as the preview for that redemption.
     reasons = preview(w.db)["evidence_summary"]["review_reasons"]

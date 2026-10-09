@@ -51,8 +51,8 @@ def kl_text(moment: datetime) -> str:
 
 
 class World:
-    def __init__(self, *, mode=aq.MODE_ACTIVE, cutoff=CUTOFF, indexes=True):
-        self.db = mongomock.MongoClient().db
+    def __init__(self, *, mode=aq.MODE_ACTIVE, cutoff=CUTOFF, indexes=True, db=None):
+        self.db = db if db is not None else mongomock.MongoClient().db
         db = self.db
         if indexes:
             aq.ensure_indexes(db)
@@ -83,12 +83,15 @@ class World:
             doc["revoked_reason"] = revoked_reason
         return self.db.pending_referrals.insert_one(doc).inserted_id
 
-    def welcome_code(self, uid, code):
+    def welcome_code(self, uid, code, *, issued_at=None):
+        if issued_at is None:
+            issued_at = (self.db.users.find_one({"user_id": uid}) or {}).get("created_at", CUTOFF)
         self.db.voucher_pools.insert_one({"pool_id": "WELCOME", "code": code, "status": "issued",
-                                          "issued_to_user_id": uid})
+                                          "issued_to_user_id": uid, "issued_at": issued_at})
         self.db.affiliate_ledger.update_one({"dedup_key": f"WELCOME:{uid}"},
                                             {"$set": {"voucher_code": code, "status": "ISSUED",
-                                                      "ledger_type": "WELCOME", "user_id": uid}}, upsert=True)
+                                                      "ledger_type": "WELCOME", "user_id": uid,
+                                                      "issued_at": issued_at}}, upsert=True)
 
     def upload(self, rows, *, status="completed"):
         self._batch += 1
@@ -360,7 +363,7 @@ def test_missing_ambiguous_or_self_referral_evidence_never_qualifies(monkeypatch
         w.join(71 if setup == "self_referral" else 1, 71,
                at=redeemed + timedelta(days=1) if setup == "referral_after_redemption" else datetime(2026, 10, 2, tzinfo=timezone.utc))
     if setup not in ("unknown_code", "non_welcome_code"):
-        w.welcome_code(71, "WELC71")
+        w.welcome_code(71, "WELC71", issued_at=redeemed - timedelta(days=1))
     if setup == "non_welcome_code":
         w.db.voucher_pools.insert_one({"pool_id": "T1", "code": "WELC71", "status": "issued", "issued_to_user_id": 5})
     if setup == "failed_redemption":
@@ -426,7 +429,7 @@ def test_migration_seeds_history_then_credited_account_cannot_requalify(monkeypa
     w.db.qualified_events.insert_one({"invitee_id": 83, "referrer_id": 2, "qualified_at": hist_at})
     w.db.affiliate_ledger.insert_one({"dedup_key": "AFF:1:202608:T1", "status": "ISSUED", "created_at": hist_at})
     for uid in (81, 82, 83):
-        w.welcome_code(uid, f"WELC{uid}")
+        w.welcome_code(uid, f"WELC{uid}", issued_at=hist_at - timedelta(days=1))
     w.upload([w.row("WELC81", "acctH", hist_at), w.row("WELC82", "acctH", hist_at),
               w.row("WELC83", "acctA", hist_at), w.row("WELC83", "acctB", hist_at)])
     ledgers_before = list(w.db.affiliate_ledger.find({}, {"_id": 0}))
@@ -657,7 +660,7 @@ def test_same_invitee_two_accounts_racing_releases_the_losers_reservation():
     w = World()
     w.join(1, 161)
     w.welcome_code(161, "WELC161")
-    w.db.new_joiner_claims.insert_one({"uid": 161, "code": "LEGACY161"})  # second Welcome code, same recipient
+    w.db.new_joiner_claims.insert_one({"uid": 161, "code": "LEGACY161", "claimed_at": CUTOFF})
     redeemed = datetime(2026, 10, 5, tzinfo=timezone.utc)
     w.upload([w.row("WELC161", "acctY1", redeemed), w.row("LEGACY161", "acctY2", redeemed)])
     aq.extract_committed_batches(w.db, config=SOURCE_CONFIG, now_utc=NOW)
