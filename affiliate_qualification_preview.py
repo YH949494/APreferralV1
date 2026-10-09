@@ -45,7 +45,13 @@ UNATTRIBUTED = "unattributed"
 OVERRIDE_FIELDS = (
     "code_column", "account_column", "redeemed_at_column", "status_column", "success_values",
     "source_timezone", "account_namespace", "namespace_column", "campaign_ids",
+    "source", "success_basis", "legacy_time_basis",
 )
+# Problems that make Databot evidence incomplete but still usable (shown as a
+# stale/partial banner); every other problem blocks the new-rule figures.
+NON_BLOCKING_PROBLEMS = frozenset({"evidence_sync_stale", "uim_batches_partially_synced"})
+PREVIEW_ASSUMED_ATTESTATION = {"by": "preview-only override", "reference": "NOT ATTESTED — assumed for this preview",
+                               "preview_only": True}
 
 
 def month_window(yyyymm: str | None, *, now_utc: datetime) -> dict:
@@ -85,7 +91,20 @@ def source_config_from_args(args, saved: dict | None) -> tuple[dict | None, bool
             provided[field] = str(raw).strip()
     if not provided:
         return (dict(saved) if saved else None), False
-    merged = {"source": aq.SOURCE_MARKETING, "source_timezone": "Asia/Kuala_Lumpur", **(saved or {}), **provided}
+    if provided.get("source") not in (None, aq.SOURCE_MARKETING, aq.SOURCE_DATABOT_UIM):
+        provided.pop("source")
+    base = saved or {}
+    if provided.get("source") and provided["source"] != base.get("source", aq.SOURCE_MARKETING):
+        base = {}  # switching source: never mix another source's saved mapping in
+    merged = {"source": aq.SOURCE_MARKETING, "source_timezone": "Asia/Kuala_Lumpur", **base, **provided}
+    if merged.get("source") == aq.SOURCE_DATABOT_UIM:
+        merged.update(aq.DATABOT_FIXED_COLUMNS)
+        if merged.get("success_basis") == aq.SUCCESS_BASIS_SOURCE_CONTRACT and not (
+            (merged.get("success_attestation") or {}).get("reference")
+        ):
+            # Lets an admin see the numbers before the data owner attests, but
+            # the payload labels success as ASSUMED, never as attested.
+            merged["success_attestation"] = dict(PREVIEW_ASSUMED_ATTESTATION)
     return merged, True
 
 
@@ -123,30 +142,26 @@ class ShadowLookup:
 
 
 def _load_observations(db, config, out_stats) -> list[dict]:
-    """Committed (non-rolled-back) source rows -> parsed observations."""
+    """Committed (non-rolled-back) source rows -> parsed observations, in
+    commit order (the same rows, order and parser the live pipeline uses)."""
     observations = []
-    batches = list(
-        db.marketing_upload_batches.find(
-            {"status": {"$in": ["completed", "completed_with_errors"]}, "rolled_back_at": {"$exists": False}},
-            {"upload_batch_id": 1},
-        ).sort("uploaded_at", 1)
-    )
-    out_stats["batches"] = len(batches)
-    for batch in batches:
-        for row in db.marketing_raw_data.find({"upload_batch_id": batch.get("upload_batch_id")}):
-            if out_stats["rows_scanned"] >= PREVIEW_MAX_SOURCE_ROWS:
-                out_stats["truncated"] = True
-                return observations
-            out_stats["rows_scanned"] += 1
-            obs = aq.parse_source_row(row, config)
-            if obs is None:
-                out_stats["skipped_campaign"] += 1
-                continue
-            obs["code"] = aq.normalize_code(obs["code"])
-            if not obs["code"]:
-                out_stats["missing_code"] += 1
-                continue
-            observations.append(obs)
+    batches = set()
+    for batch_id, row in aq.iter_committed_source_rows(db, config):
+        batches.add(batch_id)
+        out_stats["batches"] = len(batches)
+        if out_stats["rows_scanned"] >= PREVIEW_MAX_SOURCE_ROWS:
+            out_stats["truncated"] = True
+            return observations
+        out_stats["rows_scanned"] += 1
+        obs = aq.parse_source_row(row, config)
+        if obs is None:
+            out_stats["skipped_campaign"] += 1
+            continue
+        obs["code"] = aq.normalize_code(obs["code"])
+        if not obs["code"]:
+            out_stats["missing_code"] += 1
+            continue
+        observations.append(obs)
     return observations
 
 
@@ -183,7 +198,7 @@ def _resolve_recipients(db, codes: set[str]) -> dict[str, dict]:
     }
 
 
-def _build_evidences(observations, recipients, *, now_utc, stats) -> list[dict]:
+def _build_evidences(observations, recipients, *, now_utc, stats, source=aq.SOURCE_MARKETING) -> list[dict]:
     """In-memory evidence, deduplicated exactly as the unique
     ``(source, source_ref)`` index would; a changed re-observation is
     marked for review (correction policy)."""
@@ -193,8 +208,15 @@ def _build_evidences(observations, recipients, *, now_utc, stats) -> list[dict]:
         if recipient["status"] in ("unknown", "non_welcome"):
             stats[f"{recipient['status']}_code"] += 1
             continue
-        doc = aq.build_evidence_doc(source=aq.SOURCE_MARKETING, recipient=recipient, now_utc=now_utc, **obs)
+        doc = aq.build_evidence_doc(source=source, recipient=recipient, now_utc=now_utc, **obs)
         prior = by_ref.get(doc["source_ref"])
+        if obs.get("observation") == aq.OBS_REMOVED:
+            # A later committed import dropped this row: correction policy
+            # (same as live record_redemption_evidence) -> review.
+            stats["removed_observations"] += 1
+            if prior is not None:
+                prior["_source_removed"] = True
+            continue
         if prior is None:
             doc["_id"] = "shadow:" + doc["source_ref"]
             by_ref[doc["source_ref"]] = doc
@@ -213,7 +235,9 @@ def _simulate(evidences, *, control, now_utc, lookup, credited: dict) -> list[di
     )
     outcomes = []
     for ev in order:
-        if ev.get("_conflicting_observation"):
+        if ev.get("_source_removed"):
+            a = {"status": aq.EV_REVIEW, "reason": "source_row_removed_by_later_import"}
+        elif ev.get("_conflicting_observation"):
             a = {"status": aq.EV_REVIEW, "reason": "conflicting_source_observations"}
         else:
             a = aq.assess_evidence(ev, control=control, now_utc=now_utc, lookup=lookup)
@@ -316,20 +340,35 @@ def build_preview(db, *, month: str | None, now_utc: datetime, source_config: di
             cohort_invitees.add(int(row["invitee_user_id"]))
 
     problems = aq.validate_source_config(config)
-    integration = aq.integration_readiness(db, config) if not problems else {"ok": False, "problems": problems}
-    blocked = bool(problems or not integration["ok"])
+    integration = (aq.integration_readiness(db, config, now_utc=now_utc) if not problems
+                   else {"ok": False, "problems": problems})
+    all_problems = sorted(set(problems + list(integration.get("problems") or [])))
+    blocking = [p for p in all_problems if p not in NON_BLOCKING_PROBLEMS]
+    blocked = bool(blocking)
+    is_databot = (config or {}).get("source") == aq.SOURCE_DATABOT_UIM
+    attestation = (config or {}).get("success_attestation") or {}
     payload["source"] = {
+        "name": aq.source_name(config),
+        "label": ("Databot UIM imports (committed batches)" if is_databot
+                  else "APReferral marketing uploads (marketing_raw_data)"),
         "configured": bool(control.get("source_config")),
         "using_preview_mapping": bool(config_overridden),
         "mapping": {k: (config or {}).get(k) for k in OVERRIDE_FIELDS},
-        "problems": sorted(set(problems + list(integration.get("problems") or []))),
+        "problems": all_problems,
         "blocked": blocked,
         "blocker": (
-            "No authoritative Welcome redemption data is available: "
-            + "; ".join(sorted(set(problems + list(integration.get("problems") or []))))
-            + ". New-rule figures cannot be computed until a source with an explicit success status, "
-              "account and redemption time is configured."
+            "No authoritative Welcome redemption data is available: " + "; ".join(blocking)
+            + ". New-rule figures are unavailable (not zero) until this is resolved."
         ) if blocked else None,
+        # Evidence incomplete (stale sync / batch mid-sync): figures shown, flagged.
+        "evidence_incomplete": [p for p in all_problems if p in NON_BLOCKING_PROBLEMS],
+        "sync": integration.get("sync"),
+        "success_basis": (
+            {"basis": (config or {}).get("success_basis"), "attested": bool(attestation.get("reference"))
+             and not attestation.get("preview_only"), "attested_by": attestation.get("by"),
+             "reference": attestation.get("reference")}
+            if is_databot else {"basis": "status_column", "status_column": (config or {}).get("status_column")}
+        ),
     }
 
     if blocked:
@@ -344,11 +383,13 @@ def build_preview(db, *, month: str | None, now_utc: datetime, source_config: di
         payload["outcome_reasons"] = {}
         return payload
 
-    stats = Counter(rows_scanned=0, batches=0, skipped_campaign=0, missing_code=0, unknown_code=0, non_welcome_code=0)
+    stats = Counter(rows_scanned=0, batches=0, skipped_campaign=0, missing_code=0, unknown_code=0, non_welcome_code=0,
+                    removed_observations=0)
     stats["truncated"] = False
     observations = _load_observations(db, config, stats)
     recipients = _resolve_recipients(db, {o["code"] for o in observations})
-    evidences = _build_evidences(observations, recipients, now_utc=now_utc, stats=stats)
+    evidences = _build_evidences(observations, recipients, now_utc=now_utc, stats=stats,
+                                 source=aq.source_name(config))
 
     evidence_invitees = {
         int(e["recipient_resolution"]["user_id"]) for e in evidences
@@ -522,4 +563,43 @@ def build_preview(db, *, month: str | None, now_utc: datetime, source_config: di
     payload["review_cases"] = cases
     payload["review_cases_total"] = sum(1 for o in historical if in_period(o) and o["status"] == aq.EV_REVIEW)
     payload["source_stats"] = dict(stats)
+    payload["evidence_summary"] = _evidence_summary(stats, evidences, historical, payload["source"].get("sync"))
+    if stats["truncated"]:
+        # Row cap hit: every new-rule figure above is a lower bound, not complete.
+        payload["source"]["evidence_incomplete"].append("preview_row_limit_reached")
+        payload["evidence_summary"]["truncated"] = True
+        payload["evidence_summary"]["basis"] = (
+            f"first {PREVIEW_MAX_SOURCE_ROWS:,} committed rows only (row limit reached) — figures are lower bounds"
+        )
     return payload
+
+
+def _evidence_summary(stats, evidences, historical, sync) -> dict:
+    """Source-level reconciliation, all time (not period-bound): every row
+    received is either unmatched (not a Welcome code), matched to a Welcome
+    recipient, or skipped; matched rows then end qualified / duplicate /
+    review / rejected. Counts only — nothing here is written anywhere."""
+    sync_counters = (sync or {}).get("row_counters") or {}
+    status = Counter(o["status"] for o in historical)
+    matched = sum(1 for e in evidences if (e.get("recipient_resolution") or {}).get("status") == "ok")
+    return {
+        # Databot rows reach the preview only if their code is in a Welcome
+        # store; the rest were counted at sync time.
+        "rows_received": int(sync_counters.get("received", 0)) + int(sync_counters.get("skipped_no_code", 0))
+        if sync else stats["rows_scanned"],
+        "rows_without_code": int(sync_counters.get("skipped_no_code", 0)) + stats["missing_code"],
+        "unmatched_not_welcome": int(sync_counters.get("unknown_code", 0)) + int(sync_counters.get("non_welcome_code", 0))
+        + stats["unknown_code"] + stats["non_welcome_code"],
+        "welcome_observations": len(evidences),
+        "matched_to_one_welcome_recipient": matched,
+        "ambiguous_or_unissued_recipient": len(evidences) - matched,
+        "removed_by_later_import": stats["removed_observations"],
+        "would_qualify": status[aq.EV_QUALIFIED],
+        "duplicate_account_excluded": status[aq.EV_DUPLICATE_ACCOUNT],
+        "requiring_review": status[aq.EV_REVIEW],
+        "rejected": status[aq.EV_REJECTED],
+        # All time, including evidence with no usable redemption time (which
+        # the period-scoped outcome_reasons cannot place in any month).
+        "review_reasons": dict(Counter(o["reason"] for o in historical if o["status"] == aq.EV_REVIEW).most_common()),
+        "basis": "all synced redemptions to date, replayed as if the rule had always applied",
+    }

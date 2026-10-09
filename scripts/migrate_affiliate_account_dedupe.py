@@ -116,35 +116,38 @@ def _welcome_codes(db) -> dict[str, set[int]]:
 
 
 def _redemptions_by_code(db, config: dict, welcome_codes: dict) -> dict[str, set]:
-    """code -> {account_key | "!<reason>"} from successful, committed rows."""
+    """code -> {account_key | "!<reason>"} from successful, committed rows of
+    the configured source. Uses the live parser (aq.parse_source_row) and the
+    live identity rule (aq.build_evidence_doc), so a seeded account key is
+    byte-identical to the key live processing later computes.
+
+    A later committed ``removed`` observation (Databot stale deletion)
+    cancels that code+account, exactly as live/preview route it to review
+    (``source_row_removed_by_later_import``): it is never seeded, and stays
+    out even if a later batch re-observes it."""
     out: dict[str, set] = defaultdict(set)
-    norm = aq._norm_column
-    code_col, account_col = norm(config["code_column"]), norm(config["account_column"])
-    status_col = norm(config["status_column"])
-    ns_col = norm(config["namespace_column"]) if config.get("namespace_column") else None
-    success = {str(v).strip().lower() for v in config.get("success_values") or []}
-    campaigns = {str(c).strip() for c in config.get("campaign_ids") or []}
-    batch_ids = [
-        b["upload_batch_id"]
-        for b in db.marketing_upload_batches.find(
-            {"status": {"$in": ["completed", "completed_with_errors"]}, "rolled_back_at": {"$exists": False}},
-            {"upload_batch_id": 1},
+    removed: dict[str, set] = defaultdict(set)
+    for _batch_id, row in aq.iter_committed_source_rows(db, config):
+        obs = aq.parse_source_row(row, config)
+        if obs is None:
+            continue
+        code = aq.normalize_code(obs["code"])
+        is_removal = obs.get("observation") == aq.OBS_REMOVED
+        if not code or code not in welcome_codes or not (is_removal or obs["redemption_successful"]):
+            continue
+        doc = aq.build_evidence_doc(
+            source=aq.source_name(config), code=code, recipient={}, now_utc=datetime.now(timezone.utc),
+            **{k: v for k, v in obs.items() if k != "code"},
         )
-    ]
-    for batch_id in batch_ids:
-        for row in db.marketing_raw_data.find({"upload_batch_id": batch_id}):
-            values = {norm(k): v for k, v in row.items()}
-            code = aq.normalize_code(values.get(code_col))
-            if not code or code not in welcome_codes:
-                continue
-            if campaigns and str(values.get("campaign_id") or "").strip() not in campaigns:
-                continue
-            if str(values.get(status_col) or "").strip().lower() not in success:
-                continue
-            key, reason = aq.canonical_account_key(
-                values.get(account_col), values.get(ns_col) if ns_col else config.get("account_namespace")
-            )
-            out[code].add(key or f"!{reason}")
+        key = doc["account_key"] or f"!{doc['account_reason']}"
+        if is_removal:
+            removed[code].add(key)
+        else:
+            out[code].add(key)
+    for code, keys in removed.items():
+        if out.get(code, set()) & keys:
+            out[code] -= keys
+            out[code].add("!source_row_removed_by_later_import")
     return out
 
 

@@ -801,6 +801,25 @@ def tick_5min() -> None:
             )
 
             with JobTimer() as step_timer:
+                # Databot UIM redemption evidence sync. Writes only its own
+                # uim_redemption_* collections; never qualifies or awards.
+                # No-op unless UIM_REDEMPTION_SYNC_ENABLED=true, independent of
+                # the qualification rule's mode.
+                try:
+                    import uim_redemption_sync
+
+                    uim_sync = uim_redemption_sync.run_scheduled_sync(db)
+                    if uim_sync.get("skipped") != "sync_disabled":
+                        logger.info("[JOB][5MIN] uim_redemption_sync run_id=%s result=%s", run_id, uim_sync)
+                except Exception as exc:
+                    logger.exception("[JOB][5MIN] step_error name=uim_redemption_sync run_id=%s err=%s", run_id, exc)
+            logger.info(
+                "[JOB][5MIN] step_done name=uim_redemption_sync elapsed_s=%.2f run_id=%s",
+                step_timer.elapsed_s,
+                run_id,
+            )
+
+            with JobTimer() as step_timer:
                 # welcome_redemption_v1 qualification. No-op until the rule is
                 # activated via scripts/affiliate_qualification_admin.py.
                 try:
@@ -5160,7 +5179,7 @@ def dashboard_affiliate_qualification_preview():
         payload = _aqp.build_preview(
             db, month=window["month"], now_utc=now, source_config=config, config_overridden=overridden
         )
-        payload["data_source"] = "marketing_raw_data (shadow)"
+        payload["data_source"] = f"{payload['source']['label']} (shadow)"
         payload["window_label"] = payload["period"]["label"]
         return payload
 

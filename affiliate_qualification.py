@@ -71,7 +71,42 @@ MODE_ACTIVE = "active"
 MODE_PAUSED = "paused"
 
 SOURCE_MARKETING = "marketing_raw_data"
+# Databot's committed UIM imports, pulled by uim_redemption_sync into
+# uim_redemption_batches / uim_redemption_rows (see that module).
+SOURCE_DATABOT_UIM = "databot_uim"
 WELCOME_POOL_ID = "WELCOME"
+
+# Where each source's committed rows live. Batches carry the same
+# extraction cursor/lease fields (welcome_evidence_*) and the same
+# ``rolled_back_at`` correction marker whatever the source.
+SOURCE_SPECS = {
+    SOURCE_MARKETING: {
+        "batches": "marketing_upload_batches",
+        "rows": "marketing_raw_data",
+        "batch_key": "upload_batch_id",
+        "committed": {"status": {"$in": ["completed", "completed_with_errors"]}},
+        "order": "uploaded_at",
+    },
+    SOURCE_DATABOT_UIM: {
+        "batches": "uim_redemption_batches",
+        "rows": "uim_redemption_rows",
+        "batch_key": "batch_id",
+        # rows_complete: every row of the Databot batch has been synced, so
+        # an extraction pass can never mark a half-synced batch done.
+        "committed": {"status": "committed", "rows_complete": True},
+        "order": "committed_at",
+    },
+}
+
+# Databot UIM rows carry no status column. A row counts as a successful
+# redemption ONLY under this basis, which requires a recorded attestation
+# by the data owner that the UIM export lists successful redemptions only.
+SUCCESS_BASIS_SOURCE_CONTRACT = "source_contract_successful_only"
+# Rows imported into Databot before redeem-time provenance was recorded:
+# "review" (default) or "naive_wallclock" (data owner attests the export's
+# Coupon Redeem Time is naive wall clock in source_timezone).
+LEGACY_TIME_REVIEW = "review"
+LEGACY_TIME_NAIVE = "naive_wallclock"
 
 EV_RECEIVED = "received"
 EV_QUALIFIED = "qualified"
@@ -390,10 +425,60 @@ def identity_config(config: dict | None) -> dict:
     return {k: cfg.get(k) or None for k in IDENTITY_CONFIG_KEYS}
 
 
+def source_name(config: dict | None) -> str:
+    return (config or {}).get("source") or SOURCE_MARKETING
+
+
+def source_spec(config: dict | None) -> dict:
+    return SOURCE_SPECS[source_name(config)]
+
+
+def committed_batch_filter(config: dict | None) -> dict:
+    return {**source_spec(config)["committed"], "rolled_back_at": {"$exists": False}}
+
+
+# Fixed by the Databot feed contract (databot.uim_redemption_feed.v1): the
+# column names are the synced row's field names, recorded in the config so
+# identity_config() stays meaningful and frozen like any other source.
+DATABOT_FIXED_COLUMNS = {
+    "code_column": "coupon_code",
+    "account_column": "account",
+    "redeemed_at_column": "redeemed_at_utc",
+}
+
+
+def _validate_databot_config(cfg: dict) -> list[str]:
+    problems = []
+    for key, expected in DATABOT_FIXED_COLUMNS.items():
+        if cfg.get(key) != expected:
+            problems.append(f"databot_fixed_column:{key}")
+    if cfg.get("namespace_column"):
+        problems.append("databot_has_no_namespace_column")
+    if normalize_namespace(cfg.get("account_namespace")) is None:
+        problems.append("missing:account_namespace")
+    if not cfg.get("source_timezone"):
+        problems.append("missing:source_timezone")
+    else:
+        try:
+            pytz.timezone(cfg["source_timezone"])
+        except Exception:
+            problems.append("invalid_source_timezone")
+    if cfg.get("success_basis") != SUCCESS_BASIS_SOURCE_CONTRACT:
+        problems.append("missing:success_basis")
+    attestation = cfg.get("success_attestation") or {}
+    if not (isinstance(attestation, dict) and attestation.get("by") and attestation.get("reference")):
+        problems.append("missing:success_attestation")
+    if (cfg.get("legacy_time_basis") or LEGACY_TIME_REVIEW) not in (LEGACY_TIME_REVIEW, LEGACY_TIME_NAIVE):
+        problems.append("invalid_legacy_time_basis")
+    return problems
+
+
 def validate_source_config(config: dict | None) -> list[str]:
     """Problems that make a redemption source unusable as authoritative
     evidence. Empty list = structurally usable."""
     cfg = config or {}
+    if cfg.get("source") == SOURCE_DATABOT_UIM:
+        return _validate_databot_config(cfg)
     problems = [f"missing:{key}" for key in REQUIRED_SOURCE_KEYS if not cfg.get(key)]
     if cfg.get("source") not in (None, SOURCE_MARKETING):
         problems.append("unsupported_source")
@@ -411,11 +496,17 @@ def validate_source_config(config: dict | None) -> list[str]:
     return problems
 
 
-def integration_readiness(db, config: dict | None, *, sample_batches: int = 3) -> dict:
+def integration_readiness(db, config: dict | None, *, sample_batches: int = 3, now_utc: datetime | None = None) -> dict:
     """Structural config check plus proof that recent committed uploads carry
     every configured column. Read-only."""
     problems = validate_source_config(config)
     cfg = config or {}
+    if cfg.get("source") == SOURCE_DATABOT_UIM:
+        import uim_redemption_sync
+
+        sync = uim_redemption_sync.sync_health(db, now_utc=now_utc or datetime.now(timezone.utc))
+        problems.extend(sync["problems"])
+        return {"ok": not problems, "problems": sorted(set(problems)), "sync": sync}
     batches = list(
         db.marketing_upload_batches.find(
             {"status": {"$in": ["completed", "completed_with_errors"]}, "rolled_back_at": {"$exists": False}},
@@ -517,10 +608,23 @@ def build_evidence_doc(
     redemption_successful: bool,
     campaign_id=None,
     now_utc: datetime,
+    account_reason: str | None = None,
+    redeemed_at_reason: str | None = None,
+    evidence_basis: dict | None = None,
+    observation: str | None = None,
 ) -> dict:
     """The evidence document for one normalised observation (no I/O).
-    ``source_ref`` is its idempotency key: same code + account = same row."""
-    account_key, account_reason = canonical_account_key(account_raw, namespace)
+    ``source_ref`` is its idempotency key: same code + account = same row.
+
+    ``account_reason`` / ``redeemed_at_reason`` come from source provenance
+    (e.g. an account that was a numeric spreadsheet cell, a redeem time whose
+    timezone is unknown): the value is then not trusted and the reason routes
+    the evidence to review. ``evidence_basis`` records how success, time and
+    account were established. ``observation`` is consumed by the caller."""
+    if account_reason:
+        account_key = None
+    else:
+        account_key, account_reason = canonical_account_key(account_raw, namespace)
     chash = code_hash(code)
     return {
         "source": source,
@@ -532,7 +636,9 @@ def build_evidence_doc(
         "account_key_masked": mask_value(account_key) if account_key else None,
         "account_reason": account_reason,
         "redeemed_at": redeemed_at,
+        "redeemed_at_reason": None if redeemed_at else (redeemed_at_reason or None),
         "redemption_successful": bool(redemption_successful),
+        "evidence_basis": evidence_basis,
         "observation_fingerprint": _observation_fingerprint(redemption_successful, redeemed_at),
         "campaign_id": None if campaign_id is None else str(campaign_id),
         "recipient_resolution": recipient,
@@ -555,10 +661,16 @@ def record_redemption_evidence(
     source_row_id=None,
     campaign_id=None,
     now_utc: datetime,
+    account_reason: str | None = None,
+    redeemed_at_reason: str | None = None,
+    evidence_basis: dict | None = None,
+    observation: str | None = None,
 ) -> dict:
     """Upsert one redemption observation. Re-importing the same row is a
     no-op; a conflicting re-observation (status or time changed) is routed
-    to review per the correction policy instead of silently overwriting."""
+    to review per the correction policy instead of silently overwriting.
+    A ``removed`` observation (a later source import dropped the row) never
+    creates evidence; it flags existing evidence for review instead."""
     code_n = normalize_code(code)
     if not code_n:
         return {"recorded": False, "reason": "missing_code"}
@@ -570,8 +682,19 @@ def record_redemption_evidence(
     insert_doc = build_evidence_doc(
         source=source, code=code_n, recipient=recipient, account_raw=account_raw, namespace=namespace,
         redeemed_at=redeemed_at, redemption_successful=redemption_successful, campaign_id=campaign_id,
-        now_utc=now_utc,
+        now_utc=now_utc, account_reason=account_reason, redeemed_at_reason=redeemed_at_reason,
+        evidence_basis=evidence_basis,
     )
+    if observation == OBS_REMOVED:
+        existing = db[EVIDENCE_COLLECTION].find_one({"source": source, "source_ref": insert_doc["source_ref"]})
+        if existing is None:
+            return {"recorded": False, "reason": "removal_without_evidence"}
+        db[EVIDENCE_COLLECTION].update_one(
+            {"_id": existing["_id"]},
+            {"$addToSet": {"removed_in_batch_ids": source_batch_id}, "$set": {"last_seen_at": now_utc}},
+        )
+        _flag_conflicting_observation(db, existing, now_utc=now_utc, reason="source_row_removed_by_later_import")
+        return {"recorded": True, "new": False, "conflict": True, "removed": True}
     source_ref = insert_doc["source_ref"]
     fingerprint = insert_doc["observation_fingerprint"]
     update = {
@@ -600,7 +723,8 @@ def record_redemption_evidence(
     return {"recorded": True, "new": False}
 
 
-def _flag_conflicting_observation(db, evidence: dict, *, now_utc: datetime) -> None:
+def _flag_conflicting_observation(db, evidence: dict, *, now_utc: datetime,
+                                  reason: str = "conflicting_source_observations") -> None:
     """Correction policy: a changed observation never rewrites evidence.
     Unprocessed evidence goes to review; a qualification it already produced
     is flagged for manual reconciliation (never auto-revoked)."""
@@ -608,7 +732,7 @@ def _flag_conflicting_observation(db, evidence: dict, *, now_utc: datetime) -> N
     if evidence.get("status") == EV_RECEIVED:
         db[EVIDENCE_COLLECTION].update_one(
             {"_id": ev_id, "status": EV_RECEIVED},
-            {"$set": {"status": EV_REVIEW, "reason": "conflicting_source_observations", "updated_at": now_utc}},
+            {"$set": {"status": EV_REVIEW, "reason": reason, "updated_at": now_utc}},
         )
         _release_reservation_for(db, ev_id)
     else:
@@ -632,6 +756,8 @@ def parse_source_row(row: dict, config: dict) -> dict | None:
     :func:`record_redemption_evidence` / :func:`build_evidence_doc`, or None
     when the row is outside the configured Welcome campaigns. Pure."""
     cfg = config or {}
+    if cfg.get("source") == SOURCE_DATABOT_UIM:
+        return _parse_databot_row(row, cfg)
     values = {_norm_column(k): v for k, v in row.items()}
     campaign_id = values.get("campaign_id")
     campaign_ids = {str(c).strip() for c in cfg.get("campaign_ids") or []}
@@ -650,18 +776,111 @@ def parse_source_row(row: dict, config: dict) -> dict | None:
     }
 
 
+OBS_REMOVED = "removed"
+_DIGITS_ACCOUNT_RE = re.compile(r"^\d+(\.0+)?$")
+
+
+def _databot_account_reason(row: dict) -> str | None:
+    """Why a synced UIM account string cannot be trusted as text, from the
+    import provenance Databot records (``account_basis``):
+    ``numeric`` = an XLSX numeric cell (leading zeros may be gone).
+    For rows imported before provenance existed the file type decides:
+    Databot's CSV import keeps every cell as text (csv.DictReader), so a CSV
+    account is exact; an all-digit account from an XLSX file may have been a
+    numeric cell and cannot be verified."""
+    account = row.get("account")
+    if not isinstance(account, str):
+        return None  # canonical_account_key refuses non-text itself
+    basis = row.get("account_basis")
+    if basis == "numeric":
+        return "account_numeric_coerced"
+    if basis == "text":
+        return None
+    if row.get("file_type") == "csv":
+        return None
+    if _DIGITS_ACCOUNT_RE.match(account.strip()):
+        return "account_numeric_unverifiable"
+    return None
+
+
+def _databot_redeemed_at(row: dict, cfg: dict) -> tuple[datetime | None, str | None]:
+    """Redemption instant from a synced UIM row, honouring how Databot says
+    the stored value relates to the source text. Never guesses: a time whose
+    timezone, day/month order or time-of-day is unknown is ``None`` + reason."""
+    if _norm_column(row.get("redeemed_at_column")) in _CLAIM_TIME_COLUMNS:
+        return None, "redeemed_at_column_is_a_claim_time"
+    basis = row.get("redeemed_at_basis")
+    if basis == "source_offset":
+        return parse_redeemed_at(row.get("redeemed_at_utc"), cfg["source_timezone"]), None
+    if basis == "unknown_legacy":
+        if (cfg.get("legacy_time_basis") or LEGACY_TIME_REVIEW) != LEGACY_TIME_NAIVE:
+            return None, "redeemed_at_timezone_unverified"
+        basis = "naive_wallclock"
+    if basis == "naive_wallclock":
+        parsed = parse_redeemed_at(row.get("redeemed_at_wallclock"), cfg["source_timezone"])
+        return parsed, None if parsed else "missing_redeemed_at"
+    if basis in ("date_only", "ambiguous_day_month"):
+        return None, f"redeemed_at_{basis}"
+    return None, "missing_redeemed_at"
+
+
+def _parse_databot_row(row: dict, cfg: dict) -> dict | None:
+    """A synced Databot UIM row (feed contract v1) -> observation kwargs."""
+    campaign = row.get("campaign")
+    campaign_ids = {str(c).strip() for c in cfg.get("campaign_ids") or []}
+    if campaign_ids and str(campaign or "").strip() not in campaign_ids:
+        return None
+    removed = row.get("observation") == "deleted"
+    redeemed_at, redeemed_at_reason = _databot_redeemed_at(row, cfg)
+    return {
+        "code": row.get("coupon_code"),
+        "account_raw": row.get("account"),
+        "namespace": cfg.get("account_namespace"),
+        "redeemed_at": redeemed_at,
+        # No status column exists: success rests solely on the attested
+        # source contract (validate_source_config refuses the source without it).
+        "redemption_successful": (not removed) and cfg.get("success_basis") == SUCCESS_BASIS_SOURCE_CONTRACT,
+        "campaign_id": campaign,
+        "account_reason": _databot_account_reason(row),
+        "redeemed_at_reason": redeemed_at_reason,
+        "observation": OBS_REMOVED if removed else None,
+        "evidence_basis": {
+            "success": cfg.get("success_basis"),
+            "success_attestation_ref": (cfg.get("success_attestation") or {}).get("reference"),
+            "redeemed_at": row.get("redeemed_at_basis"),
+            "account": row.get("account_basis"),
+            "provenance": row.get("provenance"),
+            "source_row_ref": row.get("_id"),
+        },
+    }
+
+
+def iter_committed_source_rows(db, config: dict | None):
+    """``(batch_id, row)`` for every row of every committed, not rolled-back
+    batch of the configured source, batches in commit order, rows in ``_id``
+    order (the order corrections were made in). Read-only."""
+    spec = source_spec(config)
+    key = spec["batch_key"]
+    batches = db[spec["batches"]].find(committed_batch_filter(config), {key: 1}).sort(spec["order"], 1)
+    for batch in list(batches):
+        for row in db[spec["rows"]].find({key: batch.get(key)}).sort("_id", 1):
+            yield batch.get(key), row
+
+
 def extract_marketing_batch(
     db, *, upload_batch_id: str, config: dict, now_utc: datetime, after_id=None, max_rows: int | None = None
 ) -> dict:
-    """Turn (part of) one committed marketing upload into evidence, in
+    """Turn (part of) one committed source batch (a marketing upload, or a
+    synced Databot UIM batch — ``config["source"]``) into evidence, in
     ``_id`` order from ``after_id``. Idempotent, so a resumed or repeated
     pass over the same rows changes nothing."""
     summary = {"rows": 0, "recorded": 0, "new": 0, "conflicts": 0, "missing_code": 0,
                "unknown_code": 0, "non_welcome_code": 0, "skipped_campaign": 0}
-    query = {"upload_batch_id": upload_batch_id}
+    spec = source_spec(config)
+    query = {spec["batch_key"]: upload_batch_id}
     if after_id is not None:
         query["_id"] = {"$gt": after_id}
-    cursor = db.marketing_raw_data.find(query).sort("_id", 1)
+    cursor = db[spec["rows"]].find(query).sort("_id", 1)
     if max_rows:
         cursor = cursor.limit(int(max_rows))
     last_id = after_id
@@ -674,14 +893,14 @@ def extract_marketing_batch(
             continue
         out = record_redemption_evidence(
             db,
-            source=SOURCE_MARKETING,
+            source=source_name(config),
             source_batch_id=upload_batch_id,
             source_row_id=row.get("_id"),
             now_utc=now_utc,
             **obs,
         )
         if not out.get("recorded"):
-            summary[out["reason"]] += 1
+            summary[out["reason"]] = summary.get(out["reason"], 0) + 1
             continue
         summary["recorded"] += 1
         summary["new"] += int(bool(out.get("new")))
@@ -699,11 +918,12 @@ def extract_committed_batches(db, *, config: dict, now_utc: datetime, max_rows: 
     read; the lease makes a crashed pass retryable."""
     out = {"batches_completed": 0, "rows": 0, "new": 0, "conflicts": 0}
     budget = int(max_rows)
+    spec = source_spec(config)
+    batches = db[spec["batches"]]
     while budget > 0:
-        batch = db.marketing_upload_batches.find_one_and_update(
+        batch = batches.find_one_and_update(
             {
-                "status": {"$in": ["completed", "completed_with_errors"]},
-                "rolled_back_at": {"$exists": False},
+                **committed_batch_filter(config),
                 "welcome_evidence_extracted_at": {"$exists": False},
                 "$or": [
                     {"welcome_evidence_lease_until": {"$exists": False}},
@@ -711,19 +931,19 @@ def extract_committed_batches(db, *, config: dict, now_utc: datetime, max_rows: 
                 ],
             },
             {"$set": {"welcome_evidence_lease_until": now_utc + BATCH_EXTRACT_LEASE}},
-            sort=[("uploaded_at", 1)],
+            sort=[(spec["order"], 1)],
             return_document=ReturnDocument.AFTER,
         )
         if not batch:
             break
         summary = extract_marketing_batch(
-            db, upload_batch_id=batch["upload_batch_id"], config=config, now_utc=now_utc,
+            db, upload_batch_id=batch[spec["batch_key"]], config=config, now_utc=now_utc,
             after_id=batch.get("welcome_evidence_cursor"), max_rows=budget,
         )
         budget -= summary["rows"]
         counters = {f"welcome_evidence_summary.{k}": v for k, v in summary.items() if k not in ("last_id", "done")}
         done_fields = {"welcome_evidence_extracted_at": now_utc} if summary["done"] else {}
-        db.marketing_upload_batches.update_one(
+        batches.update_one(
             {"_id": batch["_id"]},
             {
                 "$set": {"welcome_evidence_cursor": summary["last_id"], **done_fields},
@@ -736,8 +956,8 @@ def extract_committed_batches(db, *, config: dict, now_utc: datetime, max_rows: 
         out["new"] += summary["new"]
         out["conflicts"] += summary["conflicts"]
         logger.info(
-            "[AFF_QUAL][BATCH_EXTRACT] upload_batch_id=%s done=%s rows=%s new=%s",
-            batch["upload_batch_id"], summary["done"], summary["rows"], summary["new"],
+            "[AFF_QUAL][BATCH_EXTRACT] source=%s batch_id=%s done=%s rows=%s new=%s",
+            spec["rows"], batch[spec["batch_key"]], summary["done"], summary["rows"], summary["new"],
         )
         if not summary["done"]:
             break
@@ -931,7 +1151,7 @@ def assess_evidence(evidence: dict, *, control: dict, now_utc: datetime, lookup)
         return verdict(EV_REJECTED, "redemption_not_successful")
     redeemed_at = _aware_utc(evidence.get("redeemed_at"))
     if redeemed_at is None:
-        return verdict(EV_REVIEW, "missing_redeemed_at")
+        return verdict(EV_REVIEW, evidence.get("redeemed_at_reason") or "missing_redeemed_at")
     if redeemed_at > _aware_utc(now_utc) + FUTURE_REDEMPTION_TOLERANCE:
         # A redemption cannot postdate its own processing; never attribute
         # (or reward) a future month on a bad source timestamp.
@@ -1230,7 +1450,8 @@ def park_pending_referral(db, *, pending_id, invitee_user_id, inviter_user_id, n
     )
 
 
-def void_upload_batch(db, *, upload_batch_id: str, reason: str, now_utc: datetime) -> dict:
+def void_upload_batch(db, *, upload_batch_id: str, reason: str, now_utc: datetime,
+                      source: str = SOURCE_MARKETING) -> dict:
     """Rollback / correction of a source upload (documented policy).
 
     * The batch is marked ``rolled_back_at`` so it is never (re)extracted.
@@ -1241,12 +1462,13 @@ def void_upload_batch(db, *, upload_batch_id: str, reason: str, now_utc: datetim
       ``evidence_status=voided_pending_reconciliation`` for manual review.
       Issued rewards are never touched.
     """
-    db.marketing_upload_batches.update_one(
-        {"upload_batch_id": upload_batch_id},
+    spec = SOURCE_SPECS[source]
+    db[spec["batches"]].update_one(
+        {spec["batch_key"]: upload_batch_id},
         {"$set": {"rolled_back_at": now_utc, "rollback_reason": reason}},
     )
     out = {"voided": 0, "flagged_qualified": 0, "kept_other_sources": 0}
-    for ev in db[EVIDENCE_COLLECTION].find({"source_batch_ids": upload_batch_id}):
+    for ev in db[EVIDENCE_COLLECTION].find({"source": source, "source_batch_ids": upload_batch_id}):
         if [b for b in ev.get("source_batch_ids") or [] if b != upload_batch_id]:
             out["kept_other_sources"] += 1
             continue
@@ -1275,8 +1497,9 @@ def _code_from_source_rows(db, evidence: dict, config: dict | None) -> str | Non
     """The raw code for an evidence row, re-read from its committed source
     row (evidence itself stores only a hash). Verified against that hash."""
     code_col = _norm_column((config or {}).get("code_column"))
+    rows_col = SOURCE_SPECS.get(evidence.get("source") or SOURCE_MARKETING, SOURCE_SPECS[SOURCE_MARKETING])["rows"]
     for row_id in evidence.get("source_row_ids") or []:
-        row = db.marketing_raw_data.find_one({"_id": row_id})
+        row = db[rows_col].find_one({"_id": row_id})
         if not row:
             continue
         code = normalize_code({_norm_column(k): v for k, v in row.items()}.get(code_col))

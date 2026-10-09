@@ -1,6 +1,6 @@
 # Affiliate qualification: verified Welcome redemption (`welcome_redemption_v1`)
 
-Status: **implemented, disabled by default, blocked on an authoritative redemption source** (see §6).
+Status: **implemented, disabled by default.** Redemption source: Databot UIM imports via a private feed (§10), pending a data-owner success-only attestation; `marketing_raw_data` remains blocked (§6).
 
 ## 1. Audit — current flow (pre-patch)
 
@@ -136,3 +136,70 @@ Admin Dashboard → Affiliate Centre → **Qualification Preview**
   `configure-source`.
 * Bounded: at most 200 000 source rows per run (`source_stats.truncated` flags it), 500 affiliate rows,
   200 review cases. Codes and Account IDs are masked in the payload.
+
+## 10. Databot UIM evidence source (`databot_uim`)
+
+The authoritative UIM redemption rows live in **Databot's** DB (`marketing_raw_data` there, written
+by Databot's UIM import), not in this repo's `marketing_raw_data`. APReferral has no credentials for
+Databot's DB (and none are added): Databot exposes a private, token-authenticated, read-only feed
+(`databot.uim_redemption_feed.v1`; contract + audit in Databot `docs/uim_welcome_redemption_feed.md`)
+and APReferral pulls it.
+
+**Write boundary.** `uim_redemption_sync` (5-min tick, `UIM_REDEMPTION_SYNC_ENABLED=true`, independent
+of the rule's mode) writes ONLY `uim_redemption_sync_state`, `uim_redemption_batches`,
+`uim_redemption_rows` (evidence/checkpoint records). It never writes `welcome_redemption_evidence`,
+`qualified_events`, the registry, XP, ledgers or the control doc. The preview reads those three
+collections and writes nothing. Live extraction into `welcome_redemption_evidence` happens only once
+the rule is active, through the unchanged pipeline (`SOURCE_SPECS` picks the collections).
+
+**Sync.** Lists every Databot batch (metadata only), then pages rows of committed batches oldest
+commit first, ≤5 000 rows/run, from a per-batch cursor. Rows are insert-only by Databot's stable
+`ref` (`_id`), so retries, crashes, overlapping runs and re-imports are no-ops; the cursor and
+counters advance with one conditional update after the page is stored (no double counting; a lost
+race re-reads, never skips). A batch is extractable only when `rows_complete`. Only rows whose code
+is in a Welcome store are stored; the rest are counted (`unknown_code` / `non_welcome_code`).
+Lease (`uim_redemption_sync_state`, 10 min) avoids duplicate work. A Databot rollback is propagated
+once via `void_upload_batch(..., source="databot_uim")` (existing policy: void unprocessed, flag
+qualified `voided_pending_reconciliation`, never revoke or release an account). A stale-deletion
+(`observation=deleted`) routes existing evidence to `pending_review: source_row_removed_by_later_import`.
+
+**Validation (same canonical rules).** `parse_source_row` dispatches to `_parse_databot_row`; then the
+unchanged `decide_recipient` → `build_evidence_doc` → `assess_evidence`. Provenance never upgrades
+trust, it only routes to review:
+
+| Source fact | Outcome |
+|---|---|
+| no status column | success only if `success_basis=source_contract_successful_only` **and** a recorded `success_attestation {by, reference}`; otherwise the source is blocked |
+| `redeemed_at_basis=naive_wallclock` | wall clock localised in `source_timezone` (Asia/Kuala_Lumpur) |
+| `source_offset` | exact instant |
+| `unknown_legacy` (imported before provenance) | `review: redeemed_at_timezone_unverified`, unless `legacy_time_basis=naive_wallclock` is attested |
+| `date_only` / `ambiguous_day_month` / time column `claim_time` | review (`redeemed_at_date_only`, `redeemed_at_ambiguous_day_month`, `redeemed_at_column_is_a_claim_time`) |
+| `account_basis=numeric` (XLSX numeric cell) | review `account_numeric_coerced` |
+| legacy all-digit account from XLSX | review `account_numeric_unverifiable` (legacy CSV accounts are exact text) |
+
+Account identity is `"<account_namespace>:<account>"`, case and leading zeros preserved — the same
+`build_evidence_doc` path is used by the migration seeding (`_redemptions_by_code` now iterates
+`iter_committed_source_rows`), so seeded keys equal live keys.
+
+**Preview additions.** Source label, last successful sync, last error, coverage (GMT+8 wall clock),
+latest committed UIM batch, success basis (attested vs. "ASSUMED — preview only"), and an all-time
+reconciliation: rows received / unmatched (not Welcome) / matched to one Welcome recipient / removed
+by later import / would qualify / duplicate Account IDs excluded / requiring review (+ reasons).
+Never synced or no committed batch → blocked ("not zero"); stale sync (> `UIM_REDEMPTION_STALE_AFTER_MINUTES`,
+default 60) or a batch mid-sync → figures shown with an "incomplete" banner. Preflight treats both as failures.
+
+**Runbook (nothing below activates the rule or sets a cutoff).**
+
+```bash
+# Databot: fly secrets set UIM_REDEMPTION_FEED_TOKEN=<t> DASHBOARD_BIND_HOST=::
+fly secrets set -a apreferralv1 UIM_REDEMPTION_FEED_URL=http://databot.internal:8080 \
+  UIM_REDEMPTION_FEED_TOKEN=<t> UIM_REDEMPTION_SYNC_ENABLED=true
+python scripts/affiliate_qualification_admin.py sync-status                 # read-only health
+python scripts/affiliate_qualification_admin.py sync-evidence               # dry run (shows health)
+python scripts/affiliate_qualification_admin.py sync-evidence --commit      # optional manual pass
+# Preview without saving anything: Affiliate Centre -> Qualification Preview -> mapping:
+#   source=Databot UIM imports, account namespace, success basis "assume successful-only (preview only)".
+# After the data owner attests (writes the control doc's source_config only; mode stays disabled):
+python scripts/affiliate_qualification_admin.py configure-databot-source --account-namespace <provider> \
+  --attested-by "<data owner>" --attestation-ref "<ticket>" [--legacy-time-basis naive_wallclock] [--commit]
+```
