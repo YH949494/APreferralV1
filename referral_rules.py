@@ -95,6 +95,8 @@ def build_public_referral_status(row: dict | None, logger=None) -> dict[str, str
         return {"status": "qualified", "label": "Qualified", "icon": "🟢", "tone": "success"}
     if reason in {"pending", "pending_channel", "processing"}:
         return {"status": "pending", "label": "Checking", "icon": "🟡", "tone": "warning"}
+    if reason == "awaiting_redemption":
+        return {"status": "pending", "label": "Awaiting Welcome redemption", "icon": "🟡", "tone": "warning"}
     if reason == "not_subscribed_channel":
         return {"status": "failed", "label": "Not subscribed", "icon": "🔴", "tone": "danger"}
     if reason == "left_channel":

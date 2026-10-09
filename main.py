@@ -65,7 +65,7 @@ from vouchers import (
 from admin_auth import admin_auth_bp, configure_admin_session
 from referral_rules import calc_referral_progress, REFERRAL_XP_PER_SUCCESS, REFERRAL_BONUS_INTERVAL, REFERRAL_BONUS_XP, build_public_referral_status
 from referral_ledger import with_not_invalidated
-from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots, evaluate_affiliate_simulated_ledgers, compute_affiliate_daily_kpi_yesterday, run_invitee_subscription_audit, SUB_AUDIT_CADENCE_MINUTES, reconcile_drop_statuses, post_growth_leaderboard_weekly, publish_weekly_referral_post, process_welcome_voucher_lifecycle, process_welcome_reminders, trigger_welcome_unlock_push, retry_pending_affiliate_milestone_congrats
+from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots, evaluate_affiliate_simulated_ledgers, compute_affiliate_daily_kpi_yesterday, run_invitee_subscription_audit, SUB_AUDIT_CADENCE_MINUTES, reconcile_drop_statuses, post_growth_leaderboard_weekly, publish_weekly_referral_post, process_welcome_voucher_lifecycle, process_welcome_reminders, trigger_welcome_unlock_push, retry_pending_affiliate_milestone_congrats, run_welcome_redemption_qualification
 from affiliate_dashboard_export import run_affiliate_dashboard_export_monthly_scheduled
 from referral_rate_limit import consume_referral_rate_limits
 from affiliate_leaderboard import (
@@ -796,6 +796,23 @@ def tick_5min() -> None:
                 settle_pending_referrals_with_cache_clear()
             logger.info(
                 "[JOB][5MIN] step_done name=settle_pending_referrals elapsed_s=%.2f run_id=%s",
+                step_timer.elapsed_s,
+                run_id,
+            )
+
+            with JobTimer() as step_timer:
+                # welcome_redemption_v1 qualification. No-op until the rule is
+                # activated via scripts/affiliate_qualification_admin.py.
+                try:
+                    welcome_qual = run_welcome_redemption_qualification()
+                    if welcome_qual.get("active") or welcome_qual.get("effects"):
+                        logger.info("[JOB][5MIN] welcome_redemption_qualification run_id=%s result=%s", run_id, welcome_qual)
+                except Exception as exc:
+                    logger.exception(
+                        "[JOB][5MIN] step_error name=welcome_redemption_qualification run_id=%s err=%s", run_id, exc
+                    )
+            logger.info(
+                "[JOB][5MIN] step_done name=welcome_redemption_qualification elapsed_s=%.2f run_id=%s",
                 step_timer.elapsed_s,
                 run_id,
             )

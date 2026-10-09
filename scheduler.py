@@ -22,9 +22,11 @@ from affiliate_rewards import (
     T4_THRESHOLD as _AFF_T4_THRESHOLD,
     T5_THRESHOLD as _AFF_T5_THRESHOLD,
     mark_invitee_qualified,
+    evaluate_monthly_affiliate_reward,
 )
 from affiliate_reward_plans import normalize_month as _normalize_month, reward_value as _plan_reward_value
 from affiliate_group_access import maybe_unlock_affiliate_group
+import affiliate_qualification
 import referral_invitee_lock
 from referral_ledger import with_not_invalidated
 
@@ -3951,6 +3953,16 @@ def _resolve_pending_destination(pending: dict) -> tuple[int, str, str]:
 def settle_pending_referrals(batch_limit: int = 200) -> None:
     now_utc_ts = now_utc()
     cutoff = now_utc_ts - timedelta(hours=_referral_hold_hours())
+    try:
+        # From the welcome_redemption_v1 launch cutoff on, this settlement no
+        # longer qualifies anyone (affiliate_qualification is the only
+        # writer). Fail closed: if the switch cannot be read, settle nothing.
+        legacy_award_allowed = affiliate_qualification.legacy_award_allowed(
+            affiliate_qualification.get_control(db), now_utc_ts
+        )
+    except Exception:
+        logger.exception("[SCHED][REFERRAL] skipped reason=qualification_control_unreadable")
+        return
     recovered = _recover_stale_processing(now_utc_ts)
     if recovered:
         logger.info("[SCHED][REFERRAL] recovered_stale_processing=%s", recovered)
@@ -3958,6 +3970,7 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
     scanned = 0
     awarded = 0
     revoked = 0
+    parked = 0
     
     while scanned < batch_limit:
         pending = db.pending_referrals.find_one_and_update(
@@ -4032,6 +4045,21 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                     db, invitee_user_id=invitee_user_id, status="revoked", now_utc_ts=now_utc_ts
                 )                
                 revoked += 1
+                continue
+
+            if not legacy_award_allowed:
+                # Channel membership and check-in engagement below exist only
+                # to drive the legacy award; under the new rule the referral
+                # record just waits for verified Welcome redemption.
+                step = "park_for_welcome_redemption"
+                affiliate_qualification.park_pending_referral(
+                    db,
+                    pending_id=pending_id,
+                    invitee_user_id=invitee_user_id,
+                    inviter_user_id=inviter_user_id,
+                    now_utc=now_utc_ts,
+                )
+                parked += 1
                 continue
 
             step = "check_channel"
@@ -4608,9 +4636,188 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
 
     confirm_qualified_invitees()
     logger.info(
-        "[SCHED][REFERRAL] settle scanned=%s awarded=%s revoked=%s batch_limit=%s",
+        "[SCHED][REFERRAL] settle scanned=%s awarded=%s revoked=%s parked=%s batch_limit=%s",
         scanned,
         awarded,
         revoked,
+        parked,
         batch_limit,        
     )
+
+
+def apply_welcome_redemption_effects(batch_limit: int = 200, now_utc_ts: datetime | None = None) -> dict:
+    """Downstream effects of a welcome_redemption_v1 qualification, applied
+    exactly once per qualified_events row (lease + effects_applied_at):
+    referral XP / referral_settled / award event (the same ones the legacy
+    award wrote), the pending row and invitee lock, and the monthly tier.
+
+    Idempotent under crash/retry: XP is keyed by ``ref:<invitee>`` in
+    grant_xp, referral_settled by uniq_referral_event, the award event by
+    uniq_referral_award_key, the tier ledger by its dedup_key. An invitee
+    whose XP was already granted by the legacy path is never paid again.
+    """
+    now_ts = now_utc_ts or now_utc()
+    out = {"applied": 0, "xp_granted": 0, "closed_month_reviews": 0, "errors": 0}
+    for _ in range(int(batch_limit)):
+        q = db.qualified_events.find_one_and_update(
+            {
+                "rule_version": affiliate_qualification.RULE_VERSION,
+                "effects_applied_at": {"$exists": False},
+                "$or": [
+                    {"effects_lease_until": {"$exists": False}},
+                    {"effects_lease_until": {"$lt": now_ts}},
+                ],
+            },
+            {"$set": {"effects_lease_until": now_ts + timedelta(minutes=10)}},
+            sort=[("processed_at", 1)],
+            return_document=ReturnDocument.AFTER,
+        )
+        if not q:
+            break
+        inviter_user_id = int(q["referrer_id"])
+        invitee_user_id = int(q["invitee_id"])
+        qualified_at = _coerce_utc(q.get("qualified_at")) or now_ts
+        award_key = f"ref:{invitee_user_id}"
+        try:
+            prior_award = db.referral_award_events.find_one(
+                {"invitee_user_id": invitee_user_id}, {"qualification_rule_version": 1}
+            )
+            legacy_award = bool(prior_award) and (
+                prior_award.get("qualification_rule_version") != affiliate_qualification.RULE_VERSION
+            )
+            xp_granted = False
+            if not legacy_award:
+                total_rows = list(
+                    db.referral_events.aggregate(
+                        [
+                            {
+                                "$match": with_not_invalidated(
+                                    {
+                                        "inviter_id": inviter_user_id,
+                                        "invitee_id": {"$ne": invitee_user_id},
+                                        "event": {"$in": ["referral_settled", "referral_revoked"]},
+                                    }
+                                )
+                            },
+                            {"$group": {"_id": None, "total": {"$sum": _referral_sign_expr()}}},
+                        ]
+                    )
+                )
+                current_ref_total = max(0, int((total_rows[0]["total"] if total_rows else 0) or 0))
+                new_ref_total = current_ref_total + 1
+                xp_added, bonus_added = calc_referral_award(new_ref_total)
+                xp_granted = grant_xp(db, inviter_user_id, "referral_award", award_key, xp_added)
+                _record_referral_event(inviter_user_id, invitee_user_id, "referral_settled", qualified_at)
+                try:
+                    db.referral_award_events.insert_one(
+                        {
+                            "award_key": award_key,
+                            "inviter_user_id": inviter_user_id,
+                            "invitee_user_id": invitee_user_id,
+                            "pending_id": q.get("referral_pending_id"),
+                            "created_at_utc": now_ts,
+                            "awarded_at_utc": now_ts,
+                            "status": "awarded",
+                            "qualification_rule": affiliate_qualification.RULE_VERSION,
+                            "qualification_rule_version": affiliate_qualification.RULE_VERSION,
+                            "qualified_event_id": q["_id"],
+                            "xp_added": xp_added if xp_granted else 0,
+                            "bonus_added": bonus_added if xp_granted else 0,
+                        }
+                    )
+                except DuplicateKeyError:
+                    pass
+                maybe_handle_first_referral(inviter_user_id, current_ref_total, new_ref_total, now_ts)
+                maybe_unlock_affiliate_group(
+                    db=db,
+                    user_id=inviter_user_id,
+                    current_ref_total=current_ref_total,
+                    new_ref_total=new_ref_total,
+                    now_utc=now_ts,
+                )
+                maybe_shout_referral_congrats(inviter_user_id, now_ts)
+            if q.get("referral_pending_id") is not None:
+                db.pending_referrals.update_one(
+                    {"_id": q["referral_pending_id"], "status": {"$ne": "awarded"}},
+                    {
+                        "$set": {
+                            "status": "awarded",
+                            "awarded_at_utc": now_ts,
+                            "awarded_at_kl": now_ts.astimezone(KL_TZ).isoformat(),
+                            "award_key": award_key,
+                            "qualification_rule": affiliate_qualification.RULE_VERSION,
+                            "qualification_rule_version": affiliate_qualification.RULE_VERSION,
+                        }
+                    },
+                )
+            referral_invitee_lock.release(
+                db, invitee_user_id=invitee_user_id, status="awarded", now_utc_ts=now_ts
+            )
+            closed_month = affiliate_qualification.kl_month_key(qualified_at) < affiliate_qualification.kl_month_key(now_ts)
+            evaluate_monthly_affiliate_reward(
+                db,
+                referrer_id=inviter_user_id,
+                now_utc=now_ts,
+                month_reference_utc=qualified_at,
+                closed_month_review=closed_month,
+            )
+            db.qualified_events.update_one(
+                {"_id": q["_id"]},
+                {
+                    "$set": {
+                        "effects_applied_at": now_ts,
+                        "effects": {
+                            "xp_granted": bool(xp_granted),
+                            "legacy_award_existed": legacy_award,
+                            "tier_evaluation": "closed_month_review" if closed_month else "open_month",
+                        },
+                    },
+                    "$unset": {"effects_lease_until": ""},
+                },
+            )
+        except Exception:
+            # Lease expires and the next run retries; every step is idempotent.
+            logger.exception(
+                "[AFF_QUAL][EFFECTS_ERROR] qualified_event_id=%s inviter=%s invitee=%s",
+                q.get("_id"), inviter_user_id, invitee_user_id,
+            )
+            out["errors"] += 1
+            continue
+        if not legacy_award:
+            # Deduped per (inviter, invitee) in referral_notifications.
+            try:
+                invitee_doc = db.users.find_one({"user_id": invitee_user_id}, {"username": 1}) or {}
+                _maybe_send_referral_qualified_dm(inviter_user_id, invitee_user_id, invitee_doc.get("username"))
+            except Exception:
+                logger.exception("[AFF_QUAL][DM_FAILED] inviter=%s invitee=%s", inviter_user_id, invitee_user_id)
+        out["applied"] += 1
+        out["xp_granted"] += int(bool(xp_granted))
+        out["closed_month_reviews"] += int(closed_month)
+        logger.info(
+            "[AFF_QUAL][EFFECTS_APPLIED] qualified_event_id=%s inviter=%s invitee=%s xp_granted=%s closed_month=%s",
+            q["_id"], inviter_user_id, invitee_user_id, xp_granted, closed_month,
+        )
+    return out
+
+
+def run_welcome_redemption_qualification(now_utc_ts: datetime | None = None) -> dict:
+    """One pass of the welcome_redemption_v1 pipeline. No-op unless the rule
+    is active (and, inside process_pending_evidence, its unique indexes
+    exist). Effects still drain while paused so nothing already qualified is
+    left half-applied."""
+    now_ts = now_utc_ts or now_utc()
+    control = affiliate_qualification.get_control(db)
+    out = {"active": affiliate_qualification.new_rule_active(control, now_ts)}
+    if out["active"]:
+        config = (control or {}).get("source_config") or {}
+        problems = affiliate_qualification.validate_source_config(config)
+        if problems:
+            logger.error("[AFF_QUAL][REFUSED] reason=source_not_configured problems=%s", problems)
+            out["skipped"] = "source_not_configured"
+            return out
+        out["extract"] = affiliate_qualification.extract_committed_batches(db, config=config, now_utc=now_ts)
+        out["evidence"] = affiliate_qualification.process_pending_evidence(db, now_utc=now_ts, control=control)
+        out["reconcile"] = affiliate_qualification.reconcile(db, now_utc=now_ts)
+    if control and affiliate_qualification.launch_cutoff(control) is not None:
+        out["effects"] = apply_welcome_redemption_effects(now_utc_ts=now_ts)
+    return out
