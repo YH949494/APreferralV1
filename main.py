@@ -687,6 +687,9 @@ def settle_referral_snapshots_with_cache_clear():
 def acquire_scheduler_lock(name: str, ttl_seconds: int) -> tuple[bool, dict | None]:
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(seconds=ttl_seconds)
+    # Per-acquisition token: ``owner`` (INSTANCE_ID) is shared by every run on a
+    # machine, so it cannot tell an expired run from the newer run that took over.
+    token = uuid.uuid4().hex
     try:
         doc = scheduler_locks_collection.find_one_and_update(
             {
@@ -694,10 +697,14 @@ def acquire_scheduler_lock(name: str, ttl_seconds: int) -> tuple[bool, dict | No
                 "$or": [
                     {"expireAt": {"$lte": now}},
                     {"expireAt": {"$exists": False}},
+                    {"released": True},
                 ],
             },
             {
-                "$set": {"expireAt": expires_at, "owner": INSTANCE_ID, "updatedAt": now},
+                "$set": {
+                    "expireAt": expires_at, "owner": INSTANCE_ID, "updatedAt": now,
+                    "token": token, "released": False,
+                },
                 "$setOnInsert": {"createdAt": now},
             },
             upsert=True,
@@ -708,6 +715,29 @@ def acquire_scheduler_lock(name: str, ttl_seconds: int) -> tuple[bool, dict | No
         return False, doc
     return doc is not None, doc
 
+
+def release_scheduler_lock(name: str, lock_doc: dict | None) -> bool:
+    """Mark the lease released, only if this acquisition still holds it.
+
+    Filters on the acquisition token, so a run whose lease already expired (and
+    was taken over) matches nothing and cannot free the newer run's lock.
+    ``expireAt`` is left alone on purpose: the TTL index keeps the doc until the
+    original lease end, so the ``updatedAt`` heartbeat that runtime_status reads
+    survives exactly as before. ``acquire_scheduler_lock`` treats
+    ``released: True`` as acquirable. Never raises: the lease expires anyway.
+    """
+    token = (lock_doc or {}).get("token")
+    if not token:
+        return False
+    try:
+        res = scheduler_locks_collection.update_one(
+            {"_id": name, "token": token},
+            {"$set": {"released": True}},
+        )
+        return bool(res.modified_count)
+    except Exception as exc:
+        logger.warning("[SCHED_LOCK] release_failed name=%s err=%s", name, exc)
+        return False
 
 
 def bot_segment_sheet_sync_scheduled() -> None:
@@ -979,6 +1009,16 @@ def tick_5min() -> None:
             str(exc),
         )
         raise
+    finally:
+        # A run that outlives its 900s lease keeps going (it can't be aborted);
+        # the token guard makes this a no-op if another worker already took over.
+        released = release_scheduler_lock("tick_5min", lock_doc)
+        logger.info(
+            "[JOB][5MIN] lock_%s run_id=%s instance=%s",
+            "released" if released else "not_released_lease_lost_or_expired",
+            run_id,
+            INSTANCE_ID,
+        )
 
 
 def affiliate_monthly_settle_scheduled() -> None:
