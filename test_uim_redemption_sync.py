@@ -466,6 +466,49 @@ def test_outage_shows_unavailable_or_stale_never_zero():
     assert "evidence_sync_stale" in aq.integration_readiness(w.db, DATABOT_CONFIG, now_utc=later)["problems"]
 
 
+def _clear_feed_env(monkeypatch):
+    for name in ("UIM_REDEMPTION_SYNC_ENABLED", "UIM_REDEMPTION_FEED_URL", "UIM_REDEMPTION_FEED_TOKEN",
+                 "DATABOT_BASE_URL", "DATABOT_API_KEY", "DATABOT_ENABLED"):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_feed_config_reuses_existing_databot_url_and_key(monkeypatch):
+    _clear_feed_env(monkeypatch)
+    monkeypatch.setenv("DATABOT_BASE_URL", "http://databot.internal:8080/")
+    monkeypatch.setenv("DATABOT_API_KEY", "shared-key")
+    cfg = usync.feed_config()
+    assert (cfg["base_url"], cfg["token"]) == ("http://databot.internal:8080", "shared-key")
+    assert cfg["enabled"] is False  # reusing the Phase-1 settings never turns the sync on
+
+
+def test_feed_config_dedicated_vars_override_shared(monkeypatch):
+    _clear_feed_env(monkeypatch)
+    monkeypatch.setenv("DATABOT_BASE_URL", "https://public.example")
+    monkeypatch.setenv("DATABOT_API_KEY", "shared-key")
+    monkeypatch.setenv("UIM_REDEMPTION_FEED_URL", "http://databot.internal:8080")
+    monkeypatch.setenv("UIM_REDEMPTION_FEED_TOKEN", "dedicated")
+    cfg = usync.feed_config()
+    assert (cfg["base_url"], cfg["token"]) == ("http://databot.internal:8080", "dedicated")
+
+
+def test_databot_enabled_flag_does_not_enable_sync(monkeypatch):
+    _clear_feed_env(monkeypatch)
+    monkeypatch.setenv("DATABOT_ENABLED", "true")
+    monkeypatch.setenv("DATABOT_BASE_URL", "http://databot.internal:8080")
+    monkeypatch.setenv("DATABOT_API_KEY", "shared-key")
+    w = disabled_world()
+    assert usync.run_scheduled_sync(w.db) == {"skipped": "sync_disabled"}
+
+
+def test_enabled_without_any_url_or_key_fails_closed_and_is_recorded(monkeypatch):
+    _clear_feed_env(monkeypatch)
+    monkeypatch.setenv("UIM_REDEMPTION_SYNC_ENABLED", "true")
+    w = disabled_world()
+    out = usync.run_scheduled_sync(w.db)
+    assert out == {"ok": False, "error": "feed_not_configured"}
+    assert w.db[usync.STATE_COLLECTION].find_one({"_id": usync.STATE_ID})["last_error"] == "feed_not_configured"
+
+
 def test_sync_disabled_by_default(monkeypatch):
     monkeypatch.delenv("UIM_REDEMPTION_SYNC_ENABLED", raising=False)
     w = disabled_world()

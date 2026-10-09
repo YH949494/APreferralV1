@@ -69,10 +69,17 @@ class FeedUnavailable(RuntimeError):
 # ---------------------------------------------------------------------------
 
 def feed_config() -> dict:
+    """Feed transport settings. The existing Databot integration settings
+    (``DATABOT_BASE_URL`` / ``DATABOT_API_KEY``, see ``databot_client``) are the
+    default, so no second URL/token is needed; the dedicated
+    ``UIM_REDEMPTION_FEED_*`` variables remain as optional overrides. The
+    enable switch stays separate and OFF by default — ``DATABOT_ENABLED`` (the
+    Phase-1 shadow client) deliberately does not turn this sync on."""
     return {
         "enabled": os.getenv("UIM_REDEMPTION_SYNC_ENABLED", "false").strip().lower() == "true",
-        "base_url": os.getenv("UIM_REDEMPTION_FEED_URL", "").strip().rstrip("/"),
-        "token": os.getenv("UIM_REDEMPTION_FEED_TOKEN", "").strip(),
+        "base_url": (os.getenv("UIM_REDEMPTION_FEED_URL", "").strip()
+                     or os.getenv("DATABOT_BASE_URL", "").strip()).rstrip("/"),
+        "token": os.getenv("UIM_REDEMPTION_FEED_TOKEN", "").strip() or os.getenv("DATABOT_API_KEY", "").strip(),
         "timeout": float(os.getenv("UIM_REDEMPTION_FEED_TIMEOUT_SECONDS", "15")),
     }
 

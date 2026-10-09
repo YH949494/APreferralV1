@@ -190,10 +190,17 @@ default 60) or a batch mid-sync → figures shown with an "incomplete" banner. P
 
 **Runbook (nothing below activates the rule or sets a cutoff).**
 
+The feed reuses the existing Databot integration settings (`databot_client.py`): `DATABOT_BASE_URL`
+and `DATABOT_API_KEY` (same value on Databot). `UIM_REDEMPTION_FEED_URL` / `UIM_REDEMPTION_FEED_TOKEN`
+are optional overrides only. `DATABOT_ENABLED` (Phase-1 shadow client) does NOT enable the sync.
+See Databot `docs/uim_welcome_redemption_feed.md` §0 for the integration audit.
+
 ```bash
-# Databot: fly secrets set UIM_REDEMPTION_FEED_TOKEN=<t> DASHBOARD_BIND_HOST=::
-fly secrets set -a apreferralv1 UIM_REDEMPTION_FEED_URL=http://databot.internal:8080 \
-  UIM_REDEMPTION_FEED_TOKEN=<t> UIM_REDEMPTION_SYNC_ENABLED=true
+# <k>: generate one fresh key (openssl rand -hex 32) and set the SAME value on both apps. Fly never reveals
+# an existing secret's plaintext, so an existing DATABOT_API_KEY is rotated, not reused (harmless today).
+# Databot: fly secrets set DATABOT_API_KEY=<k> DASHBOARD_BIND_HOST=::
+fly secrets set -a apreferralv1 DATABOT_API_KEY=<k> DATABOT_BASE_URL=http://databot.internal:8080 \
+  UIM_REDEMPTION_SYNC_ENABLED=true
 python scripts/affiliate_qualification_admin.py sync-status                 # read-only health
 python scripts/affiliate_qualification_admin.py sync-evidence               # dry run (shows health)
 python scripts/affiliate_qualification_admin.py sync-evidence --commit      # optional manual pass
