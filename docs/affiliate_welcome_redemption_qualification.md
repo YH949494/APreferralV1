@@ -31,6 +31,8 @@ Persisted switch: `affiliate_qualification_control` `{_id: "welcome_redemption_v
 | `paused` (after launch) | still parks — never reactivated | off (effects already qualified still drain) |
 
 * The cutoff is immutable once set (`activate` refuses a second one). Rollback = `pause`.
+* `backfill_referrals.py` also refuses committed legacy XP backfills once the cutoff arrives,
+  including while paused. It rechecks before each award; its dry run remains read-only.
 * Pre-launch qualified records are untouched. Any invitee not qualified at the cutoff can only qualify via v1, even if they joined earlier (their earlier revoked/parked row remains the original attribution unless it was revoked as `invalid_ids` / `self_invite` / `already_in_db`).
 
 ## 3. Canonical service (`affiliate_qualification.py`)
@@ -50,6 +52,18 @@ Crash anywhere ⇒ evidence stays `received` with a lease; re-processing finds i
 `qualified_events` v1 fields: `invitee_id`, `referrer_id` (frozen from the original referral record), `qualified_at` (attribution time — see §4), `redeemed_at`, `processed_at`, `rule_version`, `account_key`, `evidence_id`, `redemption_source`, `redemption_ref`, `referral_pending_id`, `attribution_basis`, `ownership_basis`. Logs carry evidence ids and masked codes only.
 
 Canonical account identity: `"<namespace>:<account>"`, NFKC + trim, **case and leading zeros preserved**; numeric spreadsheet cells are refused (`account_numeric_coerced` → review) because zeros may already be lost.
+
+**Issuance chronology:** live qualification, preview and historical seeding require a valid
+`voucher_pools.issued_at`, matching `affiliate_ledger.issued_at`, or legacy
+`new_joiner_claims.claimed_at` for the same original recipient/code. The earliest supported
+issuance must be no later than redemption. Missing issuance is
+`missing_welcome_issued_at`; reversed chronology is `redemption_before_welcome_issuance`.
+Both require review. Generic created/updated timestamps and expired ticket records are not
+substitutes. Seeding also enforces the live five-minute future-time tolerance.
+
+Evidence extracted by older code lacks this issuance snapshot and therefore requires review.
+The existing `requeue` command refreshes a specifically reviewed row from its source; this
+change does not replay evidence, reset cursors, or change past qualifications automatically.
 
 ## 4. Consumers, months, late data
 
