@@ -78,8 +78,11 @@ def _public_control(control: dict | None) -> dict | None:
 
 
 def preflight_report(db, *, now_utc: datetime) -> dict:
+    from scripts.migrate_affiliate_account_dedupe import completion_readiness
+
     control = aq.get_control(db) or {}
     report = {
+        "migration_completion": completion_readiness(db, control),
         "indexes": aq.index_readiness(db),
         "integration": aq.integration_readiness(db, control.get("source_config"), now_utc=now_utc),
         "migration_seeded": bool(control.get("seed_completed_at")),
@@ -91,6 +94,7 @@ def preflight_report(db, *, now_utc: datetime) -> dict:
         report["indexes"]["ok"]
         and report["integration"]["ok"]
         and report["migration_seeded"]
+        and report["migration_completion"]["ok"]
         and report["identity_config_matches_seed"]
         and report["consistency"]["ok"]
     )

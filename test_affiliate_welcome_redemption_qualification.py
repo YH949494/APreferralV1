@@ -417,7 +417,7 @@ def test_attribution_is_frozen_to_the_original_referral_record(monkeypatch):
 # 8 / 9 / 10 ------------------------------------------------------------------
 
 def test_migration_seeds_history_then_credited_account_cannot_requalify(monkeypatch):
-    w = World(indexes=False)
+    w = World(indexes=False, mode=aq.MODE_DISABLED, cutoff=None)
     # mongomock ignores partialFilterExpression when BUILDING an index over
     # existing documents (MongoDB honours it; insert-time enforcement works in
     # both), so this one index is created before the historical rows exist.
@@ -431,7 +431,7 @@ def test_migration_seeds_history_then_credited_account_cannot_requalify(monkeypa
     w.db.affiliate_ledger.insert_one({"dedup_key": "AFF:1:202608:T1", "status": "ISSUED", "created_at": hist_at})
     for uid in (81, 82, 83):
         w.welcome_code(uid, f"WELC{uid}", issued_at=hist_at - timedelta(days=1))
-    w.upload([w.row("WELC81", "acctH", hist_at), w.row("WELC82", "acctH", hist_at),
+    w.upload([w.row("WELC81", "acctH", hist_at), w.row("WELC82", "acctH", hist_at + timedelta(days=1)),
               w.row("WELC83", "acctA", hist_at), w.row("WELC83", "acctB", hist_at)])
     ledgers_before = list(w.db.affiliate_ledger.find({}, {"_id": 0}))
 
@@ -441,11 +441,17 @@ def test_migration_seeds_history_then_credited_account_cannot_requalify(monkeypa
     assert dry["plan"]["counts"]["conflicting_multiple_accounts"] == 1
     assert "WELC" not in str(dry) and "acctH" not in str(dry)  # masked output only
 
+    refused = migration.run(w.db, apply=True, seed_from_linkage=False, now_utc=NOW)
+    assert "unresolved_historical_identities" in refused["apply_refused"]
+    assert not refused["seed_marker_written"]
+    # Supply an unambiguous corrected TEST source before applying; historical
+    # qualifications/rewards remain untouched. Never pick one conflicting account.
+    w.db.marketing_raw_data.delete_one({"account": "acctB"})
     applied = migration.run(w.db, apply=True, seed_from_linkage=False, now_utc=NOW)
     assert applied["history_unchanged"] and applied["indexes_after"]["ok"] and applied["seed_marker_written"]
-    assert applied["seed_result"]["seeded"] == 1
+    assert applied["seed_result"]["seeded"] == 2
     again = migration.run(w.db, apply=True, seed_from_linkage=False, now_utc=NOW)
-    assert again["seed_result"] == {"seeded": 0, "already_seeded": 1, "held_by_other": 0}
+    assert again["seed_result"] == {"seeded": 0, "already_seeded": 2, "held_by_other": 0}
     reg = w.db[aq.REGISTRY_COLLECTION].find_one({"account_key": "advantplay:acctH"})
     assert reg["invitee_id"] == 81 and reg["historical_qualification_count"] == 2
     # Historical counts / rewards untouched.
@@ -453,6 +459,9 @@ def test_migration_seeds_history_then_credited_account_cannot_requalify(monkeypa
     assert list(w.db.affiliate_ledger.find({}, {"_id": 0})) == ledgers_before
     assert w.db.qualified_events.count_documents({"account_key": {"$exists": True}}) == 0
 
+    # Activate only this isolated fixture for the lifetime-dedupe regression.
+    w.db[aq.CONTROL_COLLECTION].update_one({"_id": aq.CONTROL_ID},
+        {"$set": {"mode": aq.MODE_ACTIVE, "launch_cutoff_utc": CUTOFF}})
     w.db.marketing_upload_batches.update_many({}, {"$set": {"welcome_evidence_extracted_at": NOW}})
     w.join(9, 84)
     w.welcome_code(84, "WELC84")
@@ -640,7 +649,10 @@ def test_admin_cli_activation_guards(capsys):
     rc = admin_cli.main(["activate", "--cutoff", "2026-11-01T00:00:00+08:00", "--commit"], db_factory=factory, now_fn=now)
     assert rc == 2 and aq.launch_cutoff(aq.get_control(w.db)) is None
     w.db[aq.CONTROL_COLLECTION].update_one({"_id": aq.CONTROL_ID}, {"$set": {
-        "seed_completed_at": NOW, "seeded_identity_config": aq.identity_config(SOURCE_CONFIG)}})
+        "seed_completed_at": NOW, "seeded_identity_config": aq.identity_config(SOURCE_CONFIG),
+        "seed_summary": {"planner_version": migration.PLANNER_VERSION, "unresolved_events": 0,
+                         "historical_events": 0, "source_coverage": {"ok": True,
+                         "latest_historical_qualification_utc": None}}}})
     w.upload([w.row("X", "acct", NOW)])
     # Dry run writes nothing.
     assert admin_cli.main(["activate", "--cutoff", "2026-11-01T00:00:00+08:00"], db_factory=factory, now_fn=now) == 0
