@@ -9380,6 +9380,7 @@
         '<td>' + esc(cdFmtJoins(p.joins_count)) + '</td>' +
         '<td>' + esc(String(p.qualified_count)) + '</td>' +
         '<td>' + esc(cdFmtConversion(p.conversion_rate)) + '</td>' +
+        '<td>' + esc(cdFmtJoins(p.xp_count)) + '</td><td>' + esc(cdFmtJoins(p.ref_count)) + '</td>' +
         '<td>' + (p.visible ? '<span class="pill approved">visible</span>' : '<span class="pill neutral">hidden</span>') + '</td>' +
         '<td>' +
         '<button class="btn" data-cd-p-action="edit" data-entry-id="' + esc(p.entry_id) + '">Edit</button> ' +
@@ -9387,7 +9388,7 @@
         '<button class="btn" data-cd-p-action="remove" data-entry-id="' + esc(p.entry_id) + '">Remove</button>' +
         '</td></tr>';
     }).join("");
-    body.innerHTML = '<table class="data-table"><thead><tr><th>Name</th><th>Joins</th><th>Qualified</th><th>Conversion</th><th>Visibility</th><th>Actions</th></tr></thead><tbody>' + rows + '</tbody></table>';
+    body.innerHTML = '<table class="data-table"><thead><tr><th>Name</th><th>Joins</th><th>Qualified</th><th>Conversion</th><th>XP points</th><th>Ref count</th><th>Visibility</th><th>Actions</th></tr></thead><tbody>' + rows + '</tbody></table>';
   }
 
   function cdRenderAll() {
@@ -9501,6 +9502,8 @@
       '<input class="filter-input" id="cd-pe-joins" type="number" min="0" step="1" placeholder="Unknown — enter to set" />' +
       '<label class="sub">Qualified count (cannot exceed joins)</label>' +
       '<input class="filter-input" id="cd-pe-count" type="number" min="0" step="1" />' +
+      '<label class="sub">XP points (optional)</label><input class="filter-input" id="cd-pe-xp" type="number" min="0" step="1" />' +
+      '<label class="sub">Ref count (optional)</label><input class="filter-input" id="cd-pe-ref" type="number" min="0" step="1" />' +
       '<div class="modal-actions">' +
       '<button class="btn" id="cd-pe-cancel">Cancel</button>' +
       '<button class="btn primary" id="cd-pe-save">Save</button>' +
@@ -9510,12 +9513,19 @@
     $("#cd-pe-count", overlay).value = participant.qualified_count;
     $("#cd-pe-joins", overlay).value = participant.joins_count === null || participant.joins_count === undefined ? "" : participant.joins_count;
 
+    $("#cd-pe-xp", overlay).value = participant.xp_count === undefined ? "" : participant.xp_count;
+    $("#cd-pe-ref", overlay).value = participant.ref_count === undefined ? "" : participant.ref_count;
     function close() { overlay.remove(); }
     overlay.querySelector("#cd-pe-cancel").addEventListener("click", close);
     overlay.addEventListener("click", function (e) { if (e.target === overlay) close(); });
     overlay.querySelector("#cd-pe-save").addEventListener("click", function () {
       var campaign = cdState.campaignsById[cdState.selectedId];
       var qualified = cdParseCount($("#cd-pe-count", overlay).value);
+      var xpRaw = $("#cd-pe-xp", overlay).value;
+      var refRaw = $("#cd-pe-ref", overlay).value;
+      var xp = xpRaw.trim() === "" ? undefined : cdParseCount(xpRaw);
+      var ref = refRaw.trim() === "" ? undefined : cdParseCount(refRaw);
+      if (xp === null || ref === null) { toast("❌ XP points and Ref count must be non-negative whole numbers", "error"); return; }
       var joinsRaw = $("#cd-pe-joins", overlay).value;
       var joins = String(joinsRaw).trim() === "" ? undefined : cdParseCount(joinsRaw);
       if (qualified === null) { toast("❌ Qualified count must be a non-negative whole number", "error"); return; }
@@ -9531,6 +9541,7 @@
           display_name: $("#cd-pe-name", overlay).value,
           qualified_count: qualified,
           joins_count: joins,
+          xp_count: xp, ref_count: ref,
           expected_updated_at: campaign ? campaign.updated_at : undefined,
         }
       ).then(function (res) {
@@ -9597,17 +9608,21 @@
       var name = ($("#cd-p-name").value || "").trim();
       var count = cdParseCount($("#cd-p-count").value);
       var joins = cdParseCount($("#cd-p-joins").value);
+      var xpRaw = $("#cd-p-xp").value, refRaw = $("#cd-p-ref").value;
+      var xp = xpRaw.trim() === "" ? undefined : cdParseCount(xpRaw);
+      var ref = refRaw.trim() === "" ? undefined : cdParseCount(refRaw);
+      if (xp === null || ref === null) { toast("❌ XP points and Ref count must be non-negative whole numbers", "error"); return; }
       if (!name) { toast("❌ Enter a display name", "error"); return; }
       if (joins === null) { toast("❌ Joins count must be a non-negative whole number", "error"); return; }
       if (count === null) { toast("❌ Qualified count must be a non-negative whole number", "error"); return; }
       if (count > joins) { toast("❌ Qualified count cannot be greater than joins count", "error"); return; }
       apiPostJson("/api/admin/campaign-display/campaigns/" + encodeURIComponent(cdState.selectedId) + "/participants", {
-        display_name: name, joins_count: joins, qualified_count: count, visible: true,
+        display_name: name, joins_count: joins, qualified_count: count, xp_count: xp, ref_count: ref, visible: true,
         expected_updated_at: campaign ? campaign.updated_at : undefined,
       }).then(function (res) {
         if (!res.ok || res.d.status !== "ok") { toast(cdApiError(res, "add_failed"), "error"); return; }
         toast("✅ Participant added", "success");
-        $("#cd-p-name").value = ""; $("#cd-p-joins").value = ""; $("#cd-p-count").value = "";
+        $("#cd-p-name").value = ""; $("#cd-p-joins").value = ""; $("#cd-p-count").value = ""; $("#cd-p-xp").value = ""; $("#cd-p-ref").value = "";
         loadCampaignDisplay(true);
       });
     });

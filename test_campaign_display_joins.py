@@ -393,6 +393,80 @@ def test_additional_manual_rows_preserve_and_restore_genuine(client, fake_db, re
     assert {name: list(fake_db[name].find({})) for name in guarded} == stored_before
 
 
+def test_actual_affiliate_overlay_preserves_monthly_scores_and_limits_after_sort(client, fake_db):
+    _create_campaign(client)
+    _add(client, display_name="Dup", joins_count=30, qualified_count=20)
+    genuine = [{"referrer_id": index, "display_name": "Dup", "qualified_month": 4,
+                "joins_month": 10, "conversion_month": 0.4, "rank": index + 1}
+               for index in range(10)]
+    before = [dict(row) for row in genuine]
+    result = cdo.merge_manual_affiliate_rows(fake_db, CAMPAIGN_ID, genuine, limit=10)
+    assert len(result) == 10
+    assert result[0]["display_only"] is True
+    assert result[0]["qualified_month"] == 20
+    assert result[1]["qualified_month"] == 4 and result[1]["joins_month"] == 10
+    assert genuine == before
+    restored = cdo.merge_manual_affiliate_rows(fake_db, CAMPAIGN_ID, genuine, limit=10,
+                reference_utc=datetime.now(timezone.utc) + timedelta(days=3))
+    assert restored == before
+
+
+@pytest.mark.parametrize("field", ["xp_count", "ref_count"])
+@pytest.mark.parametrize("bad", [None, True, False, 2.5, 20.0, "20", -1, [], {}])
+def test_manual_weekly_scores_validate_create_and_update(client, fake_db, field, bad):
+    _create_campaign(client)
+    assert _add(client, joins_count=30, qualified_count=20, **{field: bad}).status_code == 400
+    entry_id = _participants(_add(client, joins_count=30, qualified_count=20, xp_count=900, ref_count=25))[0]["entry_id"]
+    before = list(fake_db[CAMPAIGN_DISPLAY_OVERRIDE_COLLECTION].find({}))
+    assert _patch(client, entry_id, **{field: bad}).status_code == 400
+    assert list(fake_db[CAMPAIGN_DISPLAY_OVERRIDE_COLLECTION].find({})) == before
+
+
+@pytest.mark.parametrize("score_field,manual_field", [("xp", "xp_count"), ("referrals", "ref_count")])
+@pytest.mark.parametrize("removal", ["hidden", "disabled", "expired"])
+def test_manual_weekly_rankings_append_without_mutating_cache(client, fake_db, score_field, manual_field, removal):
+    _create_campaign(client)
+    entry_id = _participants(_add(client, display_name="Dup", joins_count=30, qualified_count=20, xp_count=900, ref_count=25))[0]["entry_id"]
+    _add(client, display_name="Legacy", qualified_count=7)
+    genuine = [{"entry_id": f"genuine:{index}", "username": "Dup", score_field: 4}
+               for index in range(15)]
+    before = [dict(row) for row in genuine]
+    result = cdo.merge_manual_weekly_rows(fake_db, CAMPAIGN_ID, genuine,
+                score_field=score_field, manual_field=manual_field)
+    assert len(result) == 15
+    assert result[0]["entry_id"].startswith("manual:")
+    assert result[0][score_field] == (900 if score_field == "xp" else 25)
+    assert all(row[score_field] == 4 for row in result[1:])
+    assert genuine == before
+    assert not any(row["username"] == "Legacy" for row in result)
+    if removal == "hidden":
+        assert _patch(client, entry_id, visible=False).status_code == 200
+    elif removal == "disabled":
+        with _admin():
+            assert client.put(BASE, json={"enabled": False}).status_code == 200
+    restored = cdo.merge_manual_weekly_rows(fake_db, CAMPAIGN_ID, genuine,
+                score_field=score_field, manual_field=manual_field,
+                reference_utc=datetime.now(timezone.utc) + timedelta(days=3 if removal == "expired" else 0))
+    assert restored == before
+
+
+def test_manual_xp_ref_zero_and_edits_preserve_other_scores(client, fake_db):
+    _create_campaign(client)
+    entry_id = _participants(_add(client, joins_count=0, qualified_count=0, xp_count=0, ref_count=0))[0]["entry_id"]
+    response = _patch(client, entry_id, xp_count=900, ref_count=25)
+    assert response.status_code == 200
+    response = _patch(client, entry_id, display_name="Renamed")
+    row = _participants(response)[0]
+    assert (row["xp_count"], row["ref_count"], row["joins_count"], row["qualified_count"]) == (900, 25, 0, 0)
+
+
+def test_actual_affiliate_legacy_joins_are_unknown(client, fake_db):
+    _create_campaign(client)
+    _add(client, qualified_count=7)
+    row = cdo.merge_manual_affiliate_rows(fake_db, CAMPAIGN_ID, [])[0]
+    assert row["joins_month"] is None and row["conversion_month"] is None
+
+
 def test_preview_endpoint_and_announcement_generation_use_identical_values(client, fake_db):
     _create_campaign(client)
     _add(client, display_name="M***l", joins_count=30, qualified_count=20)

@@ -69,6 +69,35 @@ test("Money Room limits combined rows and restores genuine-only rows", () => {
   assert.doesNotMatch(restored.list.text(), /20 qualified · 30 joins/);
 });
 
+test("regular Affiliate table includes manual rows and preserves unknown joins", () => {
+  const context = vm.createContext({ escapeHtml: String, t: String });
+  vm.runInContext(between(affiliate, "function renderAffiliateRows(", "async function loadAffiliateSnapshot("), context);
+  const result = context.renderAffiliateRows([
+    { rank: 1, display_name: "Dup", qualified_month: 20, joins_month: 30, conversion_month: 0.6667, display_only: true },
+    { rank: 2, display_name: "Dup", qualified_month: 4, joins_month: 10, conversion_month: 0.4 },
+    { rank: 3, display_name: "Legacy", qualified_month: 2, joins_month: null, conversion_month: null, display_only: true },
+  ]);
+  assert.match(result, /Dup \(manual · display only\)/);
+  assert.match(result, /<td>Dup<\/td>/);
+  assert.match(result, /<td>20<\/td>\s*<td>30<\/td>\s*<td>66.7%<\/td>/);
+  assert.match(result, /<td>2<\/td>\s*<td>—<\/td>\s*<td>—<\/td>/);
+});
+
+test("XP and Ref display names identify manual rows without granting VIP", () => {
+  const context = vm.createContext({});
+  vm.runInContext(between(affiliate, "function getLeaderboardName(", "function createPodiumCard("), context);
+  assert.equal(context.getLeaderboardName({ username: "Dup", display_only: true }), "Dup (manual · display only)");
+  assert.equal(context.getLeaderboardName({ username: "Dup" }), "Dup");
+  const html = fs.readFileSync("static/admin-dashboard.html", "utf8");
+  for (const field of ["xp", "ref"]) {
+    assert.ok(html.includes(`id="cd-p-${field}"`));
+    assert.ok(admin.includes(`id="cd-pe-${field}"`));
+  }
+  const loader = between(affiliate, "async function loadAffiliateLeaderboard()", "async function loadAdminPastWeekAffiliateLeaderboard()");
+  assert.doesNotMatch(loader, /campaignActivity\.leaderboard/);
+  assert.match(loader, /data\?\.leaderboard/);
+});
+
 class Element {
   constructor() { this.children = []; this.textContent = ""; }
   appendChild(child) { this.children.push(child); }
@@ -109,6 +138,6 @@ test("both admin forms and public campaign surfaces identify their display count
   const html = fs.readFileSync("static/admin-dashboard.html", "utf8");
   assert.match(html, /id="cd-p-joins"/);
   assert.match(admin, /id="cd-pe-joins"/);
-  assert.match(affiliate, /Display only; reward progress uses genuine referrals/);
+  assert.match(affiliate, /manual · display only/);
   assert.match(money, /Campaign display only; reward progress uses genuine referrals/);
 });

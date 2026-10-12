@@ -7237,7 +7237,7 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
           return `
           <tr>
             <td>${Number(r.rank || 0)}</td>
-            <td>${escapeHtml(String(r.display_name || r.username || r.referrer_id || "-"))}</td>
+            <td>${escapeHtml(String(r.display_name || r.username || r.referrer_id || "-"))}${r.display_only ? " (manual · display only)" : ""}</td>
             <td>${Number(r.qualified_month ?? r.qualified_count ?? 0)}</td>
             <td>${joinsDisplay}</td>
             <td>${convDisplay}</td>
@@ -7252,7 +7252,7 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
       const tableRows = rows.map((r) => {
         const extra = r.extra || {};
         const qualified = r.qualified_month ?? r.qualified_week ?? r.metric_value ?? extra.qualified_week ?? 0;
-        const joins = r.joins_month ?? r.joins_week_raw ?? extra.joins_week_raw ?? 0;
+        const joins = r.display_only ? r.joins_month : (r.joins_month ?? r.joins_week_raw ?? extra.joins_week_raw ?? 0);
         const conversionRaw = r.conversion_month !== undefined ? r.conversion_month : (r.conversion_week ?? extra.conversion_week ?? 0);
         const conversionDisplay = conversionRaw === null || conversionRaw === undefined
           ? "—"
@@ -7261,9 +7261,9 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
         return `
           <tr>
             <td>${Number(r.rank || 0)}</td>
-            <td>${escapeHtml(String(r.display_name || r.username || r.referrer_id || "-"))}</td>
+            <td>${escapeHtml(String(r.display_name || r.username || r.referrer_id || "-"))}${r.display_only ? " (manual · display only)" : ""}</td>
             <td>${Number(qualified || 0)}</td>
-            <td>${Number(joins || 0)}</td>
+            <td>${joins === null || joins === undefined ? "—" : Number(joins)}</td>
             <td>${conversionDisplay}</td>
             ${isAdmin ? `<td>${escapeHtml(String(flag || "new"))}</td>` : ""}
           </tr>`;
@@ -7354,18 +7354,9 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
         const res = await fetch(url.toString());
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
-        // When a campaign display override is active, campaign_activity is
-        // the single shared result (genuine + manual rows, already ranked
-        // and totaled) that every public surface must render from -- use it
-        // in place of the plain genuine-only rows so this page can never
-        // show a different leaderboard/total than campaign_activity
-        // consumers elsewhere. "My Stats" below is always the viewer's own
-        // genuine progress and is never affected by this.
-        const campaignActivity = data?.campaign_activity;
-        const campaignActive = Boolean(campaignActivity && campaignActivity.state === "active");
-        const rows = campaignActive
-          ? (Array.isArray(campaignActivity.leaderboard) ? campaignActivity.leaderboard : [])
-          : (Array.isArray(data?.leaderboard) ? data.leaderboard : []);
+        // The actual monthly leaderboard includes active manual display rows.
+        // My Stats remains genuine-only; do not replace rows with campaign data.
+        const rows = Array.isArray(data?.leaderboard) ? data.leaderboard : [];
         const my = data?.my_stats;
         const isAdmin = Boolean(data?.is_admin);
         affiliateLeaderboardIsAdmin = isAdmin;
@@ -7403,15 +7394,12 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
             ${renderAffiliateRewardEntitlements(my.reward_entitlements)}
           </div>
         ` : `<div class="leaderboard-empty">${t("login_affiliate_stats")}</div>`;
-        const campaignBanner = campaignActive
-          ? `<div class="leaderboard-empty" style="margin-bottom:8px;">🎉 Campaign leaderboard · Display only; reward progress uses genuine referrals.</div>`
-          : "";
         if (!rows.length) {
-          target.innerHTML = `${isAdmin ? renderAffiliateHistoryControls(weeks) : ""}${myCard}${campaignBanner}<div class="leaderboard-empty">${t("no_affiliate_data")}</div>`;
+          target.innerHTML = `${isAdmin ? renderAffiliateHistoryControls(weeks) : ""}${myCard}<div class="leaderboard-empty">${t("no_affiliate_data")}</div>`;
           affiliateLeaderboardLoaded = true;
           return;
         }
-        target.innerHTML = `${isAdmin ? renderAffiliateHistoryControls(weeks) : ""}${myCard}${campaignBanner}${renderAffiliateRows(rows, { isAdmin: campaignActive ? false : isAdmin, simpleColumns: campaignActive })}`;
+        target.innerHTML = `${isAdmin ? renderAffiliateHistoryControls(weeks) : ""}${myCard}${renderAffiliateRows(rows, { isAdmin })}`;
         affiliateLeaderboardLoaded = true;
       } catch (err) {
         target.innerHTML = `<div class="leaderboard-empty">Affiliate leaderboard unavailable: ${escapeHtml(String(err.message || err))}</div>`;
@@ -7456,8 +7444,9 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
       const baseName = (row?.username || row?.first_name || row?.user_id || "Anonymous")
         .toString()
         .replace(/^@+/, "");
-      if (!withCrown) return baseName;
-      return row?.is_vip1 === true ? `${baseName} 👑` : baseName;
+      const displayName = row?.display_only ? `${baseName} (manual · display only)` : baseName;
+      if (!withCrown) return displayName;
+      return row?.is_vip1 === true ? `${displayName} 👑` : displayName;
     }
 
     function createPodiumCard(row, rank, metricLabel, championLabel) {
@@ -7600,6 +7589,7 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
         username: u.username,
         first_name: u.first_name,
         user_id: u.user_id,
+        display_only: Boolean(u?.display_only),
         is_vip1: Boolean(u?.is_vip1)
       }));
       
@@ -7609,6 +7599,7 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
         username: u.username,
         first_name: u.first_name,
         user_id: u.user_id,
+        display_only: Boolean(u?.display_only),
         is_vip1: Boolean(u?.is_vip1)
       }));
 

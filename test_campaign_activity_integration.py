@@ -73,6 +73,59 @@ def _cleanup():
     main.db.qualified_events.delete_many({"referrer_id": 909090})
 
 
+def test_actual_monthly_leaderboard_uses_monthly_snapshot_not_campaign_window(client, monkeypatch):
+    now = datetime.now(timezone.utc)
+    _seed_campaign(now)
+    monkeypatch.setenv("CAMPAIGN_DISPLAY_ACTIVE_CAMPAIGN_ID", CAMPAIGN_ID)
+    snapshot = {"affiliate_leaderboard_month": [
+        {"referrer_id": 909090, "qualified_month": 4, "joins_month": 10,
+         "conversion_month": 0.4, "rank": 1}], "generated_at": now, "month_key": "202610"}
+    monkeypatch.setattr(main, "compute_affiliate_monthly_kpis_live", lambda db: snapshot)
+    try:
+        body = client.get("/api/affiliate/leaderboard?window=month").get_json()
+        assert [row["qualified_month"] for row in body["leaderboard"]] == [7, 4, 2]
+        genuine = next(row for row in body["leaderboard"] if row.get("referrer_id") == 909090)
+        assert (genuine["joins_month"], genuine["qualified_month"], genuine["conversion_month"]) == (10, 4, 0.4)
+        assert snapshot["affiliate_leaderboard_month"][0]["rank"] == 1
+        main.db[CAMPAIGN_DISPLAY_OVERRIDE_COLLECTION].update_one({"_id": CAMPAIGN_ID}, {"$set": {"enabled": False}})
+        restored = client.get("/api/affiliate/leaderboard?window=month").get_json()
+        assert len(restored["leaderboard"]) == 1
+        assert restored["leaderboard"][0]["qualified_month"] == 4
+    finally:
+        _cleanup()
+
+
+def test_actual_xp_ref_endpoint_merges_manual_scores_without_cache_or_user_changes(client, monkeypatch):
+    now = datetime.now(timezone.utc)
+    _seed_campaign(now)
+    main.db[CAMPAIGN_DISPLAY_OVERRIDE_COLLECTION].update_one({"_id": CAMPAIGN_ID},
+        {"$set": {"participants.0.xp_count": 900, "participants.0.ref_count": 25}})
+    monkeypatch.setenv("CAMPAIGN_DISPLAY_ACTIVE_CAMPAIGN_ID", CAMPAIGN_ID)
+    monkeypatch.setattr(main, "get_app_setting", lambda *args, **kwargs: True)
+    monkeypatch.setattr(main, "_get_user_snapshot", lambda uid: ({"weekly_xp": 100, "weekly_referrals": 4}, None, None))
+    monkeypatch.setattr(main, "format_username", lambda user, *args: user.get("username"))
+    cache = {"checkin": [{"user_id": 42, "username": "A***n", "weekly_xp": 100}],
+             "referral": [{"user_id": 42, "username": "A***n", "weekly_referrals": 4}]}
+    from copy import deepcopy
+    before = deepcopy(cache)
+    week = main._week_window_utc()[2].date().isoformat()
+    monkeypatch.setattr(main, "LEADERBOARD_CACHE", {f"leaderboard|{week}|15": {"ts": main.time.time(), "payload": cache}})
+    try:
+        body = client.get("/api/leaderboard").get_json()
+        assert [row["xp"] for row in body["leaderboard"]["checkin"]] == [900, 100]
+        assert [row["referrals"] for row in body["leaderboard"]["referral"]] == [25, 4]
+        assert body["leaderboard"]["checkin"][0]["entry_id"].startswith("manual:")
+        assert body["leaderboard"]["checkin"][1]["entry_id"] == "genuine:42"
+        assert (body["user"]["xp"], body["user"]["referrals"]) == (100, 4)
+        assert cache == before
+        main.db[CAMPAIGN_DISPLAY_OVERRIDE_COLLECTION].update_one({"_id": CAMPAIGN_ID}, {"$set": {"enabled": False}})
+        restored = client.get("/api/leaderboard").get_json()
+        assert [row["xp"] for row in restored["leaderboard"]["checkin"]] == [100]
+        assert [row["referrals"] for row in restored["leaderboard"]["referral"]] == [4]
+    finally:
+        _cleanup()
+
+
 def test_affiliate_endpoint_and_dedicated_campaign_endpoint_agree(client):
     now = datetime.now(timezone.utc)
     _seed_campaign(now)
