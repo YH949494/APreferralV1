@@ -7237,7 +7237,7 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
           return `
           <tr>
             <td>${Number(r.rank || 0)}</td>
-            <td>${escapeHtml(String(r.display_name || r.username || r.referrer_id || "-"))}${r.display_only ? " (manual · display only)" : ""}</td>
+            <td>${escapeHtml(String(r.display_name || r.username || r.referrer_id || "-"))}</td>
             <td>${Number(r.qualified_month ?? r.qualified_count ?? 0)}</td>
             <td>${joinsDisplay}</td>
             <td>${convDisplay}</td>
@@ -7257,11 +7257,11 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
         const conversionDisplay = conversionRaw === null || conversionRaw === undefined
           ? "—"
           : `${(Number(conversionRaw) * 100).toFixed(1)}%`;
-        const flag = r.quality_flag ?? extra.quality_flag ?? "new";
+        const flag = r.display_only ? "—" : (r.quality_flag ?? extra.quality_flag ?? "new");
         return `
           <tr>
             <td>${Number(r.rank || 0)}</td>
-            <td>${escapeHtml(String(r.display_name || r.username || r.referrer_id || "-"))}${r.display_only ? " (manual · display only)" : ""}</td>
+            <td>${escapeHtml(String(r.display_name || r.username || r.referrer_id || "-"))}</td>
             <td>${Number(qualified || 0)}</td>
             <td>${joins === null || joins === undefined ? "—" : Number(joins)}</td>
             <td>${conversionDisplay}</td>
@@ -7444,9 +7444,8 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
       const baseName = (row?.username || row?.first_name || row?.user_id || "Anonymous")
         .toString()
         .replace(/^@+/, "");
-      const displayName = row?.display_only ? `${baseName} (manual · display only)` : baseName;
-      if (!withCrown) return displayName;
-      return row?.is_vip1 === true ? `${displayName} 👑` : displayName;
+      if (!withCrown) return baseName;
+      return row?.is_vip1 === true ? `${baseName} 👑` : baseName;
     }
 
     function createPodiumCard(row, rank, metricLabel, championLabel) {
