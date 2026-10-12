@@ -766,9 +766,6 @@ def render_campaign_activity_announcement_text(activity: dict[str, Any], *, titl
     """
     medals = ["\U0001F947", "\U0001F948", "\U0001F949"]
     lines = [f"<b>{html_escape(title)}</b>", ""]
-    if activity.get("state") == "active":
-        lines.append("<i>Campaign display only; reward progress uses genuine referrals.</i>")
-        lines.append("")
     for row in activity.get("leaderboard") or []:
         rank = int(row.get("rank", 0) or 0)
         prefix = medals[rank - 1] if 1 <= rank <= 3 else f"#{rank}"
@@ -1148,7 +1145,11 @@ def update_participant(
         candidate["visible"] = visible
 
     for field, value in (("xp_count", xp_count), ("ref_count", ref_count)):
-        if value is not _UNSET:
+        # PATCH null explicitly clears an optional ranking score. Omission
+        # preserves it; numeric zero remains an entered, visible score.
+        if value is None:
+            candidate.pop(field, None)
+        elif value is not _UNSET:
             candidate[field] = value
     normalized, reason = _check_participant_fields(candidate, seen_entry_ids=set())
     if reason:

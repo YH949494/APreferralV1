@@ -9298,6 +9298,10 @@
     return Number.isSafeInteger(count) ? count : null;
   }
 
+  function cdParseOptionalCount(raw, blankValue) {
+    return String(raw).trim() === "" ? blankValue : cdParseCount(raw);
+  }
+
   function cdFmtJoins(v) { return v === null || v === undefined ? "—" : String(v); }
 
   // A joins total is only a total when every displayed row has known joins;
@@ -9502,8 +9506,8 @@
       '<input class="filter-input" id="cd-pe-joins" type="number" min="0" step="1" placeholder="Unknown — enter to set" />' +
       '<label class="sub">Qualified count (cannot exceed joins)</label>' +
       '<input class="filter-input" id="cd-pe-count" type="number" min="0" step="1" />' +
-      '<label class="sub">XP points (optional)</label><input class="filter-input" id="cd-pe-xp" type="number" min="0" step="1" />' +
-      '<label class="sub">Ref count (optional)</label><input class="filter-input" id="cd-pe-ref" type="number" min="0" step="1" />' +
+      '<label class="sub">XP points (blank removes from XP ranking)</label><input class="filter-input" id="cd-pe-xp" type="number" min="0" step="1" />' +
+      '<label class="sub">Ref count (blank removes from Ref ranking)</label><input class="filter-input" id="cd-pe-ref" type="number" min="0" step="1" />' +
       '<div class="modal-actions">' +
       '<button class="btn" id="cd-pe-cancel">Cancel</button>' +
       '<button class="btn primary" id="cd-pe-save">Save</button>' +
@@ -9523,9 +9527,9 @@
       var qualified = cdParseCount($("#cd-pe-count", overlay).value);
       var xpRaw = $("#cd-pe-xp", overlay).value;
       var refRaw = $("#cd-pe-ref", overlay).value;
-      var xp = xpRaw.trim() === "" ? undefined : cdParseCount(xpRaw);
-      var ref = refRaw.trim() === "" ? undefined : cdParseCount(refRaw);
-      if (xp === null || ref === null) { toast("❌ XP points and Ref count must be non-negative whole numbers", "error"); return; }
+      var xp = cdParseOptionalCount(xpRaw, null);
+      var ref = cdParseOptionalCount(refRaw, null);
+      if ((xpRaw.trim() !== "" && xp === null) || (refRaw.trim() !== "" && ref === null)) { toast("❌ XP points and Ref count must be non-negative whole numbers", "error"); return; }
       var joinsRaw = $("#cd-pe-joins", overlay).value;
       var joins = String(joinsRaw).trim() === "" ? undefined : cdParseCount(joinsRaw);
       if (qualified === null) { toast("❌ Qualified count must be a non-negative whole number", "error"); return; }
@@ -9609,8 +9613,8 @@
       var count = cdParseCount($("#cd-p-count").value);
       var joins = cdParseCount($("#cd-p-joins").value);
       var xpRaw = $("#cd-p-xp").value, refRaw = $("#cd-p-ref").value;
-      var xp = xpRaw.trim() === "" ? undefined : cdParseCount(xpRaw);
-      var ref = refRaw.trim() === "" ? undefined : cdParseCount(refRaw);
+      var xp = cdParseOptionalCount(xpRaw, undefined);
+      var ref = cdParseOptionalCount(refRaw, undefined);
       if (xp === null || ref === null) { toast("❌ XP points and Ref count must be non-negative whole numbers", "error"); return; }
       if (!name) { toast("❌ Enter a display name", "error"); return; }
       if (joins === null) { toast("❌ Joins count must be a non-negative whole number", "error"); return; }

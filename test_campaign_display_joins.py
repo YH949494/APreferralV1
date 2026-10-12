@@ -418,6 +418,11 @@ def test_manual_weekly_scores_validate_create_and_update(client, fake_db, field,
     assert _add(client, joins_count=30, qualified_count=20, **{field: bad}).status_code == 400
     entry_id = _participants(_add(client, joins_count=30, qualified_count=20, xp_count=900, ref_count=25))[0]["entry_id"]
     before = list(fake_db[CAMPAIGN_DISPLAY_OVERRIDE_COLLECTION].find({}))
+    if bad is None:
+        assert _patch(client, entry_id, **{field: None}).status_code == 200
+        stored = fake_db[CAMPAIGN_DISPLAY_OVERRIDE_COLLECTION].find_one({"_id": CAMPAIGN_ID})["participants"][0]
+        assert field not in stored
+        return
     assert _patch(client, entry_id, **{field: bad}).status_code == 400
     assert list(fake_db[CAMPAIGN_DISPLAY_OVERRIDE_COLLECTION].find({})) == before
 
@@ -448,6 +453,26 @@ def test_manual_weekly_rankings_append_without_mutating_cache(client, fake_db, s
                 score_field=score_field, manual_field=manual_field,
                 reference_utc=datetime.now(timezone.utc) + timedelta(days=3 if removal == "expired" else 0))
     assert restored == before
+
+
+@pytest.mark.parametrize("clear_field,score_field,remaining_field", [
+    ("xp_count", "xp", "ref_count"), ("ref_count", "referrals", "xp_count")])
+def test_clear_one_ranking_preserves_other_rankings_and_is_idempotent(client, fake_db, clear_field, score_field, remaining_field):
+    _create_campaign(client)
+    entry_id = _participants(_add(client, joins_count=30, qualified_count=20, xp_count=900, ref_count=25))[0]["entry_id"]
+    for _ in range(2):
+        response = _patch(client, entry_id, **{clear_field: None})
+        assert response.status_code == 200
+        row = _participants(response)[0]
+        assert clear_field not in row
+        assert row[remaining_field] == (25 if remaining_field == "ref_count" else 900)
+        assert (row["joins_count"], row["qualified_count"], row["visible"]) == (30, 20, True)
+        assert cdo.merge_manual_weekly_rows(fake_db, CAMPAIGN_ID, [],
+                    score_field=score_field, manual_field=clear_field) == []
+        assert len(cdo.merge_manual_affiliate_rows(fake_db, CAMPAIGN_ID, [])) == 1
+    assert _patch(client, entry_id, **{clear_field: 0}).status_code == 200
+    assert cdo.merge_manual_weekly_rows(fake_db, CAMPAIGN_ID, [],
+                score_field=score_field, manual_field=clear_field)[0][score_field] == 0
 
 
 def test_manual_xp_ref_zero_and_edits_preserve_other_scores(client, fake_db):
@@ -548,11 +573,12 @@ def test_omitted_counts_on_legacy_name_edit_remain_unknown(client, fake_db):
     assert _patch(client, 'legacy-1', joins_count=30, qualified_count=20).status_code == 200
 
 
-def test_generated_campaign_text_identifies_display_counts_without_claiming_verified_activity(client, fake_db):
+def test_generated_campaign_text_renders_counts_without_manual_labels(client, fake_db):
     _create_campaign(client)
     _add(client, joins_count=30, qualified_count=20)
     text = render_campaign_activity_announcement_text(_activity(fake_db))
-    assert 'Campaign display only; reward progress uses genuine referrals.' in text
+    assert 'display only' not in text.lower()
+    assert 'manual' not in text.lower()
     assert '30 joins · 20 qualified invites · 66.7% conversion' in text
 
 

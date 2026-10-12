@@ -27,7 +27,12 @@ Create and edit forms have Display name, Joins count, Qualified count, plus
 optional XP points and Ref count. Storage remains in `campaign_display_overrides`
 participants, with new optional integer fields `xp_count` and `ref_count`.
 Both new fields use existing strict whole-number validation and count ceiling.
-Explicit null, booleans, decimals, negatives and strings are rejected server-side.
+On create, explicit null is rejected. Booleans, decimals, negatives and strings
+are rejected on both create and update. On PATCH, explicit null for `xp_count`
+or `ref_count` removes only that optional score; an omitted field preserves it.
+Blank optional edit fields send null, so admins can remove a participant from
+one ranking without hiding their other leaderboard entries. Clearing is
+idempotent; zero remains an explicit score and can still occupy a slot.
 Omitted XP/Ref fields remain absent and do not invent a score or enter that ranking.
 Name-only edits preserve existing values; set an explicit zero to enter at zero.
 Joins and qualified retain their existing constraints, including qualified <= joins.
@@ -36,7 +41,11 @@ The admin parser rejects integers outside JavaScript's safe integer range.
 
 Manual rows use `manual:<entry_id>` IDs and genuine rows use `genuine:<user_id>`.
 Matching names never merge. Public manual rows carry `display_only=true` and
-render as '(manual · display only)'; they are not presented as verified activity.
+use the same visible name and score presentation as genuine rows, without
+manual/display-only badges or notices. The internal marker remains available
+to prevent genuine-only behavior from applying to these entries. The admin
+Affiliate quality column shows — instead of inventing a genuine classification;
+genuine flags remain unchanged.
 The genuine-only monthly and weekly snapshots, ledgers, XP, referrals, reward
 eligibility, payouts, analytics and historical leaderboard archives are untouched.
 There is no migration or production write in this change.
@@ -60,8 +69,8 @@ it. Removing the manual overlay restores the genuine-only results.
 - `static/admin-dashboard.html`, `static/admin-dashboard.js`: create/edit fields,
   participant score columns and strict frontend parsing.
 - `static/index.html`: ordinary Affiliate response rendering, unknown joins and
-  manual row identification in Affiliate and XP/Ref.
-- `static/creator-share.html`: existing display-only notice in Money Room.
+  ordinary row presentation in Affiliate and XP/Ref.
+- `static/creator-share.html`: ordinary Money Room presentation without a display-only notice.
 - Focused Python and Node tests cover actual endpoint results, cached scores,
   duplicate names, ranking limits, zero scores, invalid inputs, legacy rows,
   edits, hidden/disabled/expired overlays, and unchanged genuine records.

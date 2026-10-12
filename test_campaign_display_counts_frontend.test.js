@@ -38,6 +38,17 @@ const rows = [
   { rank: 4, display_name: "Zero", joins_count: 0, qualified_count: 0, conversion_rate: null },
 ];
 
+test("blank optional edit scores send explicit null while create omits scores", () => {
+  const context = adminHelpers();
+  assert.equal(JSON.stringify({xp_count: context.cdParseOptionalCount("", null)}), '{"xp_count":null}');
+  assert.equal(JSON.stringify({xp_count: context.cdParseOptionalCount("", undefined)}), '{}');
+  assert.equal(context.cdParseOptionalCount("0", null), 0);
+  assert.equal(context.cdParseOptionalCount("900", null), 900);
+  assert.equal(context.cdParseOptionalCount("2.5", null), null);
+  assert.match(admin, /cdParseOptionalCount\(xpRaw, null\)/);
+  assert.match(admin, /cdParseOptionalCount\(refRaw, null\)/);
+});
+
 test("Affiliate campaign renderer preserves genuine, manual, legacy and zero counts", () => {
   const context = vm.createContext({ escapeHtml: String, t: String });
   vm.runInContext(between(affiliate, "function renderAffiliateRows(", "async function loadAffiliateSnapshot("), context);
@@ -77,16 +88,17 @@ test("regular Affiliate table includes manual rows and preserves unknown joins",
     { rank: 2, display_name: "Dup", qualified_month: 4, joins_month: 10, conversion_month: 0.4 },
     { rank: 3, display_name: "Legacy", qualified_month: 2, joins_month: null, conversion_month: null, display_only: true },
   ]);
-  assert.match(result, /Dup \(manual · display only\)/);
+  assert.equal((result.match(/<td>Dup<\/td>/g) || []).length, 2);
+  assert.doesNotMatch(result, /manual|display only/i);
   assert.match(result, /<td>Dup<\/td>/);
   assert.match(result, /<td>20<\/td>\s*<td>30<\/td>\s*<td>66.7%<\/td>/);
   assert.match(result, /<td>2<\/td>\s*<td>—<\/td>\s*<td>—<\/td>/);
 });
 
-test("XP and Ref display names identify manual rows without granting VIP", () => {
+test("XP and Ref display names render manual rows normally without granting VIP", () => {
   const context = vm.createContext({});
   vm.runInContext(between(affiliate, "function getLeaderboardName(", "function createPodiumCard("), context);
-  assert.equal(context.getLeaderboardName({ username: "Dup", display_only: true }), "Dup (manual · display only)");
+  assert.equal(context.getLeaderboardName({ username: "Dup", display_only: true }), "Dup");
   assert.equal(context.getLeaderboardName({ username: "Dup" }), "Dup");
   const html = fs.readFileSync("static/admin-dashboard.html", "utf8");
   for (const field of ["xp", "ref"]) {
@@ -96,6 +108,19 @@ test("XP and Ref display names identify manual rows without granting VIP", () =>
   const loader = between(affiliate, "async function loadAffiliateLeaderboard()", "async function loadAdminPastWeekAffiliateLeaderboard()");
   assert.doesNotMatch(loader, /campaignActivity\.leaderboard/);
   assert.match(loader, /data\?\.leaderboard/);
+});
+
+test("admin Affiliate table uses neutral quality flags for manual rows", () => {
+  const context = vm.createContext({ escapeHtml: String, t: String });
+  vm.runInContext(between(affiliate, "function renderAffiliateRows(", "async function loadAffiliateSnapshot("), context);
+  const rendered = context.renderAffiliateRows([
+    {rank: 1, display_name: "Manual", qualified_month: 20, joins_month: 30, display_only: true},
+    {rank: 2, display_name: "Genuine", qualified_month: 4, joins_month: 10, quality_flag: "healthy"},
+    {rank: 3, display_name: "Fallback", qualified_month: 0, joins_month: 0},
+  ], {isAdmin: true});
+  assert.match(rendered, /<td>—<\/td>/);
+  assert.match(rendered, /<td>healthy<\/td>/);
+  assert.equal((rendered.match(/<td>new<\/td>/g) || []).length, 1);
 });
 
 class Element {
@@ -134,10 +159,10 @@ test("duplicate display names remain separate public rows", () => {
   assert.match(list.children[1].text(), /4 qualified · 10 joins/);
 });
 
-test("both admin forms and public campaign surfaces identify their display counts", () => {
+test("admin forms retain count fields and public rows have no manual labels", () => {
   const html = fs.readFileSync("static/admin-dashboard.html", "utf8");
   assert.match(html, /id="cd-p-joins"/);
   assert.match(admin, /id="cd-pe-joins"/);
-  assert.match(affiliate, /manual · display only/);
-  assert.match(money, /Campaign display only; reward progress uses genuine referrals/);
+  assert.doesNotMatch(affiliate, /manual · display only/);
+  assert.doesNotMatch(money, /Campaign display only; reward progress uses genuine referrals/);
 });
