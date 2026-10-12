@@ -6661,12 +6661,18 @@ def get_leaderboard():
             
         active_campaign_id = get_active_campaign_id(db)
         if active_campaign_id:
+            # Manual entries have no Telegram owner: apply the same other-user
+            # masking and admin exception as genuine leaderboard usernames.
+            manual_name_formatter = lambda name: format_username(
+                {"username": name}, current_user_id, is_admin)
             top_checkins = merge_manual_weekly_rows(
                 db, active_campaign_id, top_checkins, score_field="xp",
-                manual_field="xp_count", limit=leaderboard_limit)
+                manual_field="xp_count", limit=leaderboard_limit,
+                name_formatter=manual_name_formatter)
             referral_board = merge_manual_weekly_rows(
                 db, active_campaign_id, referral_board, score_field="referrals",
-                manual_field="ref_count", limit=leaderboard_limit)
+                manual_field="ref_count", limit=leaderboard_limit,
+                name_formatter=manual_name_formatter)
 
         leaderboard = {
             "checkin": top_checkins,
@@ -6978,7 +6984,10 @@ def get_affiliate_leaderboard_week():
     # on the genuine snapshot above, and retain the existing top-50 limit.
     active_campaign_id = get_active_campaign_id(db)
     if active_campaign_id:
-        leaderboard = merge_manual_affiliate_rows(db, active_campaign_id, leaderboard)
+        leaderboard = merge_manual_affiliate_rows(
+            db, active_campaign_id, leaderboard,
+            name_formatter=lambda name: format_username(
+                {"username": name}, current_user_id, is_admin))
 
     return jsonify(
         {

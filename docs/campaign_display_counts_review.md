@@ -46,6 +46,14 @@ manual/display-only badges or notices. The internal marker remains available
 to prevent genuine-only behavior from applying to these entries. The admin
 Affiliate quality column shows — instead of inventing a genuine classification;
 genuine flags remain unchanged.
+Regular Affiliate, XP and Ref endpoints format manual names through the same
+`format_username` function as genuine rows: other-user names are masked for
+non-admin viewers, and admins retain the existing full-name view. Manual rows
+have no Telegram owner, so they never gain a self-view exemption. Stored names,
+stable IDs and genuine cached names are unchanged; masking collisions do not
+merge rows. The regular leaderboard rule remains distinct from public
+announcement masking. Endpoint tests cover normal, @-prefixed and short names
+for both non-admin and admin viewers.
 The genuine-only monthly and weekly snapshots, ledgers, XP, referrals, reward
 eligibility, payouts, analytics and historical leaderboard archives are untouched.
 There is no migration or production write in this change.
