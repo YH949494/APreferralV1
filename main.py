@@ -2186,37 +2186,6 @@ def ensure_indexes():
     Ensure TTL index on bonus_voucher.end_time so docs auto-expire exactly at end_time.
     If an old index exists with different options, drop and recreate.
     """
-    def _dedupe_xp_events_unique_keys():
-        dup_groups = xp_events_collection.aggregate(
-            [
-                {"$match": {"unique_key": {"$exists": True}}},
-                {
-                    "$group": {
-                        "_id": {"user_id": "$user_id", "unique_key": "$unique_key"},
-                        "count": {"$sum": 1},
-                    }
-                },
-                {"$match": {"count": {"$gt": 1}}},
-            ]
-        )
-
-        removed = 0
-        for group in dup_groups:
-            crit = {
-                "user_id": group["_id"].get("user_id"),
-                "unique_key": group["_id"].get("unique_key"),
-            }
-            dup_docs = list(
-                xp_events_collection.find(crit).sort([("ts", 1), ("_id", 1)])
-            )
-            to_delete = [d["_id"] for d in dup_docs[1:]]
-            if to_delete:
-                xp_events_collection.delete_many({"_id": {"$in": to_delete}})
-                removed += len(to_delete)
-
-        if removed:
-            print(f"🔧 Removed {removed} duplicate xp_events with duplicate unique_key")
-
     idx_name = "ttl_end_time"
     try:
         bonus_voucher_collection.create_index(
@@ -6381,6 +6350,14 @@ def _apply_no_store_headers(response):
     response.headers["Pragma"] = "no-cache"
     response.headers["Expires"] = "0"
     return response
+
+@app.route("/healthz", methods=["GET"])
+def web_readiness():
+    """Prove the web worker completed startup without scanning application data."""
+    response = make_response("ok\n", 200)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
 
 @app.route("/miniapp")
 def serve_mini_app():
