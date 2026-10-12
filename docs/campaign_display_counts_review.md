@@ -1,94 +1,74 @@
-# Campaign manual joins and qualified counts
+# Manual entries in the regular leaderboards
 
-Audited current main `680213b`. The core feature already exists in merged PR
-#521 (`884b32e`): both admin forms contain Joins count; storage uses separate
-`joins_count` and `qualified_count`; the shared builder computes manual
-conversion, enforces counts, and supplies Affiliate, Money Room and preview.
-An admin UI still showing only qualified counts does not match these source
-assets. No deployed version/cache was inspected; do not claim a runtime cause
-or deploy automatically.
+## Root cause and change
 
-The smallest follow-up fixes remaining count-input gaps and makes the existing
-display-only boundary explicit. Explicit null joins were accepted as unknown,
-and null update counts were ignored rather than validated. Extremely large
-digit strings in the admin form could become Infinity, which JSON serialization
-turns into null. The form parser now rejects unsafe numbers; the server rejects
-explicit null counts on create/update while preserving omitted legacy joins.
+The Affiliate page previously substituted `campaign_activity.leaderboard` for
+its actual monthly leaderboard when a campaign was active. Those genuine rows
+used the campaign date window, so genuine monthly scores could differ. The
+regular `/api/leaderboard` XP and Ref results did not include manual rows at all.
 
-## Source trace and behavior
+The regular `/api/affiliate/leaderboard` response now appends active, visible
+manual participants to the genuine monthly snapshot, sorts using the existing
+qualified/joins/conversion ranking, and applies its existing top-50 limit.
+The frontend renders this ordinary `leaderboard` directly, without a campaign
+banner or substitution. Genuine My Stats and reward progress use the original
+snapshot. Manual legacy joins and conversion remain unknown (—).
 
-- `static/admin-dashboard.html`: existing create fields (display name, joins,
-  qualified). `static/admin-dashboard.js`: existing edit fields and stable
-  participant entry-ID requests; strict integer parser now also rejects unsafe
-  numbers. Server errors are already shown via their clear `message` text.
-- `campaign_display_override.py`: shared validation and participant persistence
-  in `campaign_display_overrides`. New private omitted-value sentinel separates
-  a missing count from an explicitly invalid null. No database schema change.
-- `build_public_campaign_activity`: existing ranking (qualified, joins,
-  conversion, name/entry-ID tie break), date window, visible-row inclusion and
-  genuine calculations are unchanged. Manual rows use prefixed stable IDs,
-  never names. Public rows keep the existing convention and contain no genuine
-  user IDs or invented verification flags.
-- `static/index.html`: Affiliate campaign table uses builder counts/rates;
-  genuine My Stats still uses genuine referrals only. Campaign banner now
-  identifies display-only counts and genuine reward progress.
-- `static/creator-share.html`: Money Room's existing campaign renderer uses the
-  same values, preserves duplicate names as separate rows, and now identifies
-  the display-only section.
-- `render_campaign_activity_announcement_text`: the existing announcement text
-  generator consumes the same builder output as both previews. Active campaign
-  text now includes the same display-only/reward boundary. No send action.
+The regular `/api/leaderboard` XP and Ref results now append explicitly entered
+manual XP and Ref scores after reading genuine cached results. Each ranking
+sorts by its existing score and retains its existing top-15 limit. Stable sorts
+retain genuine tie order; no genuine cache entry is mutated. Existing campaign
+selection, visibility, enable/disable and schedule gates control the overlay.
+Hidden, disabled or expired entries disappear from both regular leaderboards.
 
-Counts remain strict non-negative integers bounded by the existing ceiling.
-Boolean, floating-point (including 20.0), string and negative JSON values are
-rejected; qualified greater than known joins is rejected after merging updates
-with stored values. The API now additionally rejects explicitly supplied null
-counts with HTTP 400. Existing omitted-joins API requests remain compatible.
-Old documents with absent/null joins still read as unknown; name-only edits do
-not invent joins, and editing them to add joins remains supported. Known joins
-cannot be cleared with null to bypass the consistency check.
+## Admin and schema/API impact
 
-Manual conversion is qualified/joins for positive joins, otherwise unknown.
-The existing public total is null with `joins_total_complete=false` whenever
-any included row's joins are unknown; the admin's known partial sum is labeled
-partial. Hidden/disabled/expired rows keep their existing inclusion behavior.
-No migration, live activation, genuine-record update or analytics change.
+Create and edit forms have Display name, Joins count, Qualified count, plus
+optional XP points and Ref count. Storage remains in `campaign_display_overrides`
+participants, with new optional integer fields `xp_count` and `ref_count`.
+Both new fields use existing strict whole-number validation and count ceiling.
+Explicit null, booleans, decimals, negatives and strings are rejected server-side.
+Omitted XP/Ref fields remain absent and do not invent a score or enter that ranking.
+Name-only edits preserve existing values; set an explicit zero to enter at zero.
+Joins and qualified retain their existing constraints, including qualified <= joins.
+Explicit null counts are rejected; omitted legacy joins remain unknown.
+The admin parser rejects integers outside JavaScript's safe integer range.
 
-## Examples
+Manual rows use `manual:<entry_id>` IDs and genuine rows use `genuine:<user_id>`.
+Matching names never merge. Public manual rows carry `display_only=true` and
+render as '(manual · display only)'; they are not presented as verified activity.
+The genuine-only monthly and weekly snapshots, ledgers, XP, referrals, reward
+eligibility, payouts, analytics and historical leaderboard archives are untouched.
+There is no migration or production write in this change.
 
-Manual entries are additional participants. Genuine rows retain their separate
-`genuine:<id>` identities and original scores; manual rows use `manual:<entry_id>`.
-The builder appends visible manual rows, sorts the combined ranking, and leaves
-the existing surface display limit to the consumer. Matching names never merge.
-Ten genuine rows plus a higher-scoring manual row produce eleven ranked rows;
-Money Room displays the first ten, while the displaced genuine row remains intact.
-Hiding the manual row, disabling the campaign or expiring it restores all ten
-genuine rows. Regression tests verify this and unchanged genuine database records.
+## Example
 
-| Row | Joins | Qualified | Conversion |
-| --- | ---: | ---: | ---: |
-| Genuine | 10 | 4 | 40.0% |
-| Manual | 30 | 20 | 66.7% |
-| Manual zero | 0 | 0 | — |
-| Legacy manual | — | 7 | — |
+Genuine: 10 joins, 4 qualified, 100 XP, 4 Ref.
+Manual: 30 joins, 20 qualified, 900 XP, 25 Ref.
 
-0 joins/20 qualified, or any qualified greater than joins, is rejected. A legacy
-7-qualified row may be edited to 30 joins/20 qualified; the prior missing joins
-were never assumed to be zero or seven.
+The manual participant ranks above that genuine participant in the regular
+Affiliate, XP and Ref rankings. The genuine participant retains exactly their
+original values. A display limit can hide a lower genuine row without deleting
+it. Removing the manual overlay restores the genuine-only results.
 
-## Verification and limits
+## Files and verification
 
-Focused Python suites exercise actual admin routes/shared builders, invalid
-inputs, legacy editing, totals, schedule/disable/expiry, duplicate names,
-announcement text parity, and no changes to genuine ledgers/XP/rewards.
-Node tests execute the production Affiliate and Money Room render functions,
-admin parsing, duplicate-row rendering and existing genuine My Stats rendering.
-They use isolated in-memory data/DOM fixtures; no production or Telegram calls.
+- `campaign_display_override.py`: optional score validation/persistence and
+  read-only merge helpers; existing display-only announcement notice.
+- `main.py`: merge into regular Affiliate and XP/Ref response rows, preserving
+  genuine My Stats and caches.
+- `static/admin-dashboard.html`, `static/admin-dashboard.js`: create/edit fields,
+  participant score columns and strict frontend parsing.
+- `static/index.html`: ordinary Affiliate response rendering, unknown joins and
+  manual row identification in Affiliate and XP/Ref.
+- `static/creator-share.html`: existing display-only notice in Money Room.
+- Focused Python and Node tests cover actual endpoint results, cached scores,
+  duplicate names, ranking limits, zero scores, invalid inputs, legacy rows,
+  edits, hidden/disabled/expired overlays, and unchanged genuine records.
 
-There is no campaign-specific announcement sender implementation in this
-repository. The shared text generator and previews are verified; actual
-Telegram delivery cannot be tested or wired without that implementation.
-Existing weekly-growth and milestone senders concern genuine activity and
-remain untouched. This patch does not invent a replacement delivery system.
-A deployed admin still lacking the existing joins form requires a separate
-asset/version investigation; no deployment was performed here.
+Dedicated campaign activity APIs, Money Room campaign activity and campaign
+announcement previews retain their existing campaign-window semantics. They
+are not substituted for the regular monthly or weekly leaderboards. This
+repository has no campaign-specific Telegram sender; the shared text generator
+and previews are tested. No Telegram messages, campaign activation, production
+writes, merge or deployment were performed.

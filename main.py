@@ -93,6 +93,8 @@ from campaign_display_override import (
     public_campaign_activity_view,
     render_campaign_activity_announcement_text,
     get_active_campaign_id,
+    merge_manual_affiliate_rows,
+    merge_manual_weekly_rows,
     campaign_display_admin_bp,
 )
 from affiliate_rewards import (
@@ -6634,6 +6636,7 @@ def get_leaderboard():
             if not formatted:
                 continue
             top_checkins.append({
+                "entry_id": f"genuine:{row.get('user_id')}",
                 "username": formatted,
                 "xp": int(row.get("weekly_xp", 0)),
                 "is_vip1": bool(row.get("is_vip1", False)),
@@ -6645,6 +6648,7 @@ def get_leaderboard():
             if not formatted:
                 continue
             entry = {
+                "entry_id": f"genuine:{row.get('user_id')}",
                 "username": formatted,
                 "total_valid": int(row.get("weekly_referrals", 0)),
                 "referrals": int(row.get("weekly_referrals", 0)),
@@ -6655,6 +6659,15 @@ def get_leaderboard():
 
             referral_board.append(entry)
             
+        active_campaign_id = get_active_campaign_id(db)
+        if active_campaign_id:
+            top_checkins = merge_manual_weekly_rows(
+                db, active_campaign_id, top_checkins, score_field="xp",
+                manual_field="xp_count", limit=leaderboard_limit)
+            referral_board = merge_manual_weekly_rows(
+                db, active_campaign_id, referral_board, score_field="referrals",
+                manual_field="ref_count", limit=leaderboard_limit)
+
         leaderboard = {
             "checkin": top_checkins,
             "referral": referral_board,
@@ -6960,6 +6973,12 @@ def get_affiliate_leaderboard_week():
                 effective_campaign_id,
             )
             campaign_activity_public = None
+
+    # Overlay the actual monthly leaderboard; keep My Stats and rewards based
+    # on the genuine snapshot above, and retain the existing top-50 limit.
+    active_campaign_id = get_active_campaign_id(db)
+    if active_campaign_id:
+        leaderboard = merge_manual_affiliate_rows(db, active_campaign_id, leaderboard)
 
     return jsonify(
         {

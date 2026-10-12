@@ -260,6 +260,17 @@ def _check_participant_fields(raw: Any, *, seen_entry_ids: set[str]) -> tuple[di
         if qualified_count > joins_count:
             return None, "qualified_exceeds_joins"
 
+    extra_scores = {}
+    for field in ("xp_count", "ref_count"):
+        if field not in raw:
+            continue
+        value = raw[field]
+        if isinstance(value, bool) or not isinstance(value, int):
+            return None, f"bad_{field}_type"
+        if value < 0 or value > MAX_DISPLAY_QUALIFIED_COUNT:
+            return None, f"{field}_out_of_range"
+        extra_scores[field] = value
+
     visible = raw.get("visible", True)
     if not isinstance(visible, bool):
         return None, "bad_visible_type"
@@ -275,6 +286,7 @@ def _check_participant_fields(raw: Any, *, seen_entry_ids: set[str]) -> tuple[di
         # legacy document round-trips byte-identical through an edit that
         # doesn't supply joins.
         normalized["joins_count"] = joins_count
+    normalized.update(extra_scores)
     return normalized, None
 
 
@@ -290,6 +302,10 @@ def compute_conversion_rate(joins_count: int | None, qualified_count: int | None
 # Admin-facing text for each participant validation failure. The `code`
 # stays the machine contract; `message` is what the Dashboard shows.
 PARTICIPANT_ERROR_MESSAGES = {
+    **{f"bad_{field}_type": f"{label} must be a non-negative whole number (no decimals, text or true/false)."
+       for field, label in (("xp_count", "XP points"), ("ref_count", "Ref count"))},
+    **{f"{field}_out_of_range": f"{label} must be between 0 and {MAX_DISPLAY_QUALIFIED_COUNT:,}."
+       for field, label in (("xp_count", "XP points"), ("ref_count", "Ref count"))},
     "bad_qualified_count_type": "Qualified count must be a whole number (no decimals, text or true/false).",
     "qualified_count_out_of_range": f"Qualified count must be between 0 and {MAX_DISPLAY_QUALIFIED_COUNT:,}.",
     "bad_joins_count_type": "Joins count must be a whole number (no decimals, text or true/false).",
@@ -489,6 +505,58 @@ def _genuine_display_names(db_ref, referrer_ids: list[int]) -> dict[int, str]:
     except Exception:
         logger.warning("[CAMPAIGN_DISPLAY] genuine_display_name_lookup_failed", exc_info=True)
     return names
+
+
+def merge_manual_weekly_rows(db, campaign_id, genuine_rows, *, score_field, manual_field, limit=15, reference_utc=None):
+    """Merge explicit display scores after genuine cache reads, without writes."""
+    combined = [dict(row) for row in genuine_rows]
+    active = load_active_campaign_override(db, campaign_id, reference_utc=reference_utc)
+    if not active.get("active"):
+        return combined[:limit]
+    for participant in active.get("participants", []):
+        if manual_field not in participant:
+            continue
+        score = participant[manual_field]
+        row = {"entry_id": f"manual:{participant['entry_id']}",
+               "username": participant["display_name"], score_field: score,
+               "display_only": True, "is_vip1": False}
+        if score_field == "referrals":
+            row["total_valid"] = score
+        combined.append(row)
+    combined.sort(key=lambda row: -int(row.get(score_field, 0)))
+    return combined[:limit]
+
+
+def merge_manual_affiliate_rows(db, campaign_id, genuine_rows, *, limit=50, reference_utc=None):
+    """Append display-only entries to the actual monthly leaderboard.
+
+    Genuine rows come from the caller's canonical monthly snapshot, never
+    from the campaign date window. Stable sorting retains genuine tie order.
+    """
+    combined = [dict(row) for row in genuine_rows]
+    active = load_active_campaign_override(db, campaign_id, reference_utc=reference_utc)
+    if not active.get("active") or not active.get("participants"):
+        return combined[:limit]
+    for row in combined:
+        row["entry_id"] = f"genuine:{row['referrer_id']}"
+    for participant in active["participants"]:
+        joins = participant.get("joins_count")
+        combined.append({
+            "entry_id": f"manual:{participant['entry_id']}",
+            "display_name": participant["display_name"],
+            "qualified_month": participant["qualified_count"],
+            "joins_month": joins,
+            "conversion_month": compute_conversion_rate(joins, participant["qualified_count"]),
+            "display_only": True,
+        })
+    combined.sort(key=lambda row: (
+        -int(row.get("qualified_month", 0)),
+        -int(row.get("joins_month") or 0),
+        -float(row.get("conversion_month") or 0),
+    ))
+    for rank, row in enumerate(combined, 1):
+        row["rank"] = rank
+    return combined[:limit]
 
 
 def build_public_campaign_activity(db, campaign_id: str, reference_utc: datetime | None = None) -> dict[str, Any]:
@@ -979,6 +1047,8 @@ def add_participant(
     display_name: Any,
     qualified_count: Any,
     joins_count: Any = _UNSET,
+    xp_count: Any = _UNSET,
+    ref_count: Any = _UNSET,
     visible: Any = True,
     updated_by,
     expected_updated_at: str | None = None,
@@ -1000,6 +1070,9 @@ def add_participant(
         if joins_count is None:
             return None, "bad_joins_count_type"
         candidate["joins_count"] = joins_count
+    for field, value in (("xp_count", xp_count), ("ref_count", ref_count)):
+        if value is not _UNSET:
+            candidate[field] = value
     normalized, reason = _check_participant_fields(candidate, seen_entry_ids=set())
     if reason:
         return None, reason
@@ -1025,6 +1098,8 @@ def update_participant(
     display_name: Any = None,
     qualified_count: Any = _UNSET,
     joins_count: Any = _UNSET,
+    xp_count: Any = _UNSET,
+    ref_count: Any = _UNSET,
     visible: Any = None,
     updated_by,
     expected_updated_at: str | None = None,
@@ -1072,6 +1147,9 @@ def update_participant(
     if visible is not None:
         candidate["visible"] = visible
 
+    for field, value in (("xp_count", xp_count), ("ref_count", ref_count)):
+        if value is not _UNSET:
+            candidate[field] = value
     normalized, reason = _check_participant_fields(candidate, seen_entry_ids=set())
     if reason:
         return None, reason
@@ -1289,6 +1367,8 @@ def api_admin_add_participant(campaign_id: str):
         display_name=body.get("display_name"),
         qualified_count=body.get("qualified_count"),
         joins_count=body.get("joins_count", _UNSET),
+        xp_count=body.get("xp_count", _UNSET),
+        ref_count=body.get("ref_count", _UNSET),
         visible=body.get("visible", True),
         updated_by=_admin_identity(admin),
         expected_updated_at=body.get("expected_updated_at"),
@@ -1317,6 +1397,8 @@ def api_admin_update_participant(campaign_id: str, entry_id: str):
         display_name=body.get("display_name"),
         qualified_count=body.get("qualified_count", _UNSET),
         joins_count=body.get("joins_count", _UNSET),
+        xp_count=body.get("xp_count", _UNSET),
+        ref_count=body.get("ref_count", _UNSET),
         visible=body.get("visible"),
         updated_by=_admin_identity(admin),
         expected_updated_at=body.get("expected_updated_at"),
