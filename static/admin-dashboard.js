@@ -9293,7 +9293,9 @@
   // everything; this only gives immediate feedback.
   function cdParseCount(raw) {
     var s = String(raw == null ? "" : raw).trim();
-    return /^\d+$/.test(s) ? Number(s) : null;
+    if (!/^\d+$/.test(s)) return null;
+    var count = Number(s);
+    return Number.isSafeInteger(count) ? count : null;
   }
 
   function cdFmtJoins(v) { return v === null || v === undefined ? "—" : String(v); }
