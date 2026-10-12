@@ -54,6 +54,17 @@ stable IDs and genuine cached names are unchanged; masking collisions do not
 merge rows. The regular leaderboard rule remains distinct from public
 announcement masking. Endpoint tests cover normal, @-prefixed and short names
 for both non-admin and admin viewers.
+Legacy manual names already containing the existing three-star mask (such as
+`A***n` and `J***8`) retain that display text instead of being masked again.
+Leading @ is normalized as on the genuine leaderboard. Raw usernames still
+use the existing formatter. This changes presentation only, without migrating
+stored names or changing genuine masking.
+
+The masking integration tests replace the module's users-collection reference
+when simulating admin lookup, rather than patching a dynamic method on
+`CollectionProxy`. Restoring such a method would otherwise pin the proxy to an
+old test database and break later suites that swap database fixtures. The
+full-suite known-failure baseline is not weakened or expanded.
 The genuine-only monthly and weekly snapshots, ledgers, XP, referrals, reward
 eligibility, payouts, analytics and historical leaderboard archives are untouched.
 There is no migration or production write in this change.
