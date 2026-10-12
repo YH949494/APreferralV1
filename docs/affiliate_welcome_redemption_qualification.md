@@ -224,3 +224,6 @@ python scripts/affiliate_qualification_admin.py sync-evidence --commit      # op
 python scripts/affiliate_qualification_admin.py configure-databot-source --account-namespace <provider> \
   --attested-by "<data owner>" --attestation-ref "<ticket>" [--legacy-time-basis naive_wallclock] [--commit]
 ```
+
+
+See [affiliate_qualification_gates.md](affiliate_qualification_gates.md) for the coupon-new-player and completed seven-day turnover gate patch, version compatibility and targeted enrichment review plan.

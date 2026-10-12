@@ -84,6 +84,7 @@ env:
     test_affiliate_welcome_redemption_qualification.py
     test_uim_redemption_sync.py
     test_affiliate_qualification_rollout_guards.py
+    test_affiliate_qualification_gates.py
 
 jobs:
   migration-tests:

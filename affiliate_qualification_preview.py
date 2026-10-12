@@ -221,6 +221,17 @@ def _build_evidences(observations, recipients, *, now_utc, stats, source=aq.SOUR
         if prior is None:
             doc["_id"] = "shadow:" + doc["source_ref"]
             by_ref[doc["source_ref"]] = doc
+        elif (source == aq.SOURCE_DATABOT_UIM and doc.get("authoritative_order")
+              and prior.get("authoritative_order") and doc["authoritative_order"] > prior["authoritative_order"]
+              and aq._aware_utc(prior.get("redeemed_at")) == aq._aware_utc(doc.get("redeemed_at"))
+              and prior.get("redemption_successful") == doc.get("redemption_successful")):
+            # Same redemption's newest completed report replaces gate values.
+            # Preserve tombstones/core conflicts from earlier observations.
+            doc["_id"] = prior["_id"]
+            for flag in ("_source_removed", "_conflicting_observation"):
+                if prior.get(flag):
+                    doc[flag] = True
+            by_ref[doc["source_ref"]] = doc
         elif prior["observation_fingerprint"] != doc["observation_fingerprint"]:
             prior["_conflicting_observation"] = True
     stats["welcome_evidence_rows"] = len(by_ref)
@@ -309,6 +320,7 @@ def build_preview(db, *, month: str | None, now_utc: datetime, source_config: di
         "read_only": True,
         "writes": "none — preview never writes evidence, qualified_events, registry, XP, ledgers or the cutoff",
         "rule_version": aq.RULE_VERSION,
+        "qualification_gate_version": aq.QUALIFICATION_GATE_VERSION,
         "generated_at": now_utc.isoformat(),
         "control": {
             "mode": control.get("mode") or aq.MODE_DISABLED,
@@ -566,11 +578,11 @@ def build_preview(db, *, month: str | None, now_utc: datetime, source_config: di
     payload["source_stats"] = dict(stats)
     payload["evidence_summary"] = _evidence_summary(stats, evidences, historical, payload["source"].get("sync"))
     if stats["truncated"]:
-        # Row cap hit: every new-rule figure above is a lower bound, not complete.
+        # Later unseen corrections can decrease counts as well as increase them.
         payload["source"]["evidence_incomplete"].append("preview_row_limit_reached")
         payload["evidence_summary"]["truncated"] = True
         payload["evidence_summary"]["basis"] = (
-            f"first {PREVIEW_MAX_SOURCE_ROWS:,} committed rows only (row limit reached) — figures are lower bounds"
+            f"first {PREVIEW_MAX_SOURCE_ROWS:,} committed rows only (row limit reached) — figures are provisional; later corrections are unscanned"
         )
     return payload
 
@@ -599,6 +611,8 @@ def _evidence_summary(stats, evidences, historical, sync) -> dict:
         "duplicate_account_excluded": status[aq.EV_DUPLICATE_ACCOUNT],
         "requiring_review": status[aq.EV_REVIEW],
         "rejected": status[aq.EV_REJECTED],
+        "failed_gate_reasons": dict(Counter(o["reason"] for o in historical
+                                          if o["status"] == aq.EV_REJECTED).most_common()),
         # All time, including evidence with no usable redemption time (which
         # the period-scoped outcome_reasons cannot place in any month).
         "review_reasons": dict(Counter(o["reason"] for o in historical if o["status"] == aq.EV_REVIEW).most_common()),

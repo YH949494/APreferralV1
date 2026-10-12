@@ -47,10 +47,12 @@ hash plus a masked form; logs use masked values and evidence ids only.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
 import unicodedata
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 
 import pytz
 from pymongo import ASCENDING, ReturnDocument
@@ -59,6 +61,7 @@ from pymongo.errors import DuplicateKeyError
 logger = logging.getLogger(__name__)
 
 RULE_VERSION = "welcome_redemption_v1"
+QUALIFICATION_GATE_VERSION = "coupon_new_player_turnover_v1"
 CONTROL_COLLECTION = "affiliate_qualification_control"
 EVIDENCE_COLLECTION = "welcome_redemption_evidence"
 REGISTRY_COLLECTION = "affiliate_account_registry"
@@ -456,6 +459,8 @@ def _validate_databot_config(cfg: dict) -> list[str]:
         problems.append("databot_has_no_namespace_column")
     if normalize_namespace(cfg.get("account_namespace")) is None:
         problems.append("missing:account_namespace")
+    elif normalize_namespace(cfg.get("account_namespace")) != "uim_global":
+        problems.append("databot_requires_global_account_namespace")
     if not cfg.get("source_timezone"):
         problems.append("missing:source_timezone")
     else:
@@ -622,9 +627,11 @@ def welcome_issuance_problem(recipient: dict, redeemed_at: datetime | None) -> s
 # Evidence ingestion (idempotent)
 # ---------------------------------------------------------------------------
 
-def _observation_fingerprint(successful: bool, redeemed_at: datetime | None) -> str:
+def _observation_fingerprint(successful: bool, redeemed_at: datetime | None, fields=None) -> str:
     stamp = redeemed_at.isoformat() if redeemed_at else ""
-    return hashlib.sha256(f"{int(bool(successful))}|{stamp}".encode()).hexdigest()[:16]
+    gate_values = {k: (fields or {}).get(k) for k in ("coupon_new_player", "after_total_bet_amount")}
+    encoded = json.dumps(gate_values, sort_keys=True, default=str)
+    return hashlib.sha256(f"{int(bool(successful))}|{stamp}|{encoded}".encode()).hexdigest()[:16]
 
 
 def build_evidence_doc(
@@ -642,6 +649,8 @@ def build_evidence_doc(
     redeemed_at_reason: str | None = None,
     evidence_basis: dict | None = None,
     observation: str | None = None,
+    qualification_fields: dict | None = None,
+    observation_order: str | None = None,
 ) -> dict:
     """The evidence document for one normalised observation (no I/O).
     ``source_ref`` is its idempotency key: same code + account = same row.
@@ -669,7 +678,10 @@ def build_evidence_doc(
         "redeemed_at_reason": None if redeemed_at else (redeemed_at_reason or None),
         "redemption_successful": bool(redemption_successful),
         "evidence_basis": evidence_basis,
-        "observation_fingerprint": _observation_fingerprint(redemption_successful, redeemed_at),
+        "qualification_fields": qualification_fields,
+        "authoritative_order": observation_order,
+        "qualification_gate_version": QUALIFICATION_GATE_VERSION,
+        "observation_fingerprint": _observation_fingerprint(redemption_successful, redeemed_at, qualification_fields),
         "campaign_id": None if campaign_id is None else str(campaign_id),
         "recipient_resolution": recipient,
         "status": EV_RECEIVED,
@@ -695,6 +707,8 @@ def record_redemption_evidence(
     redeemed_at_reason: str | None = None,
     evidence_basis: dict | None = None,
     observation: str | None = None,
+    qualification_fields: dict | None = None,
+    observation_order: str | None = None,
 ) -> dict:
     """Upsert one redemption observation. Re-importing the same row is a
     no-op; a conflicting re-observation (status or time changed) is routed
@@ -713,7 +727,7 @@ def record_redemption_evidence(
         source=source, code=code_n, recipient=recipient, account_raw=account_raw, namespace=namespace,
         redeemed_at=redeemed_at, redemption_successful=redemption_successful, campaign_id=campaign_id,
         now_utc=now_utc, account_reason=account_reason, redeemed_at_reason=redeemed_at_reason,
-        evidence_basis=evidence_basis,
+        evidence_basis=evidence_basis, qualification_fields=qualification_fields, observation_order=observation_order,
     )
     if observation == OBS_REMOVED:
         existing = db[EVIDENCE_COLLECTION].find_one({"source": source, "source_ref": insert_doc["source_ref"]})
@@ -747,6 +761,45 @@ def record_redemption_evidence(
         db[EVIDENCE_COLLECTION].update_one({"_id": before["_id"]}, {k: v for k, v in update.items() if k != "$setOnInsert"})
     if before is None:
         return {"recorded": True, "new": True}
+    # Only committed Databot observations carry a trustworthy total order.
+    # CAS protects concurrent extracts/retries from replacing a newer observation.
+    if source == SOURCE_DATABOT_UIM and observation_order and before.get("authoritative_order"):
+        if observation_order < before["authoritative_order"]:
+            return {"recorded": True, "new": False, "stale": True}
+        same_redemption = (_aware_utc(before.get("redeemed_at")) == _aware_utc(redeemed_at)
+                           and before.get("redemption_successful") == redemption_successful)
+        changed = before.get("observation_fingerprint") != fingerprint
+        if observation_order > before["authoritative_order"] and same_redemption:
+            if not changed:
+                db[EVIDENCE_COLLECTION].update_one(
+                    {"_id": before["_id"], "authoritative_order": before["authoritative_order"],
+                     "observation_fingerprint": fingerprint},
+                    {"$set": {"authoritative_order": observation_order}},
+                )
+                return {"recorded": True, "new": False}
+            # Retain earned effects; changed credited evidence is reconciled manually.
+            if changed and (before.get("status") != EV_RECEIVED or before.get("lease_until")
+                            or before.get("qualification_decision_at")):
+                _flag_conflicting_observation(db, before, now_utc=now_utc)
+                return {"recorded": True, "new": False, "conflict": True}
+            replaced = db[EVIDENCE_COLLECTION].find_one_and_update(
+                {"_id": before["_id"], "authoritative_order": before["authoritative_order"],
+                 "observation_fingerprint": before.get("observation_fingerprint"),
+                 "status": before.get("status"), "lease_until": {"$exists": False},
+                 "qualification_decision_at": {"$exists": False}, "source_conflict_at": {"$exists": False}},
+                {"$set": {"qualification_fields": qualification_fields, "authoritative_order": observation_order,
+                          "observation_fingerprint": fingerprint, "evidence_basis": evidence_basis}},
+                return_document=ReturnDocument.AFTER,
+            )
+            if replaced is not None:
+                return {"recorded": True, "new": False, "corrected": changed}
+            # Lost a race to evaluation or a newer correction. Never silently pass
+            # the old values; the existing manual correction path is conservative.
+            current = db[EVIDENCE_COLLECTION].find_one({"_id": before["_id"]})
+            if current and (current.get("authoritative_order") or "") >= observation_order:
+                return {"recorded": True, "new": False, "stale": True}
+            _flag_conflicting_observation(db, current or before, now_utc=now_utc)
+            return {"recorded": True, "new": False, "conflict": True}
     if before.get("observation_fingerprint") != fingerprint:
         _flag_conflicting_observation(db, before, now_utc=now_utc)
         return {"recorded": True, "new": False, "conflict": True}
@@ -759,6 +812,10 @@ def _flag_conflicting_observation(db, evidence: dict, *, now_utc: datetime,
     Unprocessed evidence goes to review; a qualification it already produced
     is flagged for manual reconciliation (never auto-revoked)."""
     ev_id = evidence["_id"]
+    # Persist the blocker even on unprocessed evidence so requeue cannot make
+    # a stale passing snapshot eligible again without reconciliation.
+    db[EVIDENCE_COLLECTION].update_one(
+        {"_id": ev_id}, {"$set": {"source_conflict_at": now_utc, "source_conflict_reason": reason}})
     if evidence.get("status") == EV_RECEIVED:
         db[EVIDENCE_COLLECTION].update_one(
             {"_id": ev_id, "status": EV_RECEIVED},
@@ -770,11 +827,10 @@ def _flag_conflicting_observation(db, evidence: dict, *, now_utc: datetime,
             {"_id": ev_id},
             {"$set": {"source_conflict_at": now_utc, "updated_at": now_utc}},
         )
-        if evidence.get("status") == EV_QUALIFIED:
-            db.qualified_events.update_one(
-                {"evidence_id": ev_id},
-                {"$set": {"evidence_status": "disputed_pending_reconciliation", "evidence_disputed_at": now_utc}},
-            )
+    db.qualified_events.update_one(
+        {"evidence_id": ev_id},
+        {"$set": {"evidence_status": "disputed_pending_reconciliation", "evidence_disputed_at": now_utc}},
+    )
     logger.warning(
         "[AFF_QUAL][EVIDENCE_CONFLICT] evidence_id=%s status=%s code=%s",
         ev_id, evidence.get("status"), evidence.get("code_masked"),
@@ -803,6 +859,8 @@ def parse_source_row(row: dict, config: dict) -> dict | None:
         "redeemed_at": parse_redeemed_at(values.get(_norm_column(cfg["redeemed_at_column"])), cfg["source_timezone"]),
         "redemption_successful": bool(status_raw) and status_raw in success_values,
         "campaign_id": campaign_id,
+        "qualification_fields": {"coupon_new_player": values.get("coupon_new_player"),
+                                 "after_total_bet_amount": values.get("after_total_bet_amount")},
     }
 
 
@@ -874,6 +932,13 @@ def _parse_databot_row(row: dict, cfg: dict) -> dict | None:
         "account_reason": _databot_account_reason(row),
         "redeemed_at_reason": redeemed_at_reason,
         "observation": OBS_REMOVED if removed else None,
+        "observation_order": row.get("_observation_order"),
+        "qualification_fields": {
+            "coupon_new_player": row.get("coupon_new_player"),
+            "after_total_bet_amount": row.get("after_total_bet_amount"),
+            "source_columns": row.get("qualification_source_columns"),
+            "transport_version": row.get("qualification_fields_version"),
+        },
         "evidence_basis": {
             "success": cfg.get("success_basis"),
             "success_attestation_ref": (cfg.get("success_attestation") or {}).get("reference"),
@@ -885,15 +950,24 @@ def _parse_databot_row(row: dict, cfg: dict) -> dict | None:
     }
 
 
+def databot_observation_order(batch: dict, row: dict) -> str | None:
+    stamp = _aware_utc(batch.get("committed_at"))
+    if stamp is None or not row.get("_id"):
+        return None
+    return f"{stamp.isoformat(timespec='microseconds')}|{batch.get('_id')}|{row['_id']}"
+
+
 def iter_committed_source_rows(db, config: dict | None):
     """``(batch_id, row)`` for every row of every committed, not rolled-back
     batch of the configured source, batches in commit order, rows in ``_id``
     order (the order corrections were made in). Read-only."""
     spec = source_spec(config)
     key = spec["batch_key"]
-    batches = db[spec["batches"]].find(committed_batch_filter(config), {key: 1}).sort(spec["order"], 1)
+    batches = db[spec["batches"]].find(committed_batch_filter(config), {key: 1, spec["order"]: 1}).sort([(spec["order"], 1), (key, 1)])
     for batch in list(batches):
         for row in db[spec["rows"]].find({key: batch.get(key)}).sort("_id", 1):
+            if source_name(config) == SOURCE_DATABOT_UIM:
+                row["_observation_order"] = databot_observation_order(batch, row)
             yield batch.get(key), row
 
 
@@ -913,8 +987,11 @@ def extract_marketing_batch(
     cursor = db[spec["rows"]].find(query).sort("_id", 1)
     if max_rows:
         cursor = cursor.limit(int(max_rows))
+    batch = db[spec["batches"]].find_one({spec["batch_key"]: upload_batch_id}) or {}
     last_id = after_id
     for row in cursor:
+        if source_name(config) == SOURCE_DATABOT_UIM:
+            row["_observation_order"] = databot_observation_order(batch, row)
         last_id = row.get("_id")
         summary["rows"] += 1
         obs = parse_source_row(row, config)
@@ -1162,6 +1239,39 @@ def _record_legacy_credit(db, evidence: dict, existing_q: dict, *, now_utc: date
 ELIGIBLE = "eligible"
 
 
+def assess_qualification_fields(fields: dict | None) -> dict:
+    """Completed seven-day dollar result; no timer, sums, conversion or rounding.
+
+    Documented flag representations are numeric 0/1 and their exact text forms.
+    Booleans and words are not UIM numeric flags. Missing/invalid input is review.
+    """
+    if not isinstance(fields, dict):
+        return {"status": EV_REVIEW, "reason": "missing_or_invalid_qualification_fields"}
+    flag = fields.get("coupon_new_player")
+    flag_ok = (type(flag) in (int, float) and flag in (0, 1)) or (
+        isinstance(flag, str) and flag.strip() in ("0", "1"))
+    raw = fields.get("after_total_bet_amount")
+    amount = None
+    if not isinstance(raw, bool) and isinstance(raw, (str, int, float, Decimal)):
+        text = str(raw).strip()
+        # Decimal accepts underscores and unusual forms; only ordinary source
+        # decimal/scientific notation is documented, no currency/comma rewriting.
+        if re.fullmatch(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?", text):
+            try:
+                candidate = Decimal(text)
+                if candidate.is_finite() and candidate >= 0:
+                    amount = candidate
+            except (InvalidOperation, ValueError):
+                pass
+    if not flag_ok or amount is None:
+        return {"status": EV_REVIEW, "reason": "missing_or_invalid_qualification_fields"}
+    if str(flag).strip() == "0" or flag == 0:
+        return {"status": EV_REJECTED, "reason": "not_a_new_coupon_player"}
+    if amount <= Decimal("9.99"):
+        return {"status": EV_REJECTED, "reason": "seven_day_turnover_does_not_exceed_9_99"}
+    return {"status": ELIGIBLE, "reason": None}
+
+
 def assess_evidence(evidence: dict, *, control: dict, now_utc: datetime, lookup) -> dict:
     """Every validation rule of welcome_redemption_v1, with NO writes.
 
@@ -1177,6 +1287,8 @@ def assess_evidence(evidence: dict, *, control: dict, now_utc: datetime, lookup)
 
     if evidence.get("voided_at"):
         return verdict(EV_VOIDED, evidence.get("void_reason") or "voided")
+    if evidence.get("source_conflict_at"):
+        return verdict(EV_REVIEW, evidence.get("source_conflict_reason") or "conflicting_source_observations")
     if not evidence.get("redemption_successful"):
         return verdict(EV_REJECTED, "redemption_not_successful")
     redeemed_at = _aware_utc(evidence.get("redeemed_at"))
@@ -1234,6 +1346,12 @@ def assess_evidence(evidence: dict, *, control: dict, now_utc: datetime, lookup)
     if not own["ok"]:
         return verdict(own["status"], own["reason"], invitee_id=invitee_id, inviter_id=inviter_id)
 
+    # Existing earned events and historical seeding are handled above/outside
+    # this validator. Every prospective award under the launched rule uses gates.
+    gates = assess_qualification_fields(evidence.get("qualification_fields"))
+    if gates["status"] != ELIGIBLE:
+        return verdict(gates["status"], gates["reason"], invitee_id=invitee_id, inviter_id=inviter_id)
+
     cutoff = launch_cutoff(control)
     if cutoff is not None and redeemed_at < cutoff:
         qualified_at, basis = cutoff, "launch_cutoff_clamp"
@@ -1247,6 +1365,9 @@ def assess_evidence(evidence: dict, *, control: dict, now_utc: datetime, lookup)
 
 def evaluate_evidence(db, evidence: dict, *, control: dict, now_utc: datetime) -> dict:
     """Validate one evidence row and, if eligible, qualify atomically."""
+    # Workers can hold an earlier snapshot while another extractor observes a
+    # correction. Re-read the canonical row before making any award decision.
+    evidence = db[EVIDENCE_COLLECTION].find_one({"_id": evidence["_id"]}) or evidence
     a = assess_evidence(evidence, control=control, now_utc=now_utc, lookup=DbLookup(db))
     extra = {k: a[k] for k in ("invitee_id", "inviter_id") if a.get(k) is not None}
     if a["status"] == EV_INVITEE_ALREADY_QUALIFIED:
@@ -1285,6 +1406,18 @@ def _qualify(
     ev_id = evidence["_id"]
     account_key = evidence["account_key"]
     registry = db[REGISTRY_COLLECTION]
+    # Compare-and-set freezes the version actually validated. A correction
+    # observed before this decision cannot slip between validation and reserve.
+    current = db[EVIDENCE_COLLECTION].find_one_and_update(
+        {"_id": ev_id, "status": EV_RECEIVED, "source_conflict_at": {"$exists": False},
+         "observation_fingerprint": evidence.get("observation_fingerprint")},
+        {"$set": {"qualification_decision_at": now_utc}},
+        return_document=ReturnDocument.AFTER,
+    )
+    if current is None:
+        latest = db[EVIDENCE_COLLECTION].find_one({"_id": ev_id}) or {}
+        return {"status": latest.get("status", EV_REVIEW),
+                "reason": latest.get("reason") or "source_observation_changed"}
     try:
         registry.insert_one(
             {
@@ -1316,6 +1449,7 @@ def _qualify(
         "qualified_at": qualified_at,
         "redeemed_at": redeemed_at,
         "processed_at": now_utc,
+        "qualification_gate_version": QUALIFICATION_GATE_VERSION,
         "rule_version": RULE_VERSION,
         "attribution_basis": attribution_basis,
         "ownership_basis": ownership_basis,
@@ -1365,6 +1499,12 @@ def _qualify(
         )
     except Exception:
         logger.exception("[AFF_QUAL][FLOW_EVENT_FAILED] invitee=%s referrer=%s", invitee_id, inviter_id)
+    correction = db[EVIDENCE_COLLECTION].find_one({"_id": ev_id}, {"source_conflict_at": 1}) or {}
+    if correction.get("source_conflict_at"):
+        db.qualified_events.update_one(
+            {"_id": q_id}, {"$set": {"evidence_status": "disputed_pending_reconciliation",
+                                      "evidence_disputed_at": correction["source_conflict_at"]}},
+        )
     return _finalize(
         db, evidence, EV_QUALIFIED, None, now_utc=now_utc,
         extra={"invitee_id": invitee_id, "inviter_id": inviter_id, "qualified_event_id": q_id},
@@ -1384,6 +1524,17 @@ def process_pending_evidence(db, *, now_utc: datetime, control: dict | None = No
         logger.error("[AFF_QUAL][REFUSED] reason=indexes_not_ready missing=%s", readiness["missing"])
         out["skipped"] = "indexes_not_ready"
         return out
+    config = (control or {}).get("source_config") or {}
+    spec = source_spec(config)
+    if db[spec["batches"]].find_one({**committed_batch_filter(config),
+                                   "welcome_evidence_extracted_at": {"$exists": False}}, {"_id": 1}):
+        out["skipped"] = "source_extraction_incomplete"
+        return out
+    if source_name(config) == SOURCE_DATABOT_UIM:
+        health = integration_readiness(db, config, now_utc=now_utc)
+        if not health["ok"]:
+            out["skipped"] = "source_evidence_incomplete"
+            return out
     col = db[EVIDENCE_COLLECTION]
     for _ in range(int(batch_limit)):
         evidence = col.find_one_and_update(

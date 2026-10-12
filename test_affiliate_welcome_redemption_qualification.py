@@ -105,7 +105,8 @@ class World:
 
     @staticmethod
     def row(code, account, at, status="success"):
-        return {"coupon_code": code, "account": account, "coupon_redeem_time": kl_text(at), "redeem_status": status}
+        return {"coupon_code": code, "account": account, "coupon_redeem_time": kl_text(at), "redeem_status": status,
+                "coupon_new_player": "1", "after_total_bet_amount": "10"}
 
     def qualified(self, **filt):
         return list(self.db.qualified_events.find(filt))

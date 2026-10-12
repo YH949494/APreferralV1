@@ -288,7 +288,8 @@ def _sync_rows(db, fetch, *, now_utc: datetime, max_rows: int, out: dict) -> Non
                     counters["non_welcome_code" if code in other else "unknown_code"] += 1
                     continue
                 doc = {k: row.get(k) for k in (
-                    "observation", "coupon_code", "account", "account_basis", "file_type", "redeemed_at_utc",
+                    "coupon_new_player", "after_total_bet_amount", "qualification_fields_version",
+                    "qualification_source_columns", "observation", "coupon_code", "account", "account_basis", "file_type", "redeemed_at_utc",
                     "redeemed_at_wallclock", "redeemed_at_basis", "redeemed_at_raw", "redeemed_at_column",
                     "campaign", "source_period", "provenance", "provenance_version",
                 )}

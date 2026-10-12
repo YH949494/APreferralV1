@@ -34,7 +34,7 @@ DATABOT_CONFIG = {
     "source": aq.SOURCE_DATABOT_UIM,
     **aq.DATABOT_FIXED_COLUMNS,
     "namespace_column": None,
-    "account_namespace": "advantplay",
+    "account_namespace": "uim_global",
     "source_timezone": "Asia/Kuala_Lumpur",
     "success_basis": aq.SUCCESS_BASIS_SOURCE_CONTRACT,
     "success_attestation": {"by": "Marketing data owner", "reference": "OPS-1234"},
@@ -59,6 +59,7 @@ def urow(code, account, wall, *, basis="naive_wallclock", observation="upsert", 
     export's GMT+8 wall clock; Databot stores naive digits as if UTC."""
     digits = datetime.strptime(wall, "%Y-%m-%d %H:%M:%S") if wall else None
     return {
+        "coupon_new_player": "1", "after_total_bet_amount": "10", "qualification_fields_version": 1,
         "observation": observation, "coupon_code": code, "account": account, "account_basis": account_basis,
         "file_type": file_type,
         "redeemed_at_utc": digits.replace(tzinfo=timezone.utc).isoformat() if digits else None,
@@ -207,7 +208,7 @@ def test_same_account_across_affiliates_and_months_never_credits_twice():
     assert (octo["totals"]["historical_would_qualify"], octo["totals"]["historical_duplicate_account_excluded"]) == (0, 1)
     assert octo["totals"]["at_launch_eligible"] == 1  # one lifetime credit, whichever month
     # An account already credited in the real registry is never credited again.
-    w.db[aq.REGISTRY_COLLECTION].insert_one({"account_key": "advantplay:acctX", "state": aq.REG_SEEDED})
+    w.db[aq.REGISTRY_COLLECTION].insert_one({"account_key": "uim_global:acctX", "state": aq.REG_SEEDED})
     assert preview(w.db)["totals"]["at_launch_eligible"] == 0
 
 
@@ -253,7 +254,7 @@ def test_success_basis_is_never_fabricated():
         r["historical"] is None for r in out["affiliates"])
     # The preview-only override labels success as ASSUMED, never attested.
     merged, overridden = aqp.source_config_from_args(
-        {"source": "databot_uim", "success_basis": aq.SUCCESS_BASIS_SOURCE_CONTRACT, "account_namespace": "advantplay"},
+        {"source": "databot_uim", "success_basis": aq.SUCCESS_BASIS_SOURCE_CONTRACT, "account_namespace": "uim_global"},
         None)
     assert overridden and aq.validate_source_config(merged) == []
     assert merged["success_attestation"]["preview_only"] is True
@@ -367,7 +368,7 @@ def test_leading_zero_accounts_and_gmt8_month_boundary():
     assert obs["redeemed_at"] == datetime(2026, 10, 31, 15, 30, tzinfo=timezone.utc)
     doc = aq.build_evidence_doc(source=aq.SOURCE_DATABOT_UIM, recipient={}, now_utc=NOW,
                                 **{k: v for k, v in obs.items() if k != "code"}, code="WELC11")
-    assert doc["account_key"] == "advantplay:000123"
+    assert doc["account_key"] == "uim_global:000123"
     # An explicit-offset source time is taken as the exact instant.
     exact = aq.parse_source_row(urow("C", "a", "2026-10-31 15:30:00", basis="source_offset"), DATABOT_CONFIG)
     assert exact["redeemed_at"] == datetime(2026, 10, 31, 15, 30, tzinfo=timezone.utc)
@@ -385,7 +386,7 @@ def test_seeding_and_live_use_the_same_account_identity():
     feed.add_batch([urow("WELC11", "000123", "2026-10-05 10:00:00")])
     sync(w, feed)
     by_code = migration._redemptions_by_code(w.db, DATABOT_CONFIG, migration._welcome_codes(w.db), now_utc=NOW)
-    assert by_code == {"WELC11": {"advantplay:000123"}}
+    assert by_code == {"WELC11": {"uim_global:000123"}}
 
 
 # 7 — corrections, rollback, outage ----------------------------------------------
@@ -424,7 +425,7 @@ def test_rollback_after_live_qualification_flags_but_never_revokes(monkeypatch):
     sync(w, feed, now=NOW + timedelta(minutes=5))
     q = w.db.qualified_events.find_one({"rule_version": aq.RULE_VERSION})
     assert q["evidence_status"] == "voided_pending_reconciliation"
-    assert w.db[aq.REGISTRY_COLLECTION].find_one({"account_key": "advantplay:a1"})["state"] == aq.REG_COMMITTED
+    assert w.db[aq.REGISTRY_COLLECTION].find_one({"account_key": "uim_global:a1"})["state"] == aq.REG_COMMITTED
 
 
 def test_stale_deletion_routes_to_review():
@@ -546,14 +547,14 @@ def test_preview_matches_live_validator_on_databot_evidence(monkeypatch):
     assert statuses[aq.EV_DUPLICATE_ACCOUNT] == shadow["totals"]["at_launch_duplicate_account_excluded"] == 1
     assert statuses[aq.EV_REVIEW] == shadow["totals"]["at_launch_review"] == 2
     keys = {q["account_key"] for q in w.db.qualified_events.find({"rule_version": aq.RULE_VERSION})}
-    assert keys == {"advantplay:acctA", "advantplay:000777"}
+    assert keys == {"uim_global:acctA", "uim_global:000777"}
 
 
 # 9 — configuration never activates anything ------------------------------------------
 
 def test_configure_databot_source_keeps_rule_disabled(capsys):
     db = mongomock.MongoClient().db
-    argv = ["configure-databot-source", "--account-namespace", "advantplay", "--attested-by", "Data owner",
+    argv = ["configure-databot-source", "--account-namespace", "uim_global", "--attested-by", "Data owner",
             "--attestation-ref", "OPS-1234", "--commit"]
     assert admin_cli.main(argv, db_factory=lambda: db, now_fn=lambda: NOW) == 0
     control = aq.get_control(db)
@@ -573,7 +574,7 @@ def test_migration_never_seeds_a_removed_redemption():
     feed.add_batch([urow("WELC11", "acctA", "2026-10-05 10:00:00")])  # re-observed later: still not seeded
     sync(w, feed)
     by_code = migration._redemptions_by_code(w.db, DATABOT_CONFIG, migration._welcome_codes(w.db), now_utc=NOW)
-    assert by_code == {"WELC11": {"!source_row_removed_by_later_import"}, "WELC12": {"advantplay:acctB"}}
+    assert by_code == {"WELC11": {"!source_row_removed_by_later_import"}, "WELC12": {"uim_global:acctB"}}
     # Same verdict as the preview for that redemption.
     reasons = preview(w.db)["evidence_summary"]["review_reasons"]
     assert reasons == {"source_row_removed_by_later_import": 1}
