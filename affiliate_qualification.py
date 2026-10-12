@@ -629,7 +629,8 @@ def welcome_issuance_problem(recipient: dict, redeemed_at: datetime | None) -> s
 
 def _observation_fingerprint(successful: bool, redeemed_at: datetime | None, fields=None) -> str:
     stamp = redeemed_at.isoformat() if redeemed_at else ""
-    gate_values = {k: (fields or {}).get(k) for k in ("coupon_new_player", "after_total_bet_amount")}
+    gate_values = {k: (fields or {}).get(k) for k in (
+        "coupon_new_player", "after_total_bet_amount", "transport_version")}
     encoded = json.dumps(gate_values, sort_keys=True, default=str)
     return hashlib.sha256(f"{int(bool(successful))}|{stamp}|{encoded}".encode()).hexdigest()[:16]
 
@@ -1239,7 +1240,7 @@ def _record_legacy_credit(db, evidence: dict, existing_q: dict, *, now_utc: date
 ELIGIBLE = "eligible"
 
 
-def assess_qualification_fields(fields: dict | None) -> dict:
+def assess_qualification_fields(fields: dict | None, *, require_transport_version: bool = False) -> dict:
     """Completed seven-day dollar result; no timer, sums, conversion or rounding.
 
     Documented flag representations are numeric 0/1 and their exact text forms.
@@ -1248,6 +1249,12 @@ def assess_qualification_fields(fields: dict | None) -> dict:
     """
     if not isinstance(fields, dict):
         return {"status": EV_REVIEW, "reason": "missing_or_invalid_qualification_fields"}
+    if require_transport_version:
+        version = fields.get("transport_version")
+        # JSON integer 1 is the supported Databot qualification contract.
+        # True, "1", 1.0 and missing/future versions are not that contract.
+        if type(version) is not int or version != 1:
+            return {"status": EV_REVIEW, "reason": "unsupported_qualification_transport_version"}
     flag = fields.get("coupon_new_player")
     explicit_false = flag is False or (isinstance(flag, str) and flag.strip().lower() == "false")
     flag_ok = (type(flag) in (int, float) and flag in (0, 1)) or (
@@ -1350,7 +1357,10 @@ def assess_evidence(evidence: dict, *, control: dict, now_utc: datetime, lookup)
 
     # Existing earned events and historical seeding are handled above/outside
     # this validator. Every prospective award under the launched rule uses gates.
-    gates = assess_qualification_fields(evidence.get("qualification_fields"))
+    gates = assess_qualification_fields(
+        evidence.get("qualification_fields"),
+        require_transport_version=evidence.get("source") == SOURCE_DATABOT_UIM,
+    )
     if gates["status"] != ELIGIBLE:
         return verdict(gates["status"], gates["reason"], invitee_id=invitee_id, inviter_id=inviter_id)
 

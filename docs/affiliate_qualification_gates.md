@@ -79,3 +79,10 @@ prove the required numeric 1. Live/preview parity and no-award tests cover this
 case. Databot also requires the exact normalized After Total Bet source header
 for raw qualification turnover; generic analytics aliases do not prove the
 completed seven-day metric. Missing source metric remains review.
+
+Databot prospective qualification requires an integer transport version exactly
+`1`. Missing, boolean, string, float and unsupported/future versions require
+review even when both gate values appear valid. The version participates in the
+observation fingerprint, so a version-only source correction cannot keep an
+older verified passing snapshot. Live and read-only preview enforce the same
+check. Historical used-account seeding remains independent of the new gates.

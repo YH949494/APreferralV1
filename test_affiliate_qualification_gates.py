@@ -150,7 +150,41 @@ def test_existing_insert_only_sync_rows_are_not_silently_enriched():
     assert 'coupon_new_player' not in w.db[syncer.ROWS_COLLECTION].find_one()
     aq.extract_committed_batches(w.db, config=DATABOT_CONFIG, now_utc=NOW)
     aq.process_pending_evidence(w.db, now_utc=NOW)
-    assert w.db[aq.EVIDENCE_COLLECTION].find_one()['reason'] == 'missing_or_invalid_qualification_fields'
+    assert w.db[aq.EVIDENCE_COLLECTION].find_one()['reason'] == 'unsupported_qualification_transport_version'
+
+
+@pytest.mark.parametrize('version', [None, 0, 2, '1', True, 1.0])
+def test_databot_requires_supported_integer_transport_version(version, monkeypatch, _scheduler):
+    w, _ = databot_world(fields={'qualification_fields_version': version})
+    before = _snapshot(w.db)
+    result = preview.build_preview(_ReadOnlyDb(w.db), month='202610', now_utc=NOW)
+    assert _snapshot(w.db) == before
+    assert result['totals']['at_launch_eligible'] == 0
+    assert result['evidence_summary']['review_reasons']['unsupported_qualification_transport_version'] == 1
+    run(w, monkeypatch)
+    evidence = w.db[aq.EVIDENCE_COLLECTION].find_one()
+    assert evidence['reason'] == 'unsupported_qualification_transport_version'
+    for collection in (aq.REGISTRY_COLLECTION, 'qualified_events', 'xp_events', 'referral_events', 'referral_award_events'):
+        assert w.db[collection].count_documents({}) == 0
+    assert w.db.affiliate_ledger.count_documents({'ledger_type': {'$ne': 'WELCOME'}}) == 0
+
+
+@pytest.mark.parametrize('version', [None, 2])
+def test_version_only_correction_cannot_reuse_older_verified_gate_values(version):
+    w, feed = databot_world()
+    aq.extract_committed_batches(w.db, config=DATABOT_CONFIG, now_utc=NOW)
+    stale = w.db[aq.EVIDENCE_COLLECTION].find_one()
+    assert stale['qualification_fields']['transport_version'] == 1
+    feed.add_batch([dict(urow('GATE11', '000CaseID', '2026-10-05 10:00:00'),
+                         qualification_fields_version=version)])
+    sync(w, feed)
+    aq.extract_committed_batches(w.db, config=DATABOT_CONFIG, now_utc=NOW)
+    corrected = w.db[aq.EVIDENCE_COLLECTION].find_one()
+    assert corrected['qualification_fields']['transport_version'] == version
+    assert corrected['observation_fingerprint'] != stale['observation_fingerprint']
+    verdict = aq.evaluate_evidence(w.db, stale, control=aq.get_control(w.db), now_utc=NOW)
+    assert verdict['reason'] == 'unsupported_qualification_transport_version'
+    assert w.db.qualified_events.count_documents({}) == 0
 
 
 def test_historical_seed_ignores_new_gates_and_preserves_earned_history():
