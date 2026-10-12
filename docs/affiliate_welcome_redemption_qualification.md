@@ -227,3 +227,6 @@ python scripts/affiliate_qualification_admin.py configure-databot-source --accou
 
 
 See [affiliate_qualification_gates.md](affiliate_qualification_gates.md) for the coupon-new-player and completed seven-day turnover gate patch, version compatibility and targeted enrichment review plan.
+
+
+Historical migration now requires complete deterministic identity coverage and a versioned completion proof. See [historical migration review](historical_affiliate_account_migration.md) before any apply or activation.

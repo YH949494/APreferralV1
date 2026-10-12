@@ -4,12 +4,11 @@
 DRY RUN BY DEFAULT: read-only, secondary-preferred connection, no index
 creation, no writes. ``--apply`` uses a primary connection and:
 
-1. creates the welcome_redemption_v1 indexes that are missing;
-2. seeds ``affiliate_account_registry`` (state ``seeded``) with every gaming
-   account that historical evidence RELIABLY ties to an already-qualified
-   invitee;
-3. stamps ``seed_completed_at`` + a counts-only summary on the control doc
-   (activation refuses until this exists).
+1. refuses incomplete identity/source coverage before any write;
+2. creates required indexes and idempotently reserves deterministic historical
+   accounts under an exclusive migration lease;
+3. rechecks coverage/history/ownership and writes a versioned completion marker
+   only when every historical qualification is mapped safely.
 
 It never modifies or deletes ``qualified_events``, ``referral_events``,
 ``affiliate_ledger`` or ``xp_events``: historical counts and earned rewards are
@@ -22,8 +21,11 @@ contradict the invitee's verified UIM linkage. Issuance must precede redemption,
 and redemption must not exceed the live five-minute future-time tolerance.
 Everything else is reported as
 unresolved or conflicting and left out — no mapping is guessed.
-``--seed-from-linkage`` additionally seeds invitees with no redemption rows
-but exactly one verified linked account (off by default).
+``--seed-from-linkage`` additionally seeds from exactly one verified linked
+account when redemption is missing or held only for time provenance (off by
+default). All usable account observations still participate in conflict checks.
+See docs/historical_affiliate_account_migration.md for supported sources,
+coverage safety, masked reports and the crash/retry protocol.
 
 Historical duplicates (one account behind several qualified invitees) are
 reported; the earliest qualification holds the registry entry and none of the
@@ -43,15 +45,19 @@ import argparse
 import json
 import os
 import sys
+import uuid
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import affiliate_qualification as aq  # noqa: E402
+from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError  # noqa: E402
 
 SAMPLE_LIMIT = 20
+PLANNER_VERSION = "historical_account_coverage_v2"
+BULK_SIZE = 500
 
 
 def _write_db():
@@ -86,6 +92,7 @@ def history_snapshot(db, *, as_of: datetime) -> dict:
         "referral_settled_total": db.referral_events.count_documents(
             {"event": "referral_settled", "occurred_at": {"$lt": as_of}}
         ),
+        "xp_events_created_before": db.xp_events.count_documents({"created_at": {"$lt": as_of}}),
         "referral_award_events_total": db.referral_award_events.count_documents({"created_at_utc": {"$lt": as_of}}),
         "affiliate_ledger_issued_created_before": db.affiliate_ledger.count_documents(
             {"status": "ISSUED", "created_at": {"$lt": as_of}}
@@ -93,31 +100,65 @@ def history_snapshot(db, *, as_of: datetime) -> dict:
     }
 
 
+def _recipient_id(raw):
+    if isinstance(raw, bool) or not isinstance(raw, (int, str)) or not str(raw).isdigit():
+        return None
+    return int(raw) if int(raw) > 0 else None
+
+
 def _welcome_codes(db) -> dict[str, set[int]]:
-    """code -> recipients, from both Welcome issuance stores."""
+    """code -> recipients, from pool, legacy claims and issued Welcome ledger."""
     codes: dict[str, set[int]] = defaultdict(set)
     for row in db.voucher_pools.find({"pool_id": aq.WELCOME_POOL_ID, "status": "issued"},
                                      {"code": 1, "issued_to_user_id": 1, "issued_to": 1}):
-        raw = row.get("issued_to_user_id")
-        if raw in (None, ""):
-            raw = row.get("issued_to")
         code = aq.normalize_code(row.get("code"))
-        try:
-            if code:
-                codes[code].add(int(raw))
-        except (TypeError, ValueError):
-            continue
+        for raw in (row.get("issued_to_user_id"), row.get("issued_to")):
+            try:
+                if code and raw not in (None, ""):
+                    uid = _recipient_id(raw)
+                    codes[code].add(uid if uid is not None else -1)
+            except (TypeError, ValueError):
+                if code:
+                    codes[code].add(-1)  # ambiguous/unparseable recipient; never a guessed owner
     for row in db.new_joiner_claims.find({"code": {"$nin": [None, ""]}}, {"code": 1, "uid": 1}):
         code = aq.normalize_code(row.get("code"))
         try:
             if code:
-                codes[code].add(int(row.get("uid")))
+                uid = _recipient_id(row.get("uid"))
+                codes[code].add(uid if uid is not None else -1)
         except (TypeError, ValueError):
             continue
+    for row in db.affiliate_ledger.find({"status": "ISSUED", "dedup_key": {"$regex": r"^WELCOME:"}},
+                                        {"dedup_key": 1, "voucher_code": 1, "user_id": 1}):
+        code = aq.normalize_code(row.get("voucher_code"))
+        raw_ids = [row.get("user_id"), str(row.get("dedup_key", "")).partition(":")[2]]
+        for raw in raw_ids:
+            try:
+                if code and raw not in (None, "") and not isinstance(raw, bool):
+                    uid = _recipient_id(raw)
+                    codes[code].add(uid if uid is not None else -1)
+            except (TypeError, ValueError):
+                continue
     return codes
 
 
-def _redemptions_by_code(db, config: dict, welcome_codes: dict, *, now_utc: datetime) -> dict[str, set]:
+def _migration_recipient(db, code, welcome_codes):
+    recipient = aq.resolve_welcome_recipient(db, code)
+    if recipient.get("status") != "unknown" or len(welcome_codes.get(code, set())) != 1:
+        return recipient
+    uid = next(iter(welcome_codes[code]))
+    rows = list(db.affiliate_ledger.find(
+        {"dedup_key": f"WELCOME:{uid}", "status": "ISSUED", "voucher_code": code},
+        {"user_id": 1, "issued_at": 1}).limit(2))
+    # Audited Welcome ledger writer is an issuance store. It can outlive the
+    # pool row; ambiguity, missing issuance time and cross-pool codes still fail.
+    if len(rows) != 1 or str(rows[0].get("user_id", uid)) != str(uid):
+        return {"status": "ambiguous"}
+    return {"status": "ok", "user_id": uid, "issued_at": aq._aware_utc(rows[0].get("issued_at")),
+            "sources": ["affiliate_ledger"]}
+
+
+def _redemptions_by_code(db, config: dict, welcome_codes: dict, *, now_utc: datetime, identity_candidates=None, resolution_sources=None) -> dict[str, set]:
     """code -> {account_key | "!<reason>"} from successful, committed rows of
     the configured source. Uses the live parser (aq.parse_source_row) and the
     live identity rule (aq.build_evidence_doc), so a seeded account key is
@@ -138,11 +179,24 @@ def _redemptions_by_code(db, config: dict, welcome_codes: dict, *, now_utc: date
         is_removal = obs.get("observation") == aq.OBS_REMOVED
         if not code or code not in welcome_codes or not (is_removal or obs["redemption_successful"]):
             continue
+        # Preserve exact text before considering time: a numeric/coerced or
+        # transformed account must not become a trusted linkage corroboration.
+        raw = obs["account_raw"]
+        key, reason = aq.canonical_account_key(raw, obs["namespace"])
+        reason = obs.get("account_reason") or reason
+        if reason or not isinstance(raw, str) or aq.account_id_from_key(key) != raw.strip():
+            out[code].add("!" + (reason or "account_text_not_exact"))
+            continue
+        # Unusable time evidence can still contradict independent linkage.
+        if identity_candidates is not None and not is_removal:
+            identity_candidates[code].add(key)
         if not is_removal:
             if code not in recipients:
-                recipients[code] = aq.resolve_welcome_recipient(db, code)
+                recipients[code] = _migration_recipient(db, code, welcome_codes)
             problem = aq.welcome_issuance_problem(recipients[code], obs.get("redeemed_at"))
             if problem:
+                if problem == "missing_redeemed_at":
+                    problem = obs.get("redeemed_at_reason") or problem
                 out[code].add(f"!{problem}")
                 continue
             if obs["redeemed_at"] > now_utc + aq.FUTURE_REDEMPTION_TOLERANCE:
@@ -153,6 +207,11 @@ def _redemptions_by_code(db, config: dict, welcome_codes: dict, *, now_utc: date
             **{k: v for k, v in obs.items() if k != "code"},
         )
         key = doc["account_key"] or f"!{doc['account_reason']}"
+        if (key and not key.startswith("!") and
+                (not isinstance(obs["account_raw"], str) or aq.account_id_from_key(key) != obs["account_raw"].strip())):
+            key = "!account_text_not_exact"
+        if resolution_sources is not None and not is_removal and not key.startswith("!"):
+            resolution_sources[code].update(recipients[code].get("sources", []))
         if is_removal:
             removed[code].add(key)
         else:
@@ -164,66 +223,182 @@ def _redemptions_by_code(db, config: dict, welcome_codes: dict, *, now_utc: date
     return out
 
 
+def _chunks(values):
+    values = list(values)
+    for start in range(0, len(values), BULK_SIZE):
+        yield values[start:start + BULK_SIZE]
+
+
+def _linked_keys(user_doc, config):
+    raw = (user_doc or {}).get("linked_gaming_accounts")
+    if raw is None:
+        return set(), None
+    if not isinstance(raw, list):
+        return set(), "unresolved_invalid_verified_linkage"
+    keys = set()
+    for account in raw:
+        if not isinstance(account, str):
+            return set(), "unresolved_invalid_verified_linkage"
+        key, reason = aq.canonical_account_key(account, (config or {}).get("account_namespace"))
+        if reason or aq.account_id_from_key(key) != account.strip():
+            return set(), "unresolved_invalid_verified_linkage"
+        keys.add(key)
+    return keys, None
+
+
+def _source_coverage(db, config, latest, *, now_utc):
+    end = None
+    problems = []
+    if aq.source_name(config) == aq.SOURCE_DATABOT_UIM:
+        import uim_redemption_sync as sync
+        health = sync.sync_health(db, now_utc=now_utc)
+        problems.extend(health["problems"])
+        # The sync metadata is explicitly GMT+8 wall clock. This is a coverage
+        # bound, NOT permission to reinterpret legacy redemption timestamps.
+        end = aq.parse_redeemed_at(health.get("coverage_end"), "Asia/Kuala_Lumpur")
+    elif not aq.validate_source_config(config):
+        for _, row in aq.iter_committed_source_rows(db, config):
+            obs = aq.parse_source_row(row, config)
+            when = aq._aware_utc((obs or {}).get("redeemed_at"))
+            if when and when <= now_utc + aq.FUTURE_REDEMPTION_TOLERANCE:
+                end = max(end, when) if end else when
+    if end and end > now_utc + aq.FUTURE_REDEMPTION_TOLERANCE:
+        problems.append("source_coverage_in_future")
+    gap = max(0, (latest - end).total_seconds()) if latest and end else None
+    if latest and end is None:
+        problems.append("source_coverage_unknown")
+    elif latest and end < latest:
+        problems.append("source_coverage_older_than_history")
+    return {"ok": not problems, "problems": sorted(set(problems)),
+            "coverage_end_utc": end.isoformat() if end else None,
+            "latest_historical_qualification_utc": latest.isoformat() if latest else None,
+            "gap_seconds": gap,
+            "gap_start_utc": end.isoformat() if gap else None,
+            "gap_end_utc": latest.isoformat() if gap else None}
+
+
 def build_plan(db, *, config: dict | None, seed_from_linkage: bool, now_utc: datetime | None = None) -> dict:
     now_utc = aq._aware_utc(now_utc or datetime.now(timezone.utc))
     problems = aq.validate_source_config(config)
     welcome_codes = _welcome_codes(db)
-    codes_by_user: dict[int, set[str]] = defaultdict(set)
+    codes_by_user = defaultdict(set)
     for code, uids in welcome_codes.items():
         for uid in uids:
             codes_by_user[uid].add(code)
-    redemptions = _redemptions_by_code(db, config, welcome_codes, now_utc=now_utc) if not problems else {}
-
-    counts = defaultdict(int)
-    samples = defaultdict(list)
-    resolved = []  # (account_key, qualified_event, basis)
+    identity_candidates, code_sources = defaultdict(set), defaultdict(set)
+    redemptions = _redemptions_by_code(db, config, welcome_codes, now_utc=now_utc,
+                                     identity_candidates=identity_candidates, resolution_sources=code_sources) if not problems else {}
+    historical = list(db.qualified_events.find({"rule_version": {"$ne": aq.RULE_VERSION}},
+                           {"invitee_id": 1, "referrer_id": 1, "qualified_at": 1}))
+    users, registry = {}, defaultdict(list)
+    uids = {int(q["invitee_id"]) for q in historical
+            if isinstance(q.get("invitee_id"), (int, str)) and str(q["invitee_id"]).isdigit()}
+    for chunk in _chunks(uids):
+        for user in db.users.find({"user_id": {"$in": chunk}}, {"user_id": 1, "linked_gaming_accounts": 1}):
+            uid = int(user["user_id"])
+            if uid in users:
+                users[uid] = {"linked_gaming_accounts": "ambiguous duplicate user documents"}
+            else:
+                users[uid] = user
+        for row in db[aq.REGISTRY_COLLECTION].find(
+            {"invitee_id": {"$in": chunk}, "rule_version": aq.RULE_VERSION,
+             "state": {"$in": [aq.REG_SEEDED, aq.REG_CREDITED_LEGACY]}},
+            {"invitee_id": 1, "qualified_event_id": 1, "account_key": 1}):
+            registry[int(row["invitee_id"])].append(row)
+    historical_ids = defaultdict(set)
+    for q in historical:
+        if str(q.get("invitee_id")).isdigit():
+            historical_ids[int(q["invitee_id"])].add(q["_id"])
+    counts, samples, resolution_sources = defaultdict(int), defaultdict(list), defaultdict(int)
+    diagnostics, evidence_sources = defaultdict(int), defaultdict(int)
+    resolved, latest = [], None
 
     def note(kind, uid):
         counts[kind] += 1
         if len(samples[kind]) < SAMPLE_LIMIT:
             samples[kind].append(_mask_uid(uid))
 
-    for q in db.qualified_events.find({"rule_version": {"$ne": aq.RULE_VERSION}},
-                                      {"invitee_id": 1, "referrer_id": 1, "qualified_at": 1}):
+    time_only = {"!missing_redeemed_at", "!missing_welcome_issued_at", "!redeemed_at_timezone_unverified",
+                 "!redeemed_at_date_only", "!redeemed_at_ambiguous_day_month"}
+    for q in historical:
         uid = q.get("invitee_id")
+        when = aq._aware_utc(q.get("qualified_at"))
+        if when is not None:
+            latest = max(latest, when) if latest else when
+        if when is None or when > now_utc:
+            note("unresolved_invalid_qualification_time", uid)
+            continue
         try:
+            if isinstance(uid, bool) or not str(uid).isdigit():
+                raise ValueError()
             uid = int(uid)
         except (TypeError, ValueError):
             note("unresolved_invalid_invitee_id", uid)
             continue
         user_codes = codes_by_user.get(uid, set())
-        if any(len(welcome_codes[c]) > 1 for c in user_codes):
+        diagnostics["with_welcome_code" if user_codes else "without_welcome_code"] += 1
+        if any(len(welcome_codes[c]) != 1 for c in user_codes):
             note("conflicting_code_recipient", uid)
             continue
-        accounts = set()
+        accounts, bad, observed = set(), set(), set()
         for code in user_codes:
-            accounts |= redemptions.get(code, set())
-        bad = {a for a in accounts if a.startswith("!")}
-        accounts -= bad
-        user_doc = db.users.find_one({"user_id": uid}, {"linked_gaming_accounts": 1})
-        links = aq._linked_accounts(user_doc)
-        basis = "redemption_evidence"
-        if not accounts:
-            if bad:
-                note("unresolved_unusable_account_value", uid)
-                continue
-            if seed_from_linkage and len(links) == 1:
-                ns = (config or {}).get("account_namespace")
-                key, _ = aq.canonical_account_key(next(iter(links)), ns)
-                if key:
-                    accounts, basis = {key}, "verified_linkage_single_account"
-            if not accounts:
-                note("unresolved_no_redemption_evidence" if user_codes else "unresolved_no_welcome_code", uid)
-                continue
-        if len(accounts) > 1:
+            values = redemptions.get(code, set())
+            accounts |= {a for a in values if not a.startswith("!")}
+            bad |= {a for a in values if a.startswith("!")}
+            observed |= identity_candidates.get(code, set())
+        if uid not in users:
+            diagnostics["users_document_missing"] += 1
+        elif "linked_gaming_accounts" not in users[uid]:
+            diagnostics["linked_field_missing"] += 1
+        links, link_problem = _linked_keys(users.get(uid), config)
+        diagnostics["linked_account_count_" + ("multiple" if len(links) > 1 else str(len(links)))] += 1
+        if link_problem:
+            note(link_problem, uid)
+            continue
+        registered = set()
+        for row in registry.get(uid, []):
+            if row.get("qualified_event_id") not in historical_ids[uid]:
+                continue  # a foreign/missing event pointer is not an ownership proof
+            key = row.get("account_key")
+            if not isinstance(key, str) or ":" not in key:
+                registered.add("!invalid")
+                break
+            canonical, reason = aq.canonical_account_key(aq.account_id_from_key(key), (config or {}).get("account_namespace"))
+            if reason or canonical != key:
+                registered.add("!invalid")
+                break
+            registered.add(key)
+        if "!invalid" in registered:
+            # One final unresolved reason per event.
+            note("unresolved_invalid_registry_identity", uid)
+            continue
+        # Union ALL reliable sources before choosing: never select first/latest.
+        identities = accounts | links | registered | observed
+        if len(identities) > 1:
             note("conflicting_multiple_accounts", uid)
             continue
-        account_key = next(iter(accounts))
-        if links and aq.account_id_from_key(account_key) not in links:
-            note("conflicting_linkage", uid)
+        basis = "redemption_evidence"
+        if registered:
+            accounts, basis = registered, "existing_credited_registry"
+        elif not accounts or bad:
+            if seed_from_linkage and len(links) == 1 and (not bad or bad <= time_only):
+                accounts, basis = links, "verified_linkage_single_account"
+            elif bad:
+                note("unresolved_unusable_account_value", uid)
+                continue
+        if not accounts:
+            note("unresolved_no_redemption_evidence" if user_codes else "unresolved_no_welcome_code", uid)
             continue
+        account_key = next(iter(accounts))  # union cardinality was proven exactly one
         resolved.append((account_key, q, basis))
         counts["resolved"] += 1
+        resolution_sources[basis] += 1
+        if basis == "redemption_evidence":
+            evidence_sources[aq.source_name(config)] += 1
+            for source in {s for code in user_codes for s in code_sources.get(code, set())}:
+                evidence_sources[source] += 1
+        else:
+            evidence_sources[basis] += 1
 
     by_account = defaultdict(list)
     for account_key, q, basis in resolved:
@@ -239,7 +414,8 @@ def build_plan(db, *, config: dict | None, seed_from_linkage: bool, now_utc: dat
             duplicate_qualifications += len(items) - 1
             if len(samples["historical_duplicate_account"]) < SAMPLE_LIMIT:
                 samples["historical_duplicate_account"].append(
-                    {"account": aq.mask_value(account_key), "invitees": [_mask_uid(i[0].get("invitee_id")) for i in items]}
+                    {"account": aq.mask_value(account_key), "qualification_count": len(items),
+                     "invitees": [_mask_uid(i[0].get("invitee_id")) for i in items[:SAMPLE_LIMIT]]}
                 )
         holder, basis = items[0]
         seeds.append({
@@ -252,7 +428,21 @@ def build_plan(db, *, config: dict | None, seed_from_linkage: bool, now_utc: dat
             "historical_qualification_count": len(items),
             "rule_version": aq.RULE_VERSION,
         })
+    coverage = _source_coverage(db, config, latest, now_utc=now_utc)
+    unresolved = len(historical) - counts["resolved"]
+    blockers = list(problems) + list(coverage["problems"])
+    if unresolved:
+        blockers.append("unresolved_historical_identities")
     return {
+        "planner_version": PLANNER_VERSION,
+        "historical_events": len(historical), "unresolved_events": unresolved,
+        "historical_invitees": len(uids),
+        "resolved_invitees": len({int(q["invitee_id"]) for _, q, _ in resolved}),
+        "resolution_sources": dict(sorted(resolution_sources.items())),
+        "resolution_evidence_sources": dict(sorted(evidence_sources.items())),
+        "source_diagnostics": dict(sorted(diagnostics.items())),
+        "source_coverage": coverage, "apply_safe": not blockers,
+        "apply_blockers": sorted(set(blockers)),
         "source_config_problems": problems,
         "counts": dict(sorted(counts.items())),
         "accounts_to_seed": len(seeds),
@@ -270,8 +460,9 @@ def apply_seeds(db, seeds: list[dict], *, now_utc: datetime) -> dict:
             db[aq.REGISTRY_COLLECTION].insert_one({**seed, "seeded_at": now_utc})
             out["seeded"] += 1
         except DuplicateKeyError:
-            holder = db[aq.REGISTRY_COLLECTION].find_one({"account_key": seed["account_key"]}, {"invitee_id": 1}) or {}
-            if holder.get("invitee_id") == seed["invitee_id"]:
+            holder = db[aq.REGISTRY_COLLECTION].find_one({"account_key": seed["account_key"]}, {"invitee_id": 1, "qualified_event_id": 1}) or {}
+            if (holder.get("invitee_id") == seed["invitee_id"]
+                    and holder.get("qualified_event_id") == seed["qualified_event_id"]):
                 out["already_seeded"] += 1
             else:
                 out["held_by_other"] += 1
@@ -282,41 +473,91 @@ def run(db, *, apply: bool, seed_from_linkage: bool, now_utc: datetime) -> dict:
     control = aq.get_control(db) or {}
     report = {"apply": apply, "now_utc": now_utc.isoformat(), "history_before": history_snapshot(db, as_of=now_utc)}
     report["indexes_before"] = aq.index_readiness(db)
-    if apply:
-        report["indexes_created"] = aq.ensure_indexes(db)
-    plan = build_plan(db, config=control.get("source_config"), seed_from_linkage=seed_from_linkage,
-                      now_utc=now_utc)
+    plan = build_plan(db, config=control.get("source_config"), seed_from_linkage=seed_from_linkage, now_utc=now_utc)
     seeds = plan.pop("_seeds")
-    report["plan"] = plan
+    report["plan"], report["seed_marker_written"] = plan, False
+    token = None
     if apply:
-        report["seed_result"] = apply_seeds(db, seeds, now_utc=now_utc)
-    report["indexes_after"] = aq.index_readiness(db)
-    report["consistency"] = aq.consistency_report(db, now_utc=now_utc)
-    report["history_after"] = history_snapshot(db, as_of=now_utc)
-    report["history_unchanged"] = report["history_after"] == report["history_before"]
-    if apply and report["history_unchanged"] and report["indexes_after"]["ok"] and not plan["source_config_problems"]:
-        db[aq.CONTROL_COLLECTION].update_one(
-            {"_id": aq.CONTROL_ID},
-            {
-                "$set": {
-                    "seed_completed_at": now_utc,
-                    "seeded_identity_config": aq.identity_config(control.get("source_config")),
-                    "seed_summary": {
-                        "accounts_seeded": report["seed_result"]["seeded"],
-                        "accounts_already_seeded": report["seed_result"]["already_seeded"],
-                        "counts": plan["counts"],
-                        "historical_duplicate_accounts": plan["historical_duplicate_accounts"],
-                    },
-                    "updated_at": now_utc,
-                },
-                "$setOnInsert": {"mode": aq.MODE_DISABLED, "rule_version": aq.RULE_VERSION, "created_at": now_utc},
-            },
-            upsert=True,
-        )
-        report["seed_marker_written"] = True
-    else:
-        report["seed_marker_written"] = False
-    return report
+        blockers = list(plan["apply_blockers"])
+        if control.get("mode", aq.MODE_DISABLED) != aq.MODE_DISABLED or aq.launch_cutoff(control) is not None:
+            blockers.append("migration_requires_disabled_unlaunched_rule")
+        if (control.get("seeded_identity_config") and
+                control["seeded_identity_config"] != aq.identity_config(control.get("source_config"))):
+            blockers.append("seeded_account_namespace_mismatch")
+        if blockers:
+            report["apply_refused"] = sorted(set(blockers))
+        else:
+            token = uuid.uuid4().hex
+            locked = db[aq.CONTROL_COLLECTION].find_one_and_update(
+                {"_id": aq.CONTROL_ID, "mode": aq.MODE_DISABLED, "launch_cutoff_utc": {"$exists": False},
+                 "source_config": control.get("source_config"),
+                 "$or": [{"migration_lease_until": {"$exists": False}}, {"migration_lease_until": {"$lt": now_utc}}]},
+                {"$set": {"migration_lease_token": token, "migration_lease_until": now_utc + timedelta(minutes=30)},
+                 "$unset": {"seed_completed_at": ""}}, return_document=ReturnDocument.AFTER,
+            )
+            if locked is None:
+                report["apply_refused"] = ["migration_lease_unavailable_or_control_changed"]
+                token = None
+    try:
+        if token:
+            report["indexes_created"] = aq.ensure_indexes(db)
+            report["seed_result"] = apply_seeds(db, seeds, now_utc=now_utc)
+        report["indexes_after"] = aq.index_readiness(db)
+        report["consistency"] = aq.consistency_report(db, now_utc=now_utc)
+        report["history_after"] = history_snapshot(db, as_of=now_utc)
+        report["history_unchanged"] = report["history_after"] == report["history_before"]
+        if (token and report["history_unchanged"] and report["indexes_after"]["ok"]
+                and report["consistency"]["ok"]):
+            # Re-plan before marking complete: the identity sources may have
+            # changed during seeding. A crash or race leaves no completion marker.
+            final = build_plan(db, config=control.get("source_config"), seed_from_linkage=seed_from_linkage, now_utc=now_utc)
+            def ownership_plan(rows):
+                return sorted((r["account_key"], r["invitee_id"], str(r["qualified_event_id"]),
+                               r["historical_qualification_count"]) for r in rows)
+            if (final["apply_safe"] and ownership_plan(final["_seeds"]) == ownership_plan(seeds)
+                    and not report["seed_result"]["held_by_other"]):
+                result = db[aq.CONTROL_COLLECTION].update_one(
+                    {"_id": aq.CONTROL_ID, "migration_lease_token": token,
+                     "migration_lease_until": {"$gt": datetime.now(timezone.utc)},
+                     "mode": aq.MODE_DISABLED, "launch_cutoff_utc": {"$exists": False},
+                     "source_config": control.get("source_config")},
+                    {"$set": {"seed_completed_at": now_utc,
+                              "seeded_identity_config": aq.identity_config(control.get("source_config")),
+                              "seed_summary": {"planner_version": PLANNER_VERSION, "counts": plan["counts"],
+                                               "unresolved_events": 0, "historical_events": plan["historical_events"],
+                                               "source_coverage": plan["source_coverage"],
+                                               "historical_duplicate_accounts": plan["historical_duplicate_accounts"]},
+                              "updated_at": now_utc}},
+                )
+                report["seed_marker_written"] = bool(result.modified_count)
+            if not report["seed_marker_written"]:
+                report["apply_refused"] = ["completion_verification_failed"]
+        if token and not report["seed_marker_written"]:
+            report.setdefault("apply_refused", ["completion_verification_failed"])
+        return report
+    finally:
+        if token:
+            db[aq.CONTROL_COLLECTION].update_one({"_id": aq.CONTROL_ID, "migration_lease_token": token},
+                {"$unset": {"migration_lease_token": "", "migration_lease_until": ""}})
+
+
+def completion_readiness(db, control):
+    summary = (control or {}).get("seed_summary") or {}
+    problems = []
+    if summary.get("planner_version") != PLANNER_VERSION:
+        problems.append("migration_summary_unverified")
+    if summary.get("unresolved_events") != 0 or not (summary.get("source_coverage") or {}).get("ok"):
+        problems.append("migration_coverage_unverified")
+    query = {"rule_version": {"$ne": aq.RULE_VERSION}}
+    count = db.qualified_events.count_documents(query)
+    if summary.get("historical_events") != count:
+        problems.append("historical_qualifications_changed_since_seed")
+    latest = db.qualified_events.find_one(query, {"qualified_at": 1}, sort=[("qualified_at", -1)])
+    when = aq._aware_utc((latest or {}).get("qualified_at"))
+    current = when.isoformat() if when else None
+    if (count and when is None) or (summary.get("source_coverage") or {}).get("latest_historical_qualification_utc") != current:
+        problems.append("historical_qualification_time_changed_since_seed")
+    return {"ok": not problems, "problems": sorted(set(problems))}
 
 
 def main(argv=None, *, db_factory=None, read_only_db_factory=None) -> int:
@@ -326,14 +567,19 @@ def main(argv=None, *, db_factory=None, read_only_db_factory=None) -> int:
                         help="also seed invitees with no redemption rows but exactly one verified linked account")
     parser.add_argument("--output", help="also write the JSON report to this path")
     args = parser.parse_args(argv)
-    db = (db_factory or _write_db)() if args.apply else (read_only_db_factory or _read_only_db)()
-    report = run(db, apply=args.apply, seed_from_linkage=args.seed_from_linkage, now_utc=datetime.now(timezone.utc))
+    try:
+        db = (db_factory or _write_db)() if args.apply else (read_only_db_factory or _read_only_db)()
+        report = run(db, apply=args.apply, seed_from_linkage=args.seed_from_linkage, now_utc=datetime.now(timezone.utc))
+    except Exception as exc:
+        # Mongo errors can contain duplicate key values (raw account/user ids).
+        print(json.dumps({"apply": args.apply, "migration_failed": type(exc).__name__, "seed_marker_written": False}))
+        return 1
     text = json.dumps(report, indent=2, sort_keys=True, default=str)
     if args.output:
         with open(args.output, "w", encoding="utf-8") as fh:
             fh.write(text)
     print(text)
-    if args.apply and not report["history_unchanged"]:
+    if args.apply and (not report["history_unchanged"] or not report["seed_marker_written"]):
         return 1
     return 0
 
