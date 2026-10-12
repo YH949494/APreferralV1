@@ -38,6 +38,7 @@ from time_utils import as_aware_utc
 logger = logging.getLogger(__name__)
 
 CAMPAIGN_DISPLAY_OVERRIDE_COLLECTION = "campaign_display_overrides"
+_UNSET = object()
 
 # Reuses the repository's existing generic app-settings collection
 # (settings_service.py, one document per group, keyed by _id=group name)
@@ -580,6 +581,8 @@ def build_public_campaign_activity(db, campaign_id: str, reference_utc: datetime
                 "_source": "genuine",
             }
         )
+    # Append additional rows; never replace genuine entries by display name.
+    # Consumers apply display limits after the combined ranking is sorted.
     for participant in manual_participants:
         # joins_count is None for a legacy manual row: unknown, NOT zero.
         manual_joins = participant.get("joins_count")
@@ -695,6 +698,9 @@ def render_campaign_activity_announcement_text(activity: dict[str, Any], *, titl
     """
     medals = ["\U0001F947", "\U0001F948", "\U0001F949"]
     lines = [f"<b>{html_escape(title)}</b>", ""]
+    if activity.get("state") == "active":
+        lines.append("<i>Campaign display only; reward progress uses genuine referrals.</i>")
+        lines.append("")
     for row in activity.get("leaderboard") or []:
         rank = int(row.get("rank", 0) or 0)
         prefix = medals[rank - 1] if 1 <= rank <= 3 else f"#{rank}"
@@ -972,7 +978,7 @@ def add_participant(
     *,
     display_name: Any,
     qualified_count: Any,
-    joins_count: Any = None,
+    joins_count: Any = _UNSET,
     visible: Any = True,
     updated_by,
     expected_updated_at: str | None = None,
@@ -990,7 +996,9 @@ def add_participant(
     existing_ids = {p.get("entry_id") for p in participants if isinstance(p, dict) and isinstance(p.get("entry_id"), str)}
     entry_id = _generate_entry_id(existing_ids)
     candidate = {"entry_id": entry_id, "display_name": display_name, "qualified_count": qualified_count, "visible": visible}
-    if joins_count is not None:
+    if joins_count is not _UNSET:
+        if joins_count is None:
+            return None, "bad_joins_count_type"
         candidate["joins_count"] = joins_count
     normalized, reason = _check_participant_fields(candidate, seen_entry_ids=set())
     if reason:
@@ -1015,16 +1023,17 @@ def update_participant(
     entry_id: str,
     *,
     display_name: Any = None,
-    qualified_count: Any = None,
-    joins_count: Any = None,
+    qualified_count: Any = _UNSET,
+    joins_count: Any = _UNSET,
     visible: Any = None,
     updated_by,
     expected_updated_at: str | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
     """Targets the participant by its stable entry_id (never array
     position/order), so a concurrent edit or a reordered array can never
-    silently update the wrong row. Only the fields explicitly passed (not
-    None) are changed. Passing joins_count on a legacy row (no joins stored)
+    silently update the wrong row. Only supplied count fields are changed.
+    Explicit null counts are invalid; omitted joins stay unknown on legacy
+    rows. Supplying joins_count on a legacy row (no joins stored)
     supplies it; joins cannot be reverted to "unknown" once set. The
     qualified <= joins rule is evaluated on the merged result, so editing
     only qualified_count is checked against the already-stored joins.
@@ -1054,9 +1063,11 @@ def update_participant(
     candidate = dict(current)
     if display_name is not None:
         candidate["display_name"] = display_name
-    if qualified_count is not None:
+    if qualified_count is not _UNSET:
         candidate["qualified_count"] = qualified_count
-    if joins_count is not None:
+    if joins_count is not _UNSET:
+        if joins_count is None:
+            return None, "bad_joins_count_type"
         candidate["joins_count"] = joins_count
     if visible is not None:
         candidate["visible"] = visible
@@ -1277,7 +1288,7 @@ def api_admin_add_participant(campaign_id: str):
         campaign_id,
         display_name=body.get("display_name"),
         qualified_count=body.get("qualified_count"),
-        joins_count=body.get("joins_count"),
+        joins_count=body.get("joins_count", _UNSET),
         visible=body.get("visible", True),
         updated_by=_admin_identity(admin),
         expected_updated_at=body.get("expected_updated_at"),
@@ -1304,8 +1315,8 @@ def api_admin_update_participant(campaign_id: str, entry_id: str):
         campaign_id,
         entry_id,
         display_name=body.get("display_name"),
-        qualified_count=body.get("qualified_count"),
-        joins_count=body.get("joins_count"),
+        qualified_count=body.get("qualified_count", _UNSET),
+        joins_count=body.get("joins_count", _UNSET),
         visible=body.get("visible"),
         updated_by=_admin_identity(admin),
         expected_updated_at=body.get("expected_updated_at"),

@@ -7404,7 +7404,7 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
           </div>
         ` : `<div class="leaderboard-empty">${t("login_affiliate_stats")}</div>`;
         const campaignBanner = campaignActive
-          ? `<div class="leaderboard-empty" style="margin-bottom:8px;">🎉 Campaign leaderboard</div>`
+          ? `<div class="leaderboard-empty" style="margin-bottom:8px;">🎉 Campaign leaderboard · Display only; reward progress uses genuine referrals.</div>`
           : "";
         if (!rows.length) {
           target.innerHTML = `${isAdmin ? renderAffiliateHistoryControls(weeks) : ""}${myCard}${campaignBanner}<div class="leaderboard-empty">${t("no_affiliate_data")}</div>`;

@@ -361,6 +361,38 @@ def test_duplicate_display_names_do_not_merge_or_overwrite(client, fake_db):
 # Surfaces agree; lifecycle; isolation
 # ---------------------------------------------------------------------------
 
+@pytest.mark.parametrize("remove_overlay", ["hidden", "disabled", "expired"])
+def test_additional_manual_rows_preserve_and_restore_genuine(client, fake_db, remove_overlay):
+    _create_campaign(client)
+    for index in range(10):
+        _seed_genuine(fake_db, 501 + index, joins=10, qualified=4, first_name="Dup")
+    baseline = _activity(fake_db)
+    genuine_before = baseline["_combined_rows"]
+    guarded = ["users", "pending_referrals", "qualified_events"]
+    stored_before = {name: list(fake_db[name].find({})) for name in guarded}
+    entry_id = _participants(_add(client, display_name="Dup", joins_count=30, qualified_count=20))[0]["entry_id"]
+    active = _activity(fake_db)
+    assert active["participant_count"] == 11
+    assert active["_combined_rows"][0]["entry_id"] == f"manual:{entry_id}"
+    assert [row for row in active["_combined_rows"] if row["_source"] == "genuine"] == genuine_before
+    assert len(active["leaderboard"][:10]) == 10
+    assert active["_combined_rows"][10]["_source"] == "genuine"
+    assert (active["joins_total"], active["qualified_total"]) == (130, 60)
+    if remove_overlay == "hidden":
+        assert _patch(client, entry_id, visible=False).status_code == 200
+        restored = _activity(fake_db)
+    elif remove_overlay == "disabled":
+        with _admin():
+            assert client.put(BASE, json={"enabled": False}).status_code == 200
+        restored = _activity(fake_db)
+    else:
+        restored = build_public_campaign_activity(fake_db, CAMPAIGN_ID, reference_utc=datetime.now(timezone.utc) + timedelta(days=3))
+    assert restored["_combined_rows"] == genuine_before
+    assert restored["leaderboard"] == baseline["leaderboard"]
+    assert (restored["joins_total"], restored["qualified_total"]) == (100, 40)
+    assert {name: list(fake_db[name].find({})) for name in guarded} == stored_before
+
+
 def test_preview_endpoint_and_announcement_generation_use_identical_values(client, fake_db):
     _create_campaign(client)
     _add(client, display_name="M***l", joins_count=30, qualified_count=20)
@@ -412,3 +444,50 @@ def test_manual_joins_never_touch_genuine_or_reward_collections(client, fake_db)
     assert {n: sorted(map(str, fake_db[n].find({}))) for n in guarded} == snapshot
     touched = {n for n in fake_db.list_collection_names() if n not in guarded}
     assert touched <= {CAMPAIGN_DISPLAY_OVERRIDE_COLLECTION, "campaign_admin_audit_log"}
+
+
+@pytest.mark.parametrize('field', ['joins_count', 'qualified_count'])
+def test_explicit_null_count_is_rejected_on_create_and_update(client, fake_db, field):
+    _create_campaign(client)
+    payload = {'joins_count': 30, 'qualified_count': 20, field: None}
+    response = _add(client, **payload)
+    assert response.status_code == 400
+    assert response.get_json()['code'] == 'bad_' + field + '_type'
+    created = _add(client, joins_count=30, qualified_count=20)
+    entry_id = _participants(created)[0]['entry_id']
+    before = fake_db[CAMPAIGN_DISPLAY_OVERRIDE_COLLECTION].find_one({'_id': CAMPAIGN_ID})
+    response = _patch(client, entry_id, **{field: None})
+    assert response.status_code == 400
+    assert response.get_json()['code'] == 'bad_' + field + '_type'
+    assert fake_db[CAMPAIGN_DISPLAY_OVERRIDE_COLLECTION].find_one({'_id': CAMPAIGN_ID}) == before
+
+
+def test_omitted_counts_on_legacy_name_edit_remain_unknown(client, fake_db):
+    _seed_legacy(fake_db)
+    response = _patch(client, 'legacy-1', display_name='Renamed')
+    assert response.status_code == 200
+    row = _participants(response)[0]
+    assert row['qualified_count'] == 7
+    assert row['joins_count'] is None and row['conversion_rate'] is None
+    stored = fake_db[CAMPAIGN_DISPLAY_OVERRIDE_COLLECTION].find_one({'_id': CAMPAIGN_ID})['participants'][0]
+    assert 'joins_count' not in stored
+    assert _patch(client, 'legacy-1', joins_count=30, qualified_count=20).status_code == 200
+
+
+def test_generated_campaign_text_identifies_display_counts_without_claiming_verified_activity(client, fake_db):
+    _create_campaign(client)
+    _add(client, joins_count=30, qualified_count=20)
+    text = render_campaign_activity_announcement_text(_activity(fake_db))
+    assert 'Campaign display only; reward progress uses genuine referrals.' in text
+    assert '30 joins · 20 qualified invites · 66.7% conversion' in text
+
+
+@pytest.mark.parametrize('bad', [True, False, 20.0, 2.5, '20', '', 'invalid', -1, [], {}, float('nan'), float('inf')])
+def test_invalid_qualified_update_is_rejected_without_changing_participant(client, fake_db, bad):
+    _create_campaign(client)
+    entry_id = _participants(_add(client, joins_count=30, qualified_count=20))[0]['entry_id']
+    before = fake_db[CAMPAIGN_DISPLAY_OVERRIDE_COLLECTION].find_one({'_id': CAMPAIGN_ID})
+    response = _patch(client, entry_id, qualified_count=bad)
+    assert response.status_code == 400
+    assert response.get_json()['code'] in {'bad_qualified_count_type', 'qualified_count_out_of_range'}
+    assert fake_db[CAMPAIGN_DISPLAY_OVERRIDE_COLLECTION].find_one({'_id': CAMPAIGN_ID}) == before
