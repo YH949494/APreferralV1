@@ -36,6 +36,10 @@ on:
       - "dashboard_panels.py"
       - "database.py"
       - "main.py"
+      - "xp.py"
+      - "fly.toml"
+      - "test_xp*.py"
+      - "test_web_startup_readiness.py"
       - "fake_mongo.py"
       - "scripts/verify_affiliate_reward_plan.py"
       - "scripts/release_affiliate_retention_holds.py"
@@ -85,6 +89,9 @@ env:
     test_uim_redemption_sync.py
     test_affiliate_qualification_rollout_guards.py
     test_affiliate_qualification_gates.py
+    test_xp.py
+    test_xp_startup.py
+    test_web_startup_readiness.py
 
 jobs:
   migration-tests:

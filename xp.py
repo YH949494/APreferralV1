@@ -112,38 +112,9 @@ def grant_xp(
 def ensure_xp_indexes(db) -> None:
     """Ensure indexes used by XP bookkeeping are present."""
 
-    def _dedupe_xp_events():
-        dup_groups = db.xp_events.aggregate(
-            [
-                {
-                    "$match": {
-                        "unique_key": {"$exists": True},
-                        "user_id": {"$exists": True, "$ne": None},
-                    }
-                },
-                {
-                    "$group": {
-                        "_id": {"user_id": "$user_id", "unique_key": "$unique_key"},
-                        "ids": {"$push": "$_id"},
-                        "count": {"$sum": 1},
-                    }
-                },
-                {"$match": {"count": {"$gt": 1}}},
-            ]
-        )
-
-        removed = 0
-        for group in dup_groups:
-            to_delete = group["ids"][1:]
-            if to_delete:
-                db.xp_events.delete_many({"_id": {"$in": to_delete}})
-                removed += len(to_delete)
-
-        if removed:
-            logger.warning("[XP] Removed %s duplicate xp_events", removed)
-    
-    _dedupe_xp_events()
-    
+    # Startup must not scan or delete XP history. Existing indexes make these
+    # declarations idempotent; duplicate data on a fresh index build must fail
+    # visibly and be repaired through an explicit, reviewed maintenance action.
     index_name = db.xp_events.create_index(
         [("user_id", 1), ("unique_key", 1)],
         name="uq_user_uniqueKey",
