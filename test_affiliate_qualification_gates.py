@@ -21,11 +21,14 @@ from test_uim_redemption_sync import DATABOT_CONFIG, FakeFeed, disabled_world, s
     ('1', '9.98', aq.EV_REJECTED, 'seven_day_turnover_does_not_exceed_9_99'),
     ('0', '100000', aq.EV_REJECTED, 'not_a_new_coupon_player'),
     (0, '100000', aq.EV_REJECTED, 'not_a_new_coupon_player'),
+    (False, '100000', aq.EV_REJECTED, 'not_a_new_coupon_player'),
+    ('False', '100000', aq.EV_REJECTED, 'not_a_new_coupon_player'),
+    ('false', '100000', aq.EV_REJECTED, 'not_a_new_coupon_player'),
     ('1', '9.9900000000000000000000001', aq.ELIGIBLE, None),
     ('1', '9.9899999999999999999999999', aq.EV_REJECTED, 'seven_day_turnover_does_not_exceed_9_99'),
     ('1', Decimal('1E1'), aq.ELIGIBLE, None),
     *[(flag, '10', aq.EV_REVIEW, 'missing_or_invalid_qualification_fields')
-      for flag in (None, '', 'yes', 'true', True, False, '1.0', 2, {}, [])],
+      for flag in (None, '', 'yes', 'true', True, '1.0', 2, {}, [])],
     *[('1', amount, aq.EV_REVIEW, 'missing_or_invalid_qualification_fields')
       for amount in (None, '', True, False, 'NaN', 'Infinity', '-1', float('nan'),
                      float('inf'), '1_000', '$10', '1,000', {}, [])],
@@ -58,6 +61,7 @@ def databot_world(*, fields=None, db=None):
     ({'after_total_bet_amount': '9.99'}, aq.EV_REJECTED, 'seven_day_turnover_does_not_exceed_9_99'),
     ({'after_total_bet_amount': '9.98'}, aq.EV_REJECTED, 'seven_day_turnover_does_not_exceed_9_99'),
     ({'coupon_new_player': '0', 'after_total_bet_amount': '100'}, aq.EV_REJECTED, 'not_a_new_coupon_player'),
+    ({'coupon_new_player': False, 'after_total_bet_amount': '100'}, aq.EV_REJECTED, 'not_a_new_coupon_player'),
     ({'coupon_new_player': None, 'is_new_player': 1}, aq.EV_REVIEW, 'missing_or_invalid_qualification_fields'),
     ({'after_total_bet_amount': None}, aq.EV_REVIEW, 'missing_or_invalid_qualification_fields'),
     ({'after_total_bet_amount': 'bad'}, aq.EV_REVIEW, 'missing_or_invalid_qualification_fields'),

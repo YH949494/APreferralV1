@@ -11,6 +11,7 @@ from test_uim_redemption_sync import DATABOT_CONFIG, sync, urow
 
 @pytest.mark.parametrize('fields', [
     {'coupon_new_player': '0', 'after_total_bet_amount': '100'},
+    {'coupon_new_player': False, 'after_total_bet_amount': '100'},
     {'coupon_new_player': '1', 'after_total_bet_amount': '9.99'},
     {'coupon_new_player': '1', 'after_total_bet_amount': None},
 ])

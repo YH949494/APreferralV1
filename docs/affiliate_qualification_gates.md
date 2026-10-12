@@ -70,3 +70,12 @@ Supplied (not refreshed) observations: 5,037 recipient matches; 4,997 `redeemed_
 Use separate dependency environments for the repositories (their pymongo pins differ). APReferral's curated affiliate CI now includes `test_affiliate_qualification_gates.py`; standalone real-Mongo tests additionally cover failing gates and an authoritative correction between validation and atomic award decision. The existing rollout real-Mongo suite covers account/invitee races, crash recovery and exactly-once effects. Databot's new tests cover source mapping, precision, malformed/missing data, legacy compatibility, immutable committed corrections and rollback/removal.
 
 All real Mongo tests must use an isolated local database URI, never `MONGO_URL`/production credentials. See each test module for its dedicated test URI variable. The build-session validation results are in the branch/PR review description; production behavior and fresh-task restoration are unverified.
+
+## Follow-up audit on 12 October
+
+Explicit boolean/text `false` with valid turnover fails the new-player gate;
+it is not an unknown flag held for review. Other boolean/word forms do not
+prove the required numeric 1. Live/preview parity and no-award tests cover this
+case. Databot also requires the exact normalized After Total Bet source header
+for raw qualification turnover; generic analytics aliases do not prove the
+completed seven-day metric. Missing source metric remains review.

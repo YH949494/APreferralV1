@@ -1243,13 +1243,15 @@ def assess_qualification_fields(fields: dict | None) -> dict:
     """Completed seven-day dollar result; no timer, sums, conversion or rounding.
 
     Documented flag representations are numeric 0/1 and their exact text forms.
-    Booleans and words are not UIM numeric flags. Missing/invalid input is review.
+    Explicit false is a failed gate. Other booleans/words cannot establish 1.
+    Missing/invalid input is review.
     """
     if not isinstance(fields, dict):
         return {"status": EV_REVIEW, "reason": "missing_or_invalid_qualification_fields"}
     flag = fields.get("coupon_new_player")
+    explicit_false = flag is False or (isinstance(flag, str) and flag.strip().lower() == "false")
     flag_ok = (type(flag) in (int, float) and flag in (0, 1)) or (
-        isinstance(flag, str) and flag.strip() in ("0", "1"))
+        isinstance(flag, str) and flag.strip() in ("0", "1")) or explicit_false
     raw = fields.get("after_total_bet_amount")
     amount = None
     if not isinstance(raw, bool) and isinstance(raw, (str, int, float, Decimal)):
@@ -1265,7 +1267,7 @@ def assess_qualification_fields(fields: dict | None) -> dict:
                 pass
     if not flag_ok or amount is None:
         return {"status": EV_REVIEW, "reason": "missing_or_invalid_qualification_fields"}
-    if str(flag).strip() == "0" or flag == 0:
+    if explicit_false or str(flag).strip() == "0" or flag == 0:
         return {"status": EV_REJECTED, "reason": "not_a_new_coupon_player"}
     if amount <= Decimal("9.99"):
         return {"status": EV_REJECTED, "reason": "seven_day_turnover_does_not_exceed_9_99"}
