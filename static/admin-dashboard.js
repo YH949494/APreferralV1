@@ -11210,6 +11210,9 @@
   var AQP_REASON_LABELS = {
     account_already_credited: "Gaming Account ID already credited",
     invitee_already_qualified: "Invitee already qualified",
+    not_a_new_coupon_player: "Not a new coupon player",
+    seven_day_turnover_does_not_exceed_9_99: "Seven-day turnover does not exceed 9.99",
+    missing_or_invalid_qualification_fields: "Missing or invalid qualification fields (review)",
     redemption_not_successful: "Redemption not successful",
     missing_redeemed_at: "Missing redemption time",
     redeemed_at_in_future: "Redemption time in the future",
@@ -11223,7 +11226,7 @@
     welcome_code_not_issued: "Welcome code never issued",
     ambiguous_recipient: "Ambiguous code recipient",
     conflicting_redemption_records: "Same code redeemed on different accounts",
-    conflicting_source_observations: "Source rows disagree (status/time)",
+    conflicting_source_observations: "Source observations changed (manual review)",
     no_referral_attribution: "No referral record (missing inviter)",
     self_referral: "Self-referral",
     self_referral_account: "Account linked to the inviter (self-referral)",

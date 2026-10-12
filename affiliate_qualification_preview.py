@@ -171,8 +171,8 @@ def _resolve_recipients(db, codes: set[str]) -> dict[str, dict]:
     for chunk in _chunks(codes):
         for row in db.voucher_pools.find({"pool_id": aq.WELCOME_POOL_ID, "code": {"$in": chunk}}):
             pool_rows[row["code"]] = row
-        for row in db.new_joiner_claims.find({"code": {"$in": chunk}}, {"code": 1, "uid": 1}):
-            claims[row["code"]].append(row.get("uid"))
+        for row in db.new_joiner_claims.find({"code": {"$in": chunk}}, {"code": 1, "uid": 1, "claimed_at": 1}):
+            claims[row["code"]].append(row)
         for row in db.voucher_pools.find({"code": {"$in": chunk}, "pool_id": {"$ne": aq.WELCOME_POOL_ID}}, {"code": 1}):
             other_pool.add(row["code"])
     ledger_codes = {}
@@ -184,14 +184,15 @@ def _resolve_recipients(db, codes: set[str]) -> dict[str, dict]:
         except (TypeError, ValueError):
             continue
     for chunk in _chunks(f"WELCOME:{u}" for u in uids):
-        for row in db.affiliate_ledger.find({"dedup_key": {"$in": chunk}}, {"dedup_key": 1, "voucher_code": 1}):
-            ledger_codes[row["dedup_key"]] = row.get("voucher_code")
+        for row in db.affiliate_ledger.find({"dedup_key": {"$in": chunk}},
+                                          {"dedup_key": 1, "voucher_code": 1, "issued_at": 1}):
+            ledger_codes[row["dedup_key"]] = row
     return {
         code: aq.decide_recipient(
             code=code,
             pool_row=pool_rows.get(code),
-            ledger_code_for=lambda uid: ledger_codes.get(f"WELCOME:{uid}"),
-            claim_uids=claims.get(code, []),
+            ledger_for=lambda uid: ledger_codes.get(f"WELCOME:{uid}"),
+            claims=claims.get(code, []),
             other_pool_exists=code in other_pool,
         )
         for code in codes
@@ -219,6 +220,17 @@ def _build_evidences(observations, recipients, *, now_utc, stats, source=aq.SOUR
             continue
         if prior is None:
             doc["_id"] = "shadow:" + doc["source_ref"]
+            by_ref[doc["source_ref"]] = doc
+        elif (source == aq.SOURCE_DATABOT_UIM and doc.get("authoritative_order")
+              and prior.get("authoritative_order") and doc["authoritative_order"] > prior["authoritative_order"]
+              and aq._aware_utc(prior.get("redeemed_at")) == aq._aware_utc(doc.get("redeemed_at"))
+              and prior.get("redemption_successful") == doc.get("redemption_successful")):
+            # Same redemption's newest completed report replaces gate values.
+            # Preserve tombstones/core conflicts from earlier observations.
+            doc["_id"] = prior["_id"]
+            for flag in ("_source_removed", "_conflicting_observation"):
+                if prior.get(flag):
+                    doc[flag] = True
             by_ref[doc["source_ref"]] = doc
         elif prior["observation_fingerprint"] != doc["observation_fingerprint"]:
             prior["_conflicting_observation"] = True
@@ -308,6 +320,7 @@ def build_preview(db, *, month: str | None, now_utc: datetime, source_config: di
         "read_only": True,
         "writes": "none — preview never writes evidence, qualified_events, registry, XP, ledgers or the cutoff",
         "rule_version": aq.RULE_VERSION,
+        "qualification_gate_version": aq.QUALIFICATION_GATE_VERSION,
         "generated_at": now_utc.isoformat(),
         "control": {
             "mode": control.get("mode") or aq.MODE_DISABLED,
@@ -565,11 +578,11 @@ def build_preview(db, *, month: str | None, now_utc: datetime, source_config: di
     payload["source_stats"] = dict(stats)
     payload["evidence_summary"] = _evidence_summary(stats, evidences, historical, payload["source"].get("sync"))
     if stats["truncated"]:
-        # Row cap hit: every new-rule figure above is a lower bound, not complete.
+        # Later unseen corrections can decrease counts as well as increase them.
         payload["source"]["evidence_incomplete"].append("preview_row_limit_reached")
         payload["evidence_summary"]["truncated"] = True
         payload["evidence_summary"]["basis"] = (
-            f"first {PREVIEW_MAX_SOURCE_ROWS:,} committed rows only (row limit reached) — figures are lower bounds"
+            f"first {PREVIEW_MAX_SOURCE_ROWS:,} committed rows only (row limit reached) — figures are provisional; later corrections are unscanned"
         )
     return payload
 
@@ -598,6 +611,8 @@ def _evidence_summary(stats, evidences, historical, sync) -> dict:
         "duplicate_account_excluded": status[aq.EV_DUPLICATE_ACCOUNT],
         "requiring_review": status[aq.EV_REVIEW],
         "rejected": status[aq.EV_REJECTED],
+        "failed_gate_reasons": dict(Counter(o["reason"] for o in historical
+                                          if o["status"] == aq.EV_REJECTED).most_common()),
         # All time, including evidence with no usable redemption time (which
         # the period-scoped outcome_reasons cannot place in any month).
         "review_reasons": dict(Counter(o["reason"] for o in historical if o["status"] == aq.EV_REVIEW).most_common()),
