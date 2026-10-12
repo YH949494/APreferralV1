@@ -507,7 +507,19 @@ def _genuine_display_names(db_ref, referrer_ids: list[int]) -> dict[int, str]:
     return names
 
 
-def merge_manual_weekly_rows(db, campaign_id, genuine_rows, *, score_field, manual_field, limit=15, reference_utc=None):
+def _format_manual_leaderboard_name(name, name_formatter):
+    """Legacy admin inputs already contain a mask; never mask them twice.
+
+    Telegram usernames cannot contain '*', and the existing admin placeholder
+    uses three stars. Preserve that display text while normalizing a leading @
+    in the same way as the genuine leaderboard formatter.
+    """
+    if "***" in name:
+        return name.lstrip("@")
+    return name_formatter(name)
+
+
+def merge_manual_weekly_rows(db, campaign_id, genuine_rows, *, score_field, manual_field, limit=15, reference_utc=None, name_formatter=str):
     """Merge explicit display scores after genuine cache reads, without writes."""
     combined = [dict(row) for row in genuine_rows]
     active = load_active_campaign_override(db, campaign_id, reference_utc=reference_utc)
@@ -518,7 +530,7 @@ def merge_manual_weekly_rows(db, campaign_id, genuine_rows, *, score_field, manu
             continue
         score = participant[manual_field]
         row = {"entry_id": f"manual:{participant['entry_id']}",
-               "username": participant["display_name"], score_field: score,
+               "username": _format_manual_leaderboard_name(participant["display_name"], name_formatter), score_field: score,
                "display_only": True, "is_vip1": False}
         if score_field == "referrals":
             row["total_valid"] = score
@@ -527,7 +539,7 @@ def merge_manual_weekly_rows(db, campaign_id, genuine_rows, *, score_field, manu
     return combined[:limit]
 
 
-def merge_manual_affiliate_rows(db, campaign_id, genuine_rows, *, limit=50, reference_utc=None):
+def merge_manual_affiliate_rows(db, campaign_id, genuine_rows, *, limit=50, reference_utc=None, name_formatter=str):
     """Append display-only entries to the actual monthly leaderboard.
 
     Genuine rows come from the caller's canonical monthly snapshot, never
@@ -543,7 +555,7 @@ def merge_manual_affiliate_rows(db, campaign_id, genuine_rows, *, limit=50, refe
         joins = participant.get("joins_count")
         combined.append({
             "entry_id": f"manual:{participant['entry_id']}",
-            "display_name": participant["display_name"],
+            "display_name": _format_manual_leaderboard_name(participant["display_name"], name_formatter),
             "qualified_month": participant["qualified_count"],
             "joins_month": joins,
             "conversion_month": compute_conversion_rate(joins, participant["qualified_count"]),

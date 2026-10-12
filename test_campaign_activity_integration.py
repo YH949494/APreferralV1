@@ -126,6 +126,49 @@ def test_actual_xp_ref_endpoint_merges_manual_scores_without_cache_or_user_chang
         _cleanup()
 
 
+@pytest.mark.parametrize("admin", [False, True])
+@pytest.mark.parametrize("name", ["SameHandle123", "@SameHandle123", "Short", "ab", "A***n", "J***8", "@A***n", "Same***23"])
+def test_manual_regular_leaderboard_names_follow_genuine_masking(client, monkeypatch, admin, name):
+    now = datetime.now(timezone.utc)
+    _seed_campaign(now)
+    main.db[CAMPAIGN_DISPLAY_OVERRIDE_COLLECTION].update_one({"_id": CAMPAIGN_ID},
+        {"$set": {"participants": [{"entry_id": "manual-name", "display_name": name,
+                    "joins_count": 30, "qualified_count": 20, "xp_count": 900,
+                    "ref_count": 25, "visible": True}]}})
+    monkeypatch.setenv("CAMPAIGN_DISPLAY_ACTIVE_CAMPAIGN_ID", CAMPAIGN_ID)
+    monkeypatch.setattr(main, "get_app_setting", lambda *args, **kwargs: True)
+    # Replace the module reference, not a method on CollectionProxy. Restoring
+    # a dynamically resolved bound method on that proxy pins the old database
+    # and breaks later suites that switch database._db to fresh fixtures.
+    viewer_collection = mock.Mock(wraps=main.users_collection)
+    viewer_collection.find_one.return_value = {"is_admin": admin}
+    monkeypatch.setattr(main, "users_collection", viewer_collection)
+    monkeypatch.setattr(main, "_get_user_snapshot", lambda uid: ({}, None, None))
+    monkeypatch.setattr(main, "compute_affiliate_monthly_kpis_live", lambda db: {
+        "affiliate_leaderboard_month": [], "generated_at": now, "month_key": "202610"})
+    week = main._week_window_utc()[2].date().isoformat()
+    cache = {"checkin": [{"user_id": 43, "username": name, "weekly_xp": 100}],
+             "referral": [{"user_id": 43, "username": name, "weekly_referrals": 4}]}
+    monkeypatch.setattr(main, "LEADERBOARD_CACHE", {f"leaderboard|{week}|15": {"ts": main.time.time(), "payload": cache}})
+    try:
+        expected = name.lstrip("@") if admin or "***" in name else main.mask_username(name)
+        monthly = client.get("/api/affiliate/leaderboard?user_id=42").get_json()["leaderboard"]
+        weekly = client.get("/api/leaderboard?user_id=42").get_json()["leaderboard"]
+        assert monthly[0]["display_name"] == expected
+        for ranking in ("checkin", "referral"):
+            assert weekly[ranking][0]["username"] == expected
+            # Genuine records still follow their original formatter; only
+            # legacy manual display names get the already-masked exemption.
+            genuine_expected = name.lstrip("@") if admin else main.mask_username(name)
+            assert weekly[ranking][1]["username"] == genuine_expected
+            assert weekly[ranking][0]["entry_id"] == "manual:manual-name"
+            assert weekly[ranking][1]["entry_id"] == "genuine:43"
+        assert main.db[CAMPAIGN_DISPLAY_OVERRIDE_COLLECTION].find_one({"_id": CAMPAIGN_ID})["participants"][0]["display_name"] == name
+        assert cache["checkin"][0]["username"] == name
+    finally:
+        _cleanup()
+
+
 def test_affiliate_endpoint_and_dedicated_campaign_endpoint_agree(client):
     now = datetime.now(timezone.utc)
     _seed_campaign(now)
