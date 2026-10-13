@@ -1,5 +1,7 @@
 # Affiliate qualification: verified Welcome redemption (`welcome_redemption_v1`)
 
+> Current prospective rollout: see [Forward-only affiliate qualification v2](affiliate_forward_only_rollout.md) for the >=80 rule, explicit revision transition, pending policy, coverage acknowledgement and activation safeguards. Earlier v1 thresholds and rollout descriptions below are historical.
+
 Status: **implemented, disabled by default.** Redemption source: Databot UIM imports via a private feed (§10), pending a data-owner success-only attestation; `marketing_raw_data` remains blocked (§6).
 
 ## 1. Audit — current flow (pre-patch)

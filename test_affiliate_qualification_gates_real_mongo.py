@@ -14,8 +14,8 @@ from test_uim_redemption_sync import DATABOT_CONFIG, sync, urow
     {'coupon_new_player': False, 'after_total_bet_amount': '100'},
     {'coupon_new_player': '1', 'after_total_bet_amount': '9.99'},
     {'coupon_new_player': '1', 'after_total_bet_amount': None},
-    {'coupon_new_player': '1', 'after_total_bet_amount': '10', 'qualification_fields_version': None},
-    {'coupon_new_player': '1', 'after_total_bet_amount': '10', 'qualification_fields_version': 2},
+    {'coupon_new_player': '1', 'after_total_bet_amount': '80', 'qualification_fields_version': None},
+    {'coupon_new_player': '1', 'after_total_bet_amount': '80', 'qualification_fields_version': 2},
 ])
 def test_real_failed_gates_never_reserve_or_create_events(real_db, fields):
     w, _ = databot_world(fields=fields, db=real_db)
@@ -50,4 +50,4 @@ def test_real_correction_between_assessment_and_atomic_decision_blocks_stale_pas
     assert real_db[aq.REGISTRY_COLLECTION].count_documents({}) == 0
     assert real_db.qualified_events.count_documents({}) == 0
     result = aq.evaluate_evidence(real_db, ev, control=aq.get_control(real_db), now_utc=NOW)
-    assert result['reason'] == 'seven_day_turnover_does_not_exceed_9_99'
+    assert result['reason'] == 'seven_day_turnover_below_80'

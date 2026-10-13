@@ -658,6 +658,10 @@ class _FakeSchedulerDB:
         self.referral_events = _ReferralEvents()
         self.referral_invitee_locks = mongomock.MongoClient().db.referral_invitee_locks
         self.invite_link_map = _InviteLinkMap(invite_link_map_docs)
+        self.affiliate_qualification_control = mongomock.MongoClient().db.affiliate_qualification_control
+
+    def __getitem__(self, name):
+        return getattr(self, name)
 
 
 @pytest.fixture

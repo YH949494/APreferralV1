@@ -49,7 +49,7 @@ OVERRIDE_FIELDS = (
 )
 # Problems that make Databot evidence incomplete but still usable (shown as a
 # stale/partial banner); every other problem blocks the new-rule figures.
-NON_BLOCKING_PROBLEMS = frozenset({"evidence_sync_stale", "uim_batches_partially_synced"})
+NON_BLOCKING_PROBLEMS = frozenset({"evidence_sync_stale", "uim_batches_partially_synced", "evidence_feed_last_attempt_failed"})
 PREVIEW_ASSUMED_ATTESTATION = {"by": "preview-only override", "reference": "NOT ATTESTED — assumed for this preview",
                                "preview_only": True}
 
@@ -321,6 +321,9 @@ def build_preview(db, *, month: str | None, now_utc: datetime, source_config: di
         "writes": "none — preview never writes evidence, qualified_events, registry, XP, ledgers or the cutoff",
         "rule_version": aq.RULE_VERSION,
         "qualification_gate_version": aq.QUALIFICATION_GATE_VERSION,
+        "history_policy": control.get("history_policy", aq.HISTORY_STRICT),
+        "history_limitation": control.get("history_limitation"),
+        "pending_maturity": aq.pending_maturity_report(db, config=config, now_utc=now_utc),
         "generated_at": now_utc.isoformat(),
         "control": {
             "mode": control.get("mode") or aq.MODE_DISABLED,
@@ -344,6 +347,12 @@ def build_preview(db, *, month: str | None, now_utc: datetime, source_config: di
         current[int(row["_id"])] = int(row["n"])
     joined = Counter()
     cohort_invitees = set()
+    active_invitees = set()
+    for pending in db.pending_referrals.find({"status": {"$in": list(aq.ACTIVE_PENDING_STATUSES)}}, {"invitee_user_id": 1}):
+        try:
+            active_invitees.add(int(pending["invitee_user_id"]))
+        except (KeyError, TypeError, ValueError):
+            continue
     for row in db.pending_referrals.find(
         {"created_at_utc": {"$gte": window["start_utc"], "$lt": window["end_utc"]}, "inviter_user_id": {"$ne": None}},
         {"inviter_user_id": 1, "invitee_user_id": 1},
@@ -385,6 +394,17 @@ def build_preview(db, *, month: str | None, now_utc: datetime, source_config: di
     }
 
     if blocked:
+        qualified = set()
+        for chunk in _chunks(active_invitees):
+            qualified.update(int(q["invitee_id"]) for q in db.qualified_events.find(
+                {"invitee_id": {"$in": chunk}}, {"invitee_id": 1}))
+        population = active_invitees - qualified
+        payload["activation_cohort"] = {
+            "population": len(population), "pass": 0, "reject": 0,
+            "pending_review": len(population), "duplicate_account_excluded": 0,
+            "already_qualified_unchanged": len(qualified), "source_ready": False,
+            "basis": "all active pending/manual referrals held because the authoritative source is unavailable",
+        }
         payload["affiliates"] = [
             {"referrer_id": str(r), "joined": joined[r], "current_qualified": current[r],
              "historical": None, "at_launch": None}
@@ -403,12 +423,26 @@ def build_preview(db, *, month: str | None, now_utc: datetime, source_config: di
     recipients = _resolve_recipients(db, {o["code"] for o in observations})
     evidences = _build_evidences(observations, recipients, now_utc=now_utc, stats=stats,
                                  source=aq.source_name(config))
+    # Persisted correction holds must survive a fresh source-only simulation.
+    # Otherwise a preview could advertise a pass that live must reconcile.
+    by_ref = {e["source_ref"]: e for e in evidences}
+    for chunk in _chunks(by_ref):
+        for stored in db[aq.EVIDENCE_COLLECTION].find(
+            {"source_ref": {"$in": chunk}, "rule_version": aq.RULE_VERSION}):
+            shadow = by_ref[stored["source_ref"]]
+            if stored.get("source_conflict_at"):
+                shadow["source_conflict_at"] = stored["source_conflict_at"]
+                shadow["source_conflict_reason"] = stored.get("source_conflict_reason")
+            elif (stored.get("observation_fingerprint") != shadow.get("observation_fingerprint")
+                  and (stored.get("status") not in (aq.EV_RECEIVED, aq.EV_REVIEW)
+                       or stored.get("qualification_decision_at") or stored.get("lease_until"))):
+                shadow["_conflicting_observation"] = True
 
     evidence_invitees = {
         int(e["recipient_resolution"]["user_id"]) for e in evidences
         if (e.get("recipient_resolution") or {}).get("status") == "ok"
     }
-    invitees = evidence_invitees | cohort_invitees
+    invitees = evidence_invitees | cohort_invitees | active_invitees
     pending_by_invitee = defaultdict(list)
     for chunk in _chunks(invitees):
         for row in db.pending_referrals.find(
@@ -440,7 +474,7 @@ def build_preview(db, *, month: str | None, now_utc: datetime, source_config: di
                     account_links[acct].add(int(row["user_id"]))
     code_accounts = defaultdict(set)
     for e in evidences:
-        if e.get("redemption_successful"):
+        if e.get("redemption_successful") and e.get("account_key"):
             code_accounts[e["code_hash"]].add(e.get("account_key"))
     hashes = list(code_accounts)
     for chunk in _chunks(hashes):
@@ -448,7 +482,8 @@ def build_preview(db, *, month: str | None, now_utc: datetime, source_config: di
             {"code_hash": {"$in": chunk}, "redemption_successful": True, "status": {"$ne": aq.EV_VOIDED}},
             {"code_hash": 1, "account_key": 1},
         ):
-            code_accounts[row["code_hash"]].add(row.get("account_key"))
+            if row.get("account_key"):
+                code_accounts[row["code_hash"]].add(row["account_key"])
     real_q = {}
     for chunk in _chunks(invitees):
         for row in db.qualified_events.find({"invitee_id": {"$in": chunk}}):
@@ -466,6 +501,9 @@ def build_preview(db, *, month: str | None, now_utc: datetime, source_config: di
     historical = _simulate(evidences, control=hist_control, now_utc=now_utc, lookup=lookup(None), credited={})
     launch_cutoff_assumed = cutoff or now_utc
     launch_control = {**control, "source_config": config, "launch_cutoff_utc": launch_cutoff_assumed}
+    if is_databot:
+        launch_control["source_coverage_end_utc"] = aq.parse_redeemed_at(
+            (integration.get("sync") or {}).get("coverage_end"), "Asia/Kuala_Lumpur")
     at_launch = _simulate(evidences, control=launch_control, now_utc=now_utc, lookup=lookup(real_q),
                           credited=dict(registry))
 
@@ -555,6 +593,29 @@ def build_preview(db, *, month: str | None, now_utc: datetime, source_config: di
         "at_launch_duplicate_account_excluded": total("duplicate_account_excluded", "at_launch"),
         "at_launch_already_qualified": total("already_qualified", "at_launch"),
         "at_launch_review": total("review", "at_launch"),
+        "at_launch_rejected": sum(o["status"] == aq.EV_REJECTED for o in at_launch),
+    }
+    # Activation population includes every currently active row, irrespective
+    # of join month. Report people once, even with multiple code observations.
+    population = active_invitees - set(real_q)
+    outcomes_by_invitee = defaultdict(set)
+    for o in at_launch:
+        if o["invitee_id"] in population:
+            outcomes_by_invitee[o["invitee_id"]].add(o["status"])
+    counts = Counter()
+    priority = (aq.EV_QUALIFIED, aq.EV_DUPLICATE_ACCOUNT, aq.EV_REVIEW, aq.EV_REJECTED)
+    source_usable = not blocking and not payload["source"]["evidence_incomplete"] and not stats["truncated"]
+    for invitee in population:
+        statuses = outcomes_by_invitee[invitee] if source_usable else set()
+        chosen = next((s for s in priority if s in statuses), aq.EV_REVIEW)
+        counts[chosen] += 1
+    payload["activation_cohort"] = {
+        "population": len(population), "pass": counts[aq.EV_QUALIFIED],
+        "reject": counts[aq.EV_REJECTED], "pending_review": counts[aq.EV_REVIEW],
+        "duplicate_account_excluded": counts[aq.EV_DUPLICATE_ACCOUNT],
+        "already_qualified_unchanged": len(active_invitees & set(real_q)),
+        "source_ready": source_usable,
+        "basis": "all active pending/manual referrals, including pre-cutoff joins; no writes",
     }
     reasons = Counter()
     cases = []

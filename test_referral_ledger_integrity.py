@@ -9,6 +9,7 @@ negative while internal diagnostics keep showing raw values.
 
 import logging
 import unittest
+import mongomock
 from datetime import datetime, timedelta, timezone
 
 from pymongo.errors import DuplicateKeyError
@@ -305,7 +306,9 @@ class InitialQualificationFailureTests(unittest.TestCase):
             }
         )
         events = _FakeReferralEvents()
-        db = type("DB", (), {"pending_referrals": pending, "referral_events": events})()
+        db = type("DB", (), {"pending_referrals": pending, "referral_events": events,
+                            "affiliate_qualification_control": mongomock.MongoClient().db.affiliate_qualification_control,
+                            "__getitem__": lambda self, name: getattr(self, name)})()
 
         import referral_invitee_lock
 

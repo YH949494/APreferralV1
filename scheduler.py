@@ -3951,6 +3951,20 @@ def _resolve_pending_destination(pending: dict) -> tuple[int, str, str]:
 
 
 def settle_pending_referrals(batch_limit: int = 200) -> None:
+    """Hold the activation barrier for the whole legacy write pipeline."""
+    try:
+        control = affiliate_qualification.get_control(db)
+        if not affiliate_qualification.legacy_award_allowed(control, now_utc()):
+            affiliate_qualification.mark_activation_cohort(db, control=control, now_utc=now_utc())
+            return
+        with affiliate_qualification.legacy_writer_guard(db, now_utc=now_utc()) as admitted:
+            if admitted:
+                _settle_pending_referrals(batch_limit)
+    except Exception:
+        logger.exception("[SCHED][REFERRAL] skipped reason=legacy_barrier_unavailable")
+
+
+def _settle_pending_referrals(batch_limit: int = 200) -> None:
     now_utc_ts = now_utc()
     cutoff = now_utc_ts - timedelta(hours=_referral_hold_hours())
     try:
@@ -4424,6 +4438,7 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                 )
 
             step = "award"
+            affiliate_qualification.invalidate_history_seed(db)
             # Award key is invitee-scoped (not group_id/chat_id-scoped) so the
             # same invitee cannot be awarded twice across a group-origin and a
             # channel-origin referral (P0-4: cross-destination duplicate XP).
@@ -4646,7 +4661,7 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
 
 
 def apply_welcome_redemption_effects(batch_limit: int = 200, now_utc_ts: datetime | None = None) -> dict:
-    """Downstream effects of a welcome_redemption_v1 qualification, applied
+    """Downstream effects of a welcome_redemption_v2 qualification, applied
     exactly once per qualified_events row (lease + effects_applied_at):
     referral XP / referral_settled / award event (the same ones the legacy
     award wrote), the pending row and invitee lock, and the monthly tier.
@@ -4808,6 +4823,8 @@ def run_welcome_redemption_qualification(now_utc_ts: datetime | None = None) -> 
     now_ts = now_utc_ts or now_utc()
     control = affiliate_qualification.get_control(db)
     out = {"active": affiliate_qualification.new_rule_active(control, now_ts)}
+    if control and affiliate_qualification.launch_cutoff(control) is not None:
+        out["pending_marked"] = affiliate_qualification.mark_activation_cohort(db, control=control, now_utc=now_ts)
     if out["active"]:
         config = (control or {}).get("source_config") or {}
         problems = affiliate_qualification.validate_source_config(config)

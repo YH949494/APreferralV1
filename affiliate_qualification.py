@@ -1,6 +1,6 @@
 """Canonical affiliate qualification: verified Welcome voucher redemption.
 
-Rule ``welcome_redemption_v1`` (see docs/affiliate_welcome_redemption_qualification.md):
+Rule ``welcome_redemption_v2`` (see docs/affiliate_forward_only_rollout.md):
 
 * An invitee qualifies only on committed, verified, *successful* redemption of
   their own Welcome voucher. Joining, checking in, claiming, receiving or
@@ -16,7 +16,7 @@ Rule ``welcome_redemption_v1`` (see docs/affiliate_welcome_redemption_qualificat
 
 Lifecycle
 ---------
-``affiliate_qualification_control`` (one document, ``_id = RULE_VERSION``) is
+``affiliate_qualification_control`` (one document, ``_id = welcome_redemption_v1``) is
 the persisted switch. It carries ``mode`` (disabled / active / paused) and,
 once launched, an immutable ``launch_cutoff_utc``. From the cutoff on the
 legacy check-in/channel settlement in ``scheduler.settle_pending_referrals``
@@ -51,6 +51,8 @@ import json
 import logging
 import re
 import unicodedata
+import uuid
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
@@ -60,12 +62,24 @@ from pymongo.errors import DuplicateKeyError
 
 logger = logging.getLogger(__name__)
 
-RULE_VERSION = "welcome_redemption_v1"
-QUALIFICATION_GATE_VERSION = "coupon_new_player_turnover_v1"
+LEGACY_RULE_VERSION = "welcome_redemption_v1"
+RULE_VERSION = "welcome_redemption_v2"
+QUALIFICATION_GATE_VERSION = "coupon_new_player_turnover_v2"
 CONTROL_COLLECTION = "affiliate_qualification_control"
 EVIDENCE_COLLECTION = "welcome_redemption_evidence"
 REGISTRY_COLLECTION = "affiliate_account_registry"
-CONTROL_ID = RULE_VERSION
+# Keep the deployed switch identity: a second control document could reopen
+# legacy awards when an old worker reads v1. Transition this document by CAS.
+CONTROL_ID = LEGACY_RULE_VERSION
+
+HISTORY_STRICT = "strict_complete_history"
+HISTORY_FORWARD = "known_history_plus_post_cutoff"
+HISTORY_LIMITATION = (
+    "Historical unknown Account IDs are not fully covered. Uniqueness is guaranteed "
+    "for deterministically seeded accounts and every qualification after cutoff."
+)
+ACTIVE_PENDING_STATUSES = ("pending", "pending_channel", "pending_manual", "manual",
+                           "processing", "error", "awaiting_redemption")
 
 KL_TZ = pytz.timezone("Asia/Kuala_Lumpur")
 
@@ -80,7 +94,7 @@ SOURCE_DATABOT_UIM = "databot_uim"
 WELCOME_POOL_ID = "WELCOME"
 
 # Where each source's committed rows live. Batches carry the same
-# extraction cursor/lease fields (welcome_evidence_*) and the same
+# extraction cursor/lease fields (welcome_v2_evidence_*) and the same
 # ``rolled_back_at`` correction marker whatever the source.
 SOURCE_SPECS = {
     SOURCE_MARKETING: {
@@ -195,17 +209,80 @@ def legacy_award_allowed(control: dict | None, now_utc: datetime) -> bool:
     mode — pausing the new rule never reactivates the old one.
     """
     cutoff = launch_cutoff(control)
-    return cutoff is None or _aware_utc(now_utc) < cutoff
+    return not (control or {}).get("legacy_admission_closed") and (
+        cutoff is None or _aware_utc(now_utc) < cutoff)
 
 
 def new_rule_active(control: dict | None, now_utc: datetime) -> bool:
     cutoff = launch_cutoff(control)
     return bool(
         control
+        and control.get("rule_version") == RULE_VERSION
         and control.get("mode") == MODE_ACTIVE
         and cutoff is not None
         and _aware_utc(now_utc) >= cutoff
     )
+
+
+@contextmanager
+def legacy_writer_guard(db, *, now_utc: datetime):
+    """Serialize legacy settlement/backfill with the atomic activation CAS.
+
+    No expiring lease: a suspended worker must never wake after a timeout and
+    award across activation. A crash fails closed until an operator confirms
+    that exact writer is stopped and releases its token. The deployed switch
+    is also initialized here for installations without a control document.
+    """
+    col = db[CONTROL_COLLECTION]
+    col.update_one({"_id": CONTROL_ID}, {"$setOnInsert": {"mode": MODE_DISABLED}}, upsert=True)
+    token = uuid.uuid4().hex
+    locked = col.find_one_and_update(
+        {"_id": CONTROL_ID, "legacy_writer_token": {"$exists": False},
+         "legacy_admission_closed": {"$ne": True},
+         "$or": [{"launch_cutoff_utc": {"$exists": False}},
+                 {"launch_cutoff_utc": {"$gt": now_utc}}]},
+        {"$set": {"legacy_writer_token": token, "legacy_writer_started_at": now_utc}},
+        return_document=ReturnDocument.AFTER,
+    )
+    try:
+        yield locked is not None
+    finally:
+        if locked is not None:
+            col.update_one({"_id": CONTROL_ID, "legacy_writer_token": token},
+                           {"$unset": {"legacy_writer_token": "", "legacy_writer_started_at": ""}})
+
+
+def mark_activation_cohort(db, *, control: dict, now_utc: datetime) -> int:
+    """Repeatable hand-off after the switch CAS; never rewrite awarded history.
+
+    The switch itself closes legacy admission atomically. This marking may be
+    interrupted and repeated; validation reads active rows directly, so an
+    unmarked row is still included after a crash, including pre-cutoff joins.
+    """
+    if launch_cutoff(control) is None:
+        return 0
+    marked = 0
+    for status in ACTIVE_PENDING_STATUSES:
+        result = db.pending_referrals.update_many(
+            {"status": status, "qualification_rule_version": {"$ne": RULE_VERSION}},
+            {"$set": {"status": PENDING_AWAITING_REDEMPTION, "activation_prior_status": status,
+                      "qualification_rule_version": RULE_VERSION,
+                      "activation_cutoff_utc": launch_cutoff(control), "awaiting_redemption_since": now_utc},
+             "$unset": {"processing_by": "", "processing_at_utc": "", "processing_at": ""}},
+        )
+        marked += result.modified_count
+    return marked
+
+
+def invalidate_history_seed(db) -> None:
+    """A legacy writer invalidates the seed BEFORE it can change history.
+
+    Activation's CAS includes seed_completed_at, so a worker that finishes
+    between preflight and the CAS cannot leave a stale coverage marker usable.
+    This call runs inside legacy_writer_guard, never after activation.
+    """
+    db[CONTROL_COLLECTION].update_one({"_id": CONTROL_ID, "legacy_writer_token": {"$exists": True}},
+                                     {"$unset": {"seed_completed_at": ""}})
 
 
 # ---------------------------------------------------------------------------
@@ -535,6 +612,29 @@ def integration_readiness(db, config: dict | None, *, sample_batches: int = 3, n
     return {"ok": not problems, "problems": sorted(set(problems))}
 
 
+def pending_maturity_report(db, *, config: dict | None, now_utc: datetime) -> dict:
+    """Source coverage is an availability bound, never a failed qualification.
+
+    Transport v1's exact After Total Bet is owner-attested as the completed
+    seven-day metric. Do not add seven days to a completed result. Absence or
+    an explicit incomplete marker is held; join age is diagnostic only.
+    """
+    health = integration_readiness(db, config, now_utc=now_utc)
+    sync = health.get("sync") or {}
+    end = parse_redeemed_at(sync.get("coverage_end"), "Asia/Kuala_Lumpur")
+    query = {"status": {"$in": list(ACTIVE_PENDING_STATUSES)}}
+    return {
+        "active_pending_manual_rows": db.pending_referrals.count_documents(query),
+        "source_coverage_end_utc": end.isoformat() if end else None,
+        "source_coverage_end_gmt8": end.astimezone(KL_TZ).isoformat() if end else None,
+        "joined_after_available_coverage": db.pending_referrals.count_documents(
+            {**query, "created_at_utc": {"$gt": end}}) if end else None,
+        "joins_less_than_seven_days_old": db.pending_referrals.count_documents(
+            {**query, "created_at_utc": {"$gt": now_utc - timedelta(days=7)}}),
+        "policy": "missing, incomplete or uncovered results stay pending; completed seven-day reports need no extra timer",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Code -> original recipient
 # ---------------------------------------------------------------------------
@@ -627,12 +727,13 @@ def welcome_issuance_problem(recipient: dict, redeemed_at: datetime | None) -> s
 # Evidence ingestion (idempotent)
 # ---------------------------------------------------------------------------
 
-def _observation_fingerprint(successful: bool, redeemed_at: datetime | None, fields=None) -> str:
+def _observation_fingerprint(successful: bool, redeemed_at: datetime | None, fields=None,
+                             *, redemption_status_known: bool = True) -> str:
     stamp = redeemed_at.isoformat() if redeemed_at else ""
     gate_values = {k: (fields or {}).get(k) for k in (
-        "coupon_new_player", "after_total_bet_amount", "transport_version")}
+        "coupon_new_player", "after_total_bet_amount", "transport_version", "seven_day_complete")}
     encoded = json.dumps(gate_values, sort_keys=True, default=str)
-    return hashlib.sha256(f"{int(bool(successful))}|{stamp}|{encoded}".encode()).hexdigest()[:16]
+    return hashlib.sha256(f"{RULE_VERSION}|{QUALIFICATION_GATE_VERSION}|{int(bool(successful))}|{redemption_status_known}|{stamp}|{encoded}".encode()).hexdigest()[:16]
 
 
 def build_evidence_doc(
@@ -652,6 +753,7 @@ def build_evidence_doc(
     observation: str | None = None,
     qualification_fields: dict | None = None,
     observation_order: str | None = None,
+    redemption_status_known: bool = True,
 ) -> dict:
     """The evidence document for one normalised observation (no I/O).
     ``source_ref`` is its idempotency key: same code + account = same row.
@@ -668,7 +770,7 @@ def build_evidence_doc(
     chash = code_hash(code)
     return {
         "source": source,
-        "source_ref": hashlib.sha256(f"{source}|{chash}|{account_key or account_reason}".encode()).hexdigest()[:40],
+        "source_ref": hashlib.sha256(f"{RULE_VERSION}|{source}|{chash}|{account_key or account_reason}".encode()).hexdigest()[:40],
         "rule_version": RULE_VERSION,
         "code_hash": chash,
         "code_masked": mask_value(code),
@@ -678,11 +780,13 @@ def build_evidence_doc(
         "redeemed_at": redeemed_at,
         "redeemed_at_reason": None if redeemed_at else (redeemed_at_reason or None),
         "redemption_successful": bool(redemption_successful),
+        "redemption_status_known": redemption_status_known,
         "evidence_basis": evidence_basis,
         "qualification_fields": qualification_fields,
         "authoritative_order": observation_order,
         "qualification_gate_version": QUALIFICATION_GATE_VERSION,
-        "observation_fingerprint": _observation_fingerprint(redemption_successful, redeemed_at, qualification_fields),
+        "observation_fingerprint": _observation_fingerprint(redemption_successful, redeemed_at, qualification_fields,
+                                                            redemption_status_known=redemption_status_known),
         "campaign_id": None if campaign_id is None else str(campaign_id),
         "recipient_resolution": recipient,
         "status": EV_RECEIVED,
@@ -710,6 +814,7 @@ def record_redemption_evidence(
     observation: str | None = None,
     qualification_fields: dict | None = None,
     observation_order: str | None = None,
+    redemption_status_known: bool = True,
 ) -> dict:
     """Upsert one redemption observation. Re-importing the same row is a
     no-op; a conflicting re-observation (status or time changed) is routed
@@ -729,6 +834,7 @@ def record_redemption_evidence(
         redeemed_at=redeemed_at, redemption_successful=redemption_successful, campaign_id=campaign_id,
         now_utc=now_utc, account_reason=account_reason, redeemed_at_reason=redeemed_at_reason,
         evidence_basis=evidence_basis, qualification_fields=qualification_fields, observation_order=observation_order,
+        redemption_status_known=redemption_status_known,
     )
     if observation == OBS_REMOVED:
         existing = db[EVIDENCE_COLLECTION].find_one({"source": source, "source_ref": insert_doc["source_ref"]})
@@ -779,8 +885,9 @@ def record_redemption_evidence(
                 )
                 return {"recorded": True, "new": False}
             # Retain earned effects; changed credited evidence is reconciled manually.
-            if changed and (before.get("status") != EV_RECEIVED or before.get("lease_until")
-                            or before.get("qualification_decision_at")):
+            retryable = before.get("status") == EV_REVIEW and not before.get("source_conflict_at")
+            if changed and (before.get("status") not in (EV_RECEIVED, EV_REVIEW) or before.get("lease_until")
+                            or before.get("qualification_decision_at") or not (retryable or before.get("status") == EV_RECEIVED)):
                 _flag_conflicting_observation(db, before, now_utc=now_utc)
                 return {"recorded": True, "new": False, "conflict": True}
             replaced = db[EVIDENCE_COLLECTION].find_one_and_update(
@@ -789,7 +896,8 @@ def record_redemption_evidence(
                  "status": before.get("status"), "lease_until": {"$exists": False},
                  "qualification_decision_at": {"$exists": False}, "source_conflict_at": {"$exists": False}},
                 {"$set": {"qualification_fields": qualification_fields, "authoritative_order": observation_order,
-                          "observation_fingerprint": fingerprint, "evidence_basis": evidence_basis}},
+                          "observation_fingerprint": fingerprint, "evidence_basis": evidence_basis,
+                          "status": EV_RECEIVED, "attempts": 0}, "$unset": {"reason": ""}},
                 return_document=ReturnDocument.AFTER,
             )
             if replaced is not None:
@@ -859,9 +967,13 @@ def parse_source_row(row: dict, config: dict) -> dict | None:
         "namespace": values.get(ns_col) if ns_col else cfg.get("account_namespace"),
         "redeemed_at": parse_redeemed_at(values.get(_norm_column(cfg["redeemed_at_column"])), cfg["source_timezone"]),
         "redemption_successful": bool(status_raw) and status_raw in success_values,
+        "redemption_status_known": status_raw in success_values or status_raw in {
+            "failed", "failure", "unsuccessful", "rejected"},
         "campaign_id": campaign_id,
         "qualification_fields": {"coupon_new_player": values.get("coupon_new_player"),
-                                 "after_total_bet_amount": values.get("after_total_bet_amount")},
+                                 "after_total_bet_amount": values.get("after_total_bet_amount"),
+                                 **({"seven_day_complete": values["seven_day_complete"]}
+                                    if "seven_day_complete" in values else {})},
     }
 
 
@@ -939,6 +1051,7 @@ def _parse_databot_row(row: dict, cfg: dict) -> dict | None:
             "after_total_bet_amount": row.get("after_total_bet_amount"),
             "source_columns": row.get("qualification_source_columns"),
             "transport_version": row.get("qualification_fields_version"),
+            **({"seven_day_complete": row["seven_day_complete"]} if "seven_day_complete" in row else {}),
         },
         "evidence_basis": {
             "success": cfg.get("success_basis"),
@@ -1032,13 +1145,14 @@ def extract_committed_batches(db, *, config: dict, now_utc: datetime, max_rows: 
         batch = batches.find_one_and_update(
             {
                 **committed_batch_filter(config),
-                "welcome_evidence_extracted_at": {"$exists": False},
+                "$and": [{"$or": [{"welcome_v2_evidence_rule_version": {"$ne": RULE_VERSION}},
+                                    {"welcome_v2_evidence_extracted_at": {"$exists": False}}]}],
                 "$or": [
-                    {"welcome_evidence_lease_until": {"$exists": False}},
-                    {"welcome_evidence_lease_until": {"$lt": now_utc}},
+                    {"welcome_v2_evidence_lease_until": {"$exists": False}},
+                    {"welcome_v2_evidence_lease_until": {"$lt": now_utc}},
                 ],
             },
-            {"$set": {"welcome_evidence_lease_until": now_utc + BATCH_EXTRACT_LEASE}},
+            {"$set": {"welcome_v2_evidence_lease_until": now_utc + BATCH_EXTRACT_LEASE}},
             sort=[(spec["order"], 1)],
             return_document=ReturnDocument.AFTER,
         )
@@ -1046,17 +1160,19 @@ def extract_committed_batches(db, *, config: dict, now_utc: datetime, max_rows: 
             break
         summary = extract_marketing_batch(
             db, upload_batch_id=batch[spec["batch_key"]], config=config, now_utc=now_utc,
-            after_id=batch.get("welcome_evidence_cursor"), max_rows=budget,
+            after_id=(batch.get("welcome_v2_evidence_cursor")
+                      if batch.get("welcome_v2_evidence_rule_version") == RULE_VERSION else None), max_rows=budget,
         )
         budget -= summary["rows"]
-        counters = {f"welcome_evidence_summary.{k}": v for k, v in summary.items() if k not in ("last_id", "done")}
-        done_fields = {"welcome_evidence_extracted_at": now_utc} if summary["done"] else {}
+        counters = {f"welcome_v2_evidence_summary.{k}": v for k, v in summary.items() if k not in ("last_id", "done")}
+        done_fields = {"welcome_v2_evidence_extracted_at": now_utc} if summary["done"] else {}
         batches.update_one(
             {"_id": batch["_id"]},
             {
-                "$set": {"welcome_evidence_cursor": summary["last_id"], **done_fields},
+                "$set": {"welcome_v2_evidence_cursor": summary["last_id"],
+                          "welcome_v2_evidence_rule_version": RULE_VERSION, **done_fields},
                 "$inc": counters,
-                "$unset": {"welcome_evidence_lease_until": ""},
+                "$unset": {"welcome_v2_evidence_lease_until": ""},
             },
         )
         out["batches_completed"] += int(summary["done"])
@@ -1110,7 +1226,7 @@ class DbLookup:
             {
                 "code_hash": evidence["code_hash"],
                 "_id": {"$ne": evidence.get("_id")},
-                "account_key": {"$ne": evidence.get("account_key")},
+                "account_key": {"$nin": [None, evidence.get("account_key")]},
                 "redemption_successful": True,
                 "status": {"$ne": EV_VOIDED},
             },
@@ -1210,6 +1326,16 @@ def _finalize(db, evidence: dict, status: str, reason: str | None, *, now_utc: d
         {"_id": evidence["_id"]},
         {"$set": fields, "$unset": {"lease_until": ""}},
     )
+    # A failed/held qualification is not a reversal. No settlement, XP or
+    # referral_revoked event is manufactured for a never-qualified invitee.
+    invitee = fields.get("invitee_id") or (evidence.get("recipient_resolution") or {}).get("user_id")
+    if invitee and status in (EV_REVIEW, EV_REJECTED, EV_DUPLICATE_ACCOUNT):
+        db.pending_referrals.update_many(
+            {"invitee_user_id": invitee, "status": {"$in": list(ACTIVE_PENDING_STATUSES)}},
+            {"$set": {"status": PENDING_AWAITING_REDEMPTION if status == EV_REVIEW else "rejected",
+                      "qualification_rule_version": RULE_VERSION, "qualification_outcome": status,
+                      "qualification_reason": reason, "qualification_checked_at": now_utc}},
+        )
     logger.info(
         "[AFF_QUAL][EVIDENCE_DONE] evidence_id=%s status=%s reason=%s code=%s",
         evidence["_id"], status, reason, evidence.get("code_masked"),
@@ -1243,8 +1369,8 @@ ELIGIBLE = "eligible"
 def assess_qualification_fields(fields: dict | None, *, require_transport_version: bool = False) -> dict:
     """Completed seven-day dollar result; no timer, sums, conversion or rounding.
 
-    Documented flag representations are numeric 0/1 and their exact text forms.
-    Explicit false is a failed gate. Other booleans/words cannot establish 1.
+    Supported true/1 and false/0 representations are explicit. Unknown words
+    cannot establish the new-player condition.
     Missing/invalid input is review.
     """
     if not isinstance(fields, dict):
@@ -1255,10 +1381,12 @@ def assess_qualification_fields(fields: dict | None, *, require_transport_versio
         # True, "1", 1.0 and missing/future versions are not that contract.
         if type(version) is not int or version != 1:
             return {"status": EV_REVIEW, "reason": "unsupported_qualification_transport_version"}
+    if "seven_day_complete" in fields and fields["seven_day_complete"] is not True:
+        return {"status": EV_REVIEW, "reason": "seven_day_data_incomplete"}
     flag = fields.get("coupon_new_player")
     explicit_false = flag is False or (isinstance(flag, str) and flag.strip().lower() == "false")
     flag_ok = (type(flag) in (int, float) and flag in (0, 1)) or (
-        isinstance(flag, str) and flag.strip() in ("0", "1")) or explicit_false
+        isinstance(flag, str) and flag.strip() in ("0", "1", "true")) or explicit_false or flag is True
     raw = fields.get("after_total_bet_amount")
     amount = None
     if not isinstance(raw, bool) and isinstance(raw, (str, int, float, Decimal)):
@@ -1276,13 +1404,13 @@ def assess_qualification_fields(fields: dict | None, *, require_transport_versio
         return {"status": EV_REVIEW, "reason": "missing_or_invalid_qualification_fields"}
     if explicit_false or str(flag).strip() == "0" or flag == 0:
         return {"status": EV_REJECTED, "reason": "not_a_new_coupon_player"}
-    if amount <= Decimal("9.99"):
-        return {"status": EV_REJECTED, "reason": "seven_day_turnover_does_not_exceed_9_99"}
+    if amount < Decimal("80"):
+        return {"status": EV_REJECTED, "reason": "seven_day_turnover_below_80"}
     return {"status": ELIGIBLE, "reason": None}
 
 
 def assess_evidence(evidence: dict, *, control: dict, now_utc: datetime, lookup) -> dict:
-    """Every validation rule of welcome_redemption_v1, with NO writes.
+    """Every validation rule of welcome_redemption_v2, with NO writes.
 
     Returns ``{"status": ELIGIBLE, ...qualification fields}`` or a final
     evidence status + reason. Live processing (:func:`evaluate_evidence`) and
@@ -1296,10 +1424,11 @@ def assess_evidence(evidence: dict, *, control: dict, now_utc: datetime, lookup)
 
     if evidence.get("voided_at"):
         return verdict(EV_VOIDED, evidence.get("void_reason") or "voided")
+    if (evidence.get("rule_version") != RULE_VERSION
+            or evidence.get("qualification_gate_version") != QUALIFICATION_GATE_VERSION):
+        return verdict(EV_REVIEW, "evidence_rule_version_mismatch")
     if evidence.get("source_conflict_at"):
         return verdict(EV_REVIEW, evidence.get("source_conflict_reason") or "conflicting_source_observations")
-    if not evidence.get("redemption_successful"):
-        return verdict(EV_REJECTED, "redemption_not_successful")
     redeemed_at = _aware_utc(evidence.get("redeemed_at"))
     if redeemed_at is None:
         return verdict(EV_REVIEW, evidence.get("redeemed_at_reason") or "missing_redeemed_at")
@@ -1307,10 +1436,17 @@ def assess_evidence(evidence: dict, *, control: dict, now_utc: datetime, lookup)
         # A redemption cannot postdate its own processing; never attribute
         # (or reward) a future month on a bad source timestamp.
         return verdict(EV_REVIEW, "redeemed_at_in_future")
+    coverage = _aware_utc(control.get("source_coverage_end_utc"))
+    if coverage is not None and redeemed_at > coverage:
+        return verdict(EV_REVIEW, "outside_source_coverage")
+    if not evidence.get("redemption_successful"):
+        if evidence.get("redemption_status_known") is not True:
+            return verdict(EV_REVIEW, "redemption_status_unknown")
+        return verdict(EV_REJECTED, "redemption_not_successful")
     account_key = evidence.get("account_key")
     if not account_key:
         reason = evidence.get("account_reason") or "missing_account"
-        return verdict(EV_REJECTED if reason == "missing_account" else EV_REVIEW, reason)
+        return verdict(EV_REVIEW, reason)
     cfg_campaigns = {str(c) for c in ((control.get("source_config") or {}).get("campaign_ids") or [])}
     if cfg_campaigns and str(evidence.get("campaign_id") or "") not in cfg_campaigns:
         return verdict(EV_REJECTED, "non_welcome_campaign")
@@ -1347,6 +1483,14 @@ def assess_evidence(evidence: dict, *, control: dict, now_utc: datetime, lookup)
             legacy_credit=bool(own["ok"] and existing_q.get("rule_version") != RULE_VERSION),
         )
 
+    # An old terminal referral is not part of the activation population. If
+    # another active row exists, attribution still stays with the ORIGINAL
+    # inviter below; never redirect an old attribution to a later inviter.
+    pending_rows = lookup.pending_referrals(invitee_id)
+    if (not existing_q and launch_cutoff(control) is not None and pending_rows
+            and not any(r.get("status") in ACTIVE_PENDING_STATUSES for r in pending_rows)):
+        return verdict(EV_REVIEW, "referral_not_active_at_rollout", invitee_id=invitee_id)
+
     attribution = resolve_attribution(lookup, invitee_id=invitee_id, redeemed_at=redeemed_at)
     if not attribution["ok"]:
         return verdict(attribution["status"], attribution["reason"], invitee_id=invitee_id)
@@ -1380,6 +1524,8 @@ def evaluate_evidence(db, evidence: dict, *, control: dict, now_utc: datetime) -
     # Workers can hold an earlier snapshot while another extractor observes a
     # correction. Re-read the canonical row before making any award decision.
     evidence = db[EVIDENCE_COLLECTION].find_one({"_id": evidence["_id"]}) or evidence
+    if evidence.get("source_row_ids") and _code_from_source_rows(db, evidence, control.get("source_config")) is None:
+        return _finalize(db, evidence, EV_REVIEW, "source_row_unavailable", now_utc=now_utc)
     a = assess_evidence(evidence, control=control, now_utc=now_utc, lookup=DbLookup(db))
     extra = {k: a[k] for k in ("invitee_id", "inviter_id") if a.get(k) is not None}
     if a["status"] == EV_INVITEE_ALREADY_QUALIFIED:
@@ -1539,7 +1685,8 @@ def process_pending_evidence(db, *, now_utc: datetime, control: dict | None = No
     config = (control or {}).get("source_config") or {}
     spec = source_spec(config)
     if db[spec["batches"]].find_one({**committed_batch_filter(config),
-                                   "welcome_evidence_extracted_at": {"$exists": False}}, {"_id": 1}):
+                                   "$or": [{"welcome_v2_evidence_rule_version": {"$ne": RULE_VERSION}},
+                                           {"welcome_v2_evidence_extracted_at": {"$exists": False}}]}, {"_id": 1}):
         out["skipped"] = "source_extraction_incomplete"
         return out
     if source_name(config) == SOURCE_DATABOT_UIM:
@@ -1547,11 +1694,21 @@ def process_pending_evidence(db, *, now_utc: datetime, control: dict | None = No
         if not health["ok"]:
             out["skipped"] = "source_evidence_incomplete"
             return out
+        coverage = parse_redeemed_at(health["sync"].get("coverage_end"), "Asia/Kuala_Lumpur")
+        control = {**control, "source_coverage_end_utc": coverage}
+        sync_at = parse_redeemed_at(health["sync"].get("last_success_at"), "UTC")
+        if sync_at:
+            for held in db[EVIDENCE_COLLECTION].find(
+                {"rule_version": RULE_VERSION, "status": EV_REVIEW,
+                 "source_conflict_at": {"$exists": False}, "processed_at": {"$lt": sync_at}}
+            ).limit(int(batch_limit)):
+                requeue_evidence(db, evidence_id=held["_id"], now_utc=now_utc, config=config)
     col = db[EVIDENCE_COLLECTION]
     for _ in range(int(batch_limit)):
         evidence = col.find_one_and_update(
             {
                 "status": EV_RECEIVED,
+                "rule_version": RULE_VERSION,
                 "$or": [{"lease_until": {"$exists": False}}, {"lease_until": {"$lt": now_utc}}],
             },
             {"$set": {"lease_until": now_utc + EVIDENCE_LEASE}, "$inc": {"attempts": 1}},
@@ -1693,11 +1850,15 @@ def void_upload_batch(db, *, upload_batch_id: str, reason: str, now_utc: datetim
 def _code_from_source_rows(db, evidence: dict, config: dict | None) -> str | None:
     """The raw code for an evidence row, re-read from its committed source
     row (evidence itself stores only a hash). Verified against that hash."""
-    code_col = _norm_column((config or {}).get("code_column"))
+    code_col = "coupon_code" if evidence.get("source") == SOURCE_DATABOT_UIM else _norm_column((config or {}).get("code_column"))
     rows_col = SOURCE_SPECS.get(evidence.get("source") or SOURCE_MARKETING, SOURCE_SPECS[SOURCE_MARKETING])["rows"]
     for row_id in evidence.get("source_row_ids") or []:
         row = db[rows_col].find_one({"_id": row_id})
         if not row:
+            continue
+        spec = SOURCE_SPECS.get(evidence.get("source") or SOURCE_MARKETING, SOURCE_SPECS[SOURCE_MARKETING])
+        if not db[spec["batches"]].find_one({**committed_batch_filter(config),
+                                            spec["batch_key"]: row.get(spec["batch_key"])}):
             continue
         code = normalize_code({_norm_column(k): v for k, v in row.items()}.get(code_col))
         if code and code_hash(code) == evidence.get("code_hash"):
@@ -1723,14 +1884,14 @@ def requeue_evidence(db, *, evidence_id, now_utc: datetime, config: dict | None 
     res = db[EVIDENCE_COLLECTION].update_one(
         {"_id": evidence_id, "status": {"$in": [EV_REVIEW, EV_REJECTED]}},
         {"$set": {"status": EV_RECEIVED, "requeued_at": now_utc, "updated_at": now_utc,
-                  "recipient_resolution": resolve_welcome_recipient(db, code)},
+                  "recipient_resolution": resolve_welcome_recipient(db, code), "attempts": 0},
          "$unset": {"lease_until": "", "reason": ""}},
     )
     return bool(getattr(res, "modified_count", 0))
 
 
 def consistency_report(db, *, now_utc: datetime) -> dict:
-    """Registry <-> qualified_events consistency for v1 (read-only)."""
+    """Registry <-> qualified_events consistency for v2 (read-only)."""
     report = {
         "v1_events_without_committed_registry": 0,
         "committed_registry_without_event": 0,

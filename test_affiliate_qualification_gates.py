@@ -16,19 +16,19 @@ from test_uim_redemption_sync import DATABOT_CONFIG, FakeFeed, disabled_world, s
 
 
 @pytest.mark.parametrize('flag,amount,status,reason', [
-    ('1', '10', aq.ELIGIBLE, None), (1, 10, aq.ELIGIBLE, None),
-    ('1', '9.99', aq.EV_REJECTED, 'seven_day_turnover_does_not_exceed_9_99'),
-    ('1', '9.98', aq.EV_REJECTED, 'seven_day_turnover_does_not_exceed_9_99'),
+    ('1', '80', aq.ELIGIBLE, None), (1, 80, aq.ELIGIBLE, None),
+    ('1', '9.99', aq.EV_REJECTED, 'seven_day_turnover_below_80'),
+    ('1', '9.98', aq.EV_REJECTED, 'seven_day_turnover_below_80'),
     ('0', '100000', aq.EV_REJECTED, 'not_a_new_coupon_player'),
     (0, '100000', aq.EV_REJECTED, 'not_a_new_coupon_player'),
     (False, '100000', aq.EV_REJECTED, 'not_a_new_coupon_player'),
     ('False', '100000', aq.EV_REJECTED, 'not_a_new_coupon_player'),
     ('false', '100000', aq.EV_REJECTED, 'not_a_new_coupon_player'),
-    ('1', '9.9900000000000000000000001', aq.ELIGIBLE, None),
-    ('1', '9.9899999999999999999999999', aq.EV_REJECTED, 'seven_day_turnover_does_not_exceed_9_99'),
-    ('1', Decimal('1E1'), aq.ELIGIBLE, None),
+    ('1', '80.0000000000000000000000001', aq.ELIGIBLE, None),
+    ('1', '79.9999999999999999999999999', aq.EV_REJECTED, 'seven_day_turnover_below_80'),
+    ('1', Decimal('8E1'), aq.ELIGIBLE, None),
     *[(flag, '10', aq.EV_REVIEW, 'missing_or_invalid_qualification_fields')
-      for flag in (None, '', 'yes', 'true', True, '1.0', 2, {}, [])],
+      for flag in (None, '', 'yes', '1.0', 2, {}, [])],
     *[('1', amount, aq.EV_REVIEW, 'missing_or_invalid_qualification_fields')
       for amount in (None, '', True, False, 'NaN', 'Infinity', '-1', float('nan'),
                      float('inf'), '1_000', '$10', '1,000', {}, [])],
@@ -57,9 +57,9 @@ def databot_world(*, fields=None, db=None):
 
 
 @pytest.mark.parametrize('fields,status,reason', [
-    ({'coupon_new_player': '1', 'after_total_bet_amount': '10'}, aq.EV_QUALIFIED, None),
-    ({'after_total_bet_amount': '9.99'}, aq.EV_REJECTED, 'seven_day_turnover_does_not_exceed_9_99'),
-    ({'after_total_bet_amount': '9.98'}, aq.EV_REJECTED, 'seven_day_turnover_does_not_exceed_9_99'),
+    ({'coupon_new_player': '1', 'after_total_bet_amount': '80'}, aq.EV_QUALIFIED, None),
+    ({'after_total_bet_amount': '9.99'}, aq.EV_REJECTED, 'seven_day_turnover_below_80'),
+    ({'after_total_bet_amount': '9.98'}, aq.EV_REJECTED, 'seven_day_turnover_below_80'),
     ({'coupon_new_player': '0', 'after_total_bet_amount': '100'}, aq.EV_REJECTED, 'not_a_new_coupon_player'),
     ({'coupon_new_player': False, 'after_total_bet_amount': '100'}, aq.EV_REJECTED, 'not_a_new_coupon_player'),
     ({'coupon_new_player': None, 'is_new_player': 1}, aq.EV_REVIEW, 'missing_or_invalid_qualification_fields'),
@@ -104,7 +104,7 @@ def test_newest_authoritative_report_replaces_stale_pass_and_replay_cannot_resto
     aq.extract_marketing_batch(w.db, upload_batch_id=first, config=DATABOT_CONFIG, now_utc=NOW)
     assert w.db[aq.EVIDENCE_COLLECTION].find_one()['qualification_fields']['after_total_bet_amount'] == '9.98'
     aq.process_pending_evidence(w.db, now_utc=NOW)
-    assert w.db[aq.EVIDENCE_COLLECTION].find_one()['reason'] == 'seven_day_turnover_does_not_exceed_9_99'
+    assert w.db[aq.EVIDENCE_COLLECTION].find_one()['reason'] == 'seven_day_turnover_below_80'
     assert w.db[aq.REGISTRY_COLLECTION].count_documents({}) == 0
 
 
@@ -226,7 +226,7 @@ def test_stale_worker_snapshot_uses_newest_gate_values():
     sync(w, feed)
     aq.extract_committed_batches(w.db, config=DATABOT_CONFIG, now_utc=NOW)
     result = aq.evaluate_evidence(w.db, stale, control=aq.get_control(w.db), now_utc=NOW)
-    assert result['reason'] == 'seven_day_turnover_does_not_exceed_9_99'
+    assert result['reason'] == 'seven_day_turnover_below_80'
     assert w.db.qualified_events.count_documents({}) == 0
 
 
