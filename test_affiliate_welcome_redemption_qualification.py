@@ -61,7 +61,7 @@ class World:
         db.affiliate_ledger.create_index([("dedup_key", 1)], unique=True)
         db.voucher_pools.create_index([("pool_id", 1), ("code", 1)], unique=True)
         referral_invitee_lock.ensure_indexes(db)
-        control = {"_id": aq.CONTROL_ID, "mode": mode, "source_config": dict(SOURCE_CONFIG),
+        control = {"_id": aq.CONTROL_ID, "mode": mode, "rule_version": aq.RULE_VERSION, "source_config": dict(SOURCE_CONFIG),
                    "seed_completed_at": CUTOFF, "seeded_identity_config": aq.identity_config(SOURCE_CONFIG)}
         if cutoff is not None:
             control["launch_cutoff_utc"] = cutoff
@@ -106,7 +106,7 @@ class World:
     @staticmethod
     def row(code, account, at, status="success"):
         return {"coupon_code": code, "account": account, "coupon_redeem_time": kl_text(at), "redeem_status": status,
-                "coupon_new_player": "1", "after_total_bet_amount": "10"}
+                "coupon_new_player": "1", "after_total_bet_amount": "80"}
 
     def qualified(self, **filt):
         return list(self.db.qualified_events.find(filt))
@@ -331,7 +331,7 @@ def test_reimport_is_idempotent(monkeypatch):
     w.welcome_code(62, "WELC62")
     batch = w.upload([w.row("WELC62", "acctI", datetime(2026, 10, 5, tzinfo=timezone.utc))])
     run(w, monkeypatch)
-    w.db.marketing_upload_batches.update_one({"upload_batch_id": batch}, {"$unset": {"welcome_evidence_extracted_at": ""}})
+    w.db.marketing_upload_batches.update_one({"upload_batch_id": batch}, {"$unset": {"welcome_v2_evidence_extracted_at": ""}})
     run(w, monkeypatch)
     assert w.db[aq.EVIDENCE_COLLECTION].count_documents({}) == 1
     assert w.db.qualified_events.count_documents({}) == 1
@@ -345,7 +345,7 @@ def test_reimport_is_idempotent(monkeypatch):
         ("unknown_code", ("not_recorded", "unknown_code")),
         ("non_welcome_code", ("not_recorded", "non_welcome_code")),
         ("failed_redemption", (aq.EV_REJECTED, "redemption_not_successful")),
-        ("missing_account", (aq.EV_REJECTED, "missing_account")),
+        ("missing_account", (aq.EV_REVIEW, "missing_account")),
         ("ambiguous_recipient", (aq.EV_REVIEW, "ambiguous_recipient")),
         ("missing_inviter", (aq.EV_REJECTED, "no_referral_attribution")),
         ("self_referral", (aq.EV_REJECTED, "self_referral")),
@@ -386,7 +386,7 @@ def test_missing_ambiguous_or_self_referral_evidence_never_qualifies(monkeypatch
     if expected[0] == "not_recorded":
         # Non-Welcome coupon rows are rejected at extraction and only counted.
         assert ev_status(w) == []
-        assert w.db.marketing_upload_batches.find_one()["welcome_evidence_summary"][expected[1]] == 1
+        assert w.db.marketing_upload_batches.find_one()["welcome_v2_evidence_summary"][expected[1]] == 1
     else:
         assert ev_status(w) == [expected]
     assert w.qualified() == []
@@ -462,7 +462,7 @@ def test_migration_seeds_history_then_credited_account_cannot_requalify(monkeypa
     # Activate only this isolated fixture for the lifetime-dedupe regression.
     w.db[aq.CONTROL_COLLECTION].update_one({"_id": aq.CONTROL_ID},
         {"$set": {"mode": aq.MODE_ACTIVE, "launch_cutoff_utc": CUTOFF}})
-    w.db.marketing_upload_batches.update_many({}, {"$set": {"welcome_evidence_extracted_at": NOW}})
+    w.db.marketing_upload_batches.update_many({}, {"$set": {"welcome_v2_evidence_extracted_at": NOW}})
     w.join(9, 84)
     w.welcome_code(84, "WELC84")
     w.upload([w.row("WELC84", "acctH", datetime(2026, 10, 7, tzinfo=timezone.utc))])
@@ -701,7 +701,7 @@ def test_large_upload_is_extracted_in_budgeted_resumable_slices():
     assert [p["rows"] for p in progress] == [3, 3, 1]
     assert [p["batches_completed"] for p in progress] == [0, 0, 1]
     batch = w.db.marketing_upload_batches.find_one()
-    assert batch["welcome_evidence_summary"]["recorded"] == 7 and batch.get("welcome_evidence_extracted_at")
+    assert batch["welcome_v2_evidence_summary"]["recorded"] == 7 and batch.get("welcome_v2_evidence_extracted_at")
     assert w.db[aq.EVIDENCE_COLLECTION].count_documents({}) == 7
     assert aq.extract_committed_batches(w.db, config=SOURCE_CONFIG, now_utc=NOW)["rows"] == 0
 

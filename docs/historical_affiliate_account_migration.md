@@ -1,5 +1,7 @@
 # Historical affiliate Account ID migration review
 
+> Current prospective rollout: see [Forward-only affiliate qualification v2](affiliate_forward_only_rollout.md) for the >=80 rule, explicit revision transition, pending policy, coverage acknowledgement and activation safeguards. Earlier v1 thresholds and rollout descriptions below are historical.
+
 Review only. Do not merge/deploy, run production writes, activate qualification,
 reset cursors, replay data, apply migrations or alter earned rewards without
 separate authorization. Default CLI behavior remains read-only dry-run.

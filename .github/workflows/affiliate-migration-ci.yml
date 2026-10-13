@@ -89,6 +89,7 @@ env:
     test_uim_redemption_sync.py
     test_affiliate_qualification_rollout_guards.py
     test_affiliate_qualification_gates.py
+    test_affiliate_forward_only_rollout.py
     test_historical_affiliate_account_migration.py
     test_xp.py
     test_xp_startup.py

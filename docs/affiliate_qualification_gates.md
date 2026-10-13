@@ -1,5 +1,7 @@
 # Affiliate qualification gates: review package
 
+> Current prospective rollout: see [Forward-only affiliate qualification v2](affiliate_forward_only_rollout.md) for the >=80 rule, explicit revision transition, pending policy, coverage acknowledgement and activation safeguards. Earlier v1 thresholds and rollout descriptions below are historical.
+
 **Not activated. No merge, deployment, production write, migration, requeue or cursor reset is authorized by this patch.** Both repositories deploy on main changes; merge requires separate authorization.
 
 ## Audit and confirmed contract

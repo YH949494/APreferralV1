@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Operate the welcome_redemption_v1 affiliate qualification rule.
+"""Operate welcome_redemption_v2 using the original v1 control identity.
 
 DRY RUN BY DEFAULT. Every state-changing subcommand prints what it would do
 and writes nothing unless ``--commit`` is given. ``status`` and ``preflight``
@@ -74,7 +74,10 @@ def _parse_cutoff(text: str) -> datetime:
 def _public_control(control: dict | None) -> dict | None:
     if not control:
         return None
-    return {k: v for k, v in control.items() if k != "_id"}
+    result = {k: v for k, v in control.items() if k != "_id"}
+    if isinstance(result.get("seed_summary"), dict):
+        result["seed_summary"] = {k: v for k, v in result["seed_summary"].items() if k != "seed_identity_fingerprints"}
+    return result
 
 
 def preflight_report(db, *, now_utc: datetime) -> dict:
@@ -89,6 +92,11 @@ def preflight_report(db, *, now_utc: datetime) -> dict:
         "identity_config_matches_seed": bool(control.get("seed_completed_at"))
         and control.get("seeded_identity_config") == aq.identity_config(control.get("source_config")),
         "consistency": aq.consistency_report(db, now_utc=now_utc),
+        "rule_revision_ready": control.get("rule_version") == aq.RULE_VERSION,
+        "legacy_writer_in_flight": bool(control.get("legacy_writer_token")),
+        "cancellation_repair_pending": bool(control.get("cancelled_cohort_cutoff")),
+        "v1_qualified_events": db.qualified_events.count_documents({"rule_version": aq.LEGACY_RULE_VERSION}),
+        "pending_maturity": aq.pending_maturity_report(db, config=control.get("source_config"), now_utc=now_utc),
     }
     report["ok"] = bool(
         report["indexes"]["ok"]
@@ -97,6 +105,10 @@ def preflight_report(db, *, now_utc: datetime) -> dict:
         and report["migration_completion"]["ok"]
         and report["identity_config_matches_seed"]
         and report["consistency"]["ok"]
+        and report["rule_revision_ready"]
+        and not report["legacy_writer_in_flight"]
+        and not report["cancellation_repair_pending"]
+        and report["v1_qualified_events"] == 0
     )
     return report
 
@@ -119,7 +131,9 @@ def status_report(db, *, now_utc: datetime) -> dict:
         "new_rule_active": aq.new_rule_active(control, now_utc),
         "evidence_by_status_reason": evidence,
         "registry_by_state": registry,
-        "v1_qualified_events": db.qualified_events.count_documents({"rule_version": aq.RULE_VERSION}),
+        "v1_qualified_events": db.qualified_events.count_documents({"rule_version": aq.LEGACY_RULE_VERSION}),
+        "v2_qualified_events": db.qualified_events.count_documents({"rule_version": aq.RULE_VERSION}),
+        "history_limitation": control.get("history_limitation") if control else None,
         "preflight": preflight_report(db, now_utc=now_utc),
     }
 
@@ -138,6 +152,11 @@ def main(argv=None, *, db_factory=None, read_only_db_factory=None, now_fn=_now) 
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("status")
     sub.add_parser("preflight")
+    sub.add_parser("activation-preview", help="read-only preview of all active pending/manual referrals")
+    upgrade = sub.add_parser("upgrade-rule", help="CAS transition the existing disabled/unlaunched switch to v2")
+    release = sub.add_parser("release-legacy-writer", help="recover a crashed legacy barrier after stopping its process")
+    release.add_argument("--token", required=True)
+    release.add_argument("--acknowledge-writer-stopped", action="store_true")
 
     cfg = sub.add_parser("configure-source")
     cfg.add_argument("--code-column", required=True)
@@ -175,6 +194,7 @@ def main(argv=None, *, db_factory=None, read_only_db_factory=None, now_fn=_now) 
 
     act = sub.add_parser("activate")
     act.add_argument("--cutoff", required=True, help="ISO-8601 with offset")
+    act.add_argument("--acknowledge-unknown-history", action="store_true")
     pause = sub.add_parser("pause")
     pause.add_argument("--reason", required=True)
     sub.add_parser("resume")
@@ -184,7 +204,7 @@ def main(argv=None, *, db_factory=None, read_only_db_factory=None, now_fn=_now) 
     vb = sub.add_parser("void-batch")
     vb.add_argument("--upload-batch-id", required=True)
     vb.add_argument("--reason", required=True)
-    for p in (cfg, dcfg, sync, act, pause, sub.choices["resume"], sub.choices["cancel-scheduled"], rq, vb):
+    for p in (cfg, dcfg, sync, act, upgrade, release, pause, sub.choices["resume"], sub.choices["cancel-scheduled"], rq, vb):
         p.add_argument("--commit", action="store_true", help="write (default: dry run)")
         p.add_argument("--operator", default=os.environ.get("USER") or "unknown")
     args = parser.parse_args(argv)
@@ -197,6 +217,13 @@ def main(argv=None, *, db_factory=None, read_only_db_factory=None, now_fn=_now) 
         print(json.dumps(uim_redemption_sync.sync_health(db, now_utc=now_utc), indent=2, default=str))
         return 0
 
+    if args.cmd == "activation-preview":
+        from affiliate_qualification_preview import build_preview
+        db = (read_only_db_factory or _read_only_db)()
+        report = build_preview(db, month=None, now_utc=now_utc)
+        print(json.dumps(report, indent=2, default=str))
+        return 0 if report["ok"] and not report["source"]["blocked"] else 1
+
     if args.cmd in ("status", "preflight"):
         db = (read_only_db_factory or _read_only_db)()
         report = status_report(db, now_utc=now_utc) if args.cmd == "status" else preflight_report(db, now_utc=now_utc)
@@ -207,6 +234,49 @@ def main(argv=None, *, db_factory=None, read_only_db_factory=None, now_fn=_now) 
     control = aq.get_control(db) or {}
     mode = control.get("mode") or aq.MODE_DISABLED
     cutoff = aq.launch_cutoff(control)
+
+    if args.cmd == "release-legacy-writer":
+        if not args.acknowledge_writer_stopped:
+            print("refused: requires --acknowledge-writer-stopped; never expire a live writer", file=sys.stderr)
+            return 2
+        if control.get("legacy_writer_token") != args.token:
+            print("refused: writer token changed or absent", file=sys.stderr)
+            return 2
+        if not args.commit:
+            print(json.dumps({"dry_run": True, "would_release_stopped_writer": args.token}))
+            return 0
+        result = db[aq.CONTROL_COLLECTION].update_one(
+            {"_id": aq.CONTROL_ID, "legacy_writer_token": args.token},
+            {"$unset": {"legacy_writer_token": "", "legacy_writer_started_at": ""},
+             "$push": {"legacy_writer_recoveries": {"token": args.token, "operator": args.operator, "at": now_utc}}})
+        print(json.dumps({"released": bool(result.modified_count)}))
+        return 0 if result.modified_count else 2
+
+    if args.cmd == "upgrade-rule":
+        if (control.get("mode") != aq.MODE_DISABLED or "launch_cutoff_utc" in control or control.get("legacy_writer_token")
+                or control.get("migration_lease_token")
+                or db.qualified_events.count_documents({"rule_version": aq.LEGACY_RULE_VERSION})):
+            print("refused: transition requires disabled, unlaunched, zero v1 qualifications and no in-flight writer/migration", file=sys.stderr)
+            return 2
+        if control.get("rule_version") == aq.RULE_VERSION:
+            print(json.dumps({"already_current": True, "rule_version": aq.RULE_VERSION}))
+            return 0
+        if not control:
+            print("refused: configure an authoritative source first", file=sys.stderr)
+            return 2
+        update = {"$set": {"rule_version": aq.RULE_VERSION,
+                            "qualification_gate_version": aq.QUALIFICATION_GATE_VERSION, "updated_at": now_utc},
+                  "$push": {"rule_revision_transitions": {"from": control.get("rule_version", aq.LEGACY_RULE_VERSION),
+                            "to": aq.RULE_VERSION, "at": now_utc, "operator": args.operator}}}
+        if not args.commit:
+            print(json.dumps({"dry_run": True, "would_update": update}, default=str))
+            return 0
+        result = db[aq.CONTROL_COLLECTION].update_one(
+            {"_id": aq.CONTROL_ID, "mode": aq.MODE_DISABLED, "launch_cutoff_utc": {"$exists": False},
+             "rule_version": control.get("rule_version"), "source_config": control.get("source_config"),
+             "legacy_writer_token": {"$exists": False}, "migration_lease_token": {"$exists": False}}, update)
+        print(json.dumps({"transitioned": bool(result.modified_count), "rule_version": aq.RULE_VERSION}))
+        return 0 if result.modified_count else 2
 
     if args.cmd == "configure-source":
         if mode == aq.MODE_ACTIVE:
@@ -315,18 +385,44 @@ def main(argv=None, *, db_factory=None, read_only_db_factory=None, now_fn=_now) 
         if args.cmd == "resume":
             return _apply(db, args, {"$set": {"mode": aq.MODE_ACTIVE, "resumed_at": now_utc,
                                               "resumed_by": args.operator, "updated_at": now_utc}})
+        if mode != aq.MODE_DISABLED:
+            print("refused: activation requires disabled mode", file=sys.stderr)
+            return 2
+        if control.get("history_policy") == aq.HISTORY_FORWARD and not args.acknowledge_unknown_history:
+            print("refused: forward-only activation requires --acknowledge-unknown-history", file=sys.stderr)
+            return 2
         try:
             new_cutoff = _parse_cutoff(args.cutoff)
         except ValueError as exc:
             print(f"refused: {exc}", file=sys.stderr)
             return 2
-        if new_cutoff < now_utc - timedelta(minutes=1):
+        if new_cutoff < now_utc:
             print("refused: cutoff is in the past; legacy awards already made after it would contradict it",
                   file=sys.stderr)
             return 2
-        return _apply(db, args, {"$set": {"mode": aq.MODE_ACTIVE, "launch_cutoff_utc": new_cutoff,
-                                          "rule_version": aq.RULE_VERSION, "activated_at": now_utc,
-                                          "activated_by": args.operator, "updated_at": now_utc}})
+        # Close admission and persist the immutable cutoff in ONE write. For
+        # scheduled launch this conservatively parks legacy rows immediately;
+        # no admitted writer can straddle the future cutoff.
+        update = {"$set": {"mode": aq.MODE_ACTIVE, "launch_cutoff_utc": new_cutoff,
+                            "legacy_admission_closed": True, "pending_cohort_policy": "all_active_pending_manual",
+                            "rule_version": aq.RULE_VERSION, "activated_at": now_utc,
+                            "activated_by": args.operator, "updated_at": now_utc}}
+        if not args.commit:
+            print(json.dumps({"dry_run": True, "would_update": update, "preflight": report}, default=str))
+            return 0
+        result = db[aq.CONTROL_COLLECTION].update_one(
+            {"_id": aq.CONTROL_ID, "mode": aq.MODE_DISABLED, "rule_version": aq.RULE_VERSION,
+             "launch_cutoff_utc": {"$exists": False}, "legacy_writer_token": {"$exists": False},
+             "migration_lease_token": {"$exists": False}, "source_config": control.get("source_config"),
+             "cancelled_cohort_cutoff": {"$exists": False},
+             "seed_summary": control.get("seed_summary"), "seed_completed_at": control.get("seed_completed_at"),
+             "history_policy": control.get("history_policy")}, update)
+        if not result.modified_count:
+            print("refused: control changed or writer/migration in flight; rerun preflight", file=sys.stderr)
+            return 2
+        marked = aq.mark_activation_cohort(db, control=aq.get_control(db), now_utc=now_utc)
+        print(json.dumps({"committed": True, "pending_marked": marked, "control": _public_control(aq.get_control(db))}, default=str))
+        return 0
 
     if args.cmd == "pause":
         if cutoff is None:
@@ -342,8 +438,27 @@ def main(argv=None, *, db_factory=None, read_only_db_factory=None, now_fn=_now) 
         if db.qualified_events.count_documents({"rule_version": aq.RULE_VERSION}):
             print("refused: v1 qualifications already exist", file=sys.stderr)
             return 2
-        return _apply(db, args, {"$set": {"mode": aq.MODE_DISABLED, "updated_at": now_utc},
-                                 "$unset": {"launch_cutoff_utc": ""}})
+        if not args.commit:
+            print(json.dumps({"dry_run": True, "would_cancel_cutoff": cutoff.isoformat()}))
+            return 0
+        with aq.cohort_writer_guard(db, cutoff=cutoff, now_utc=now_utc) as token:
+            if token is None:
+                print("refused: cohort/control writer in flight or cutoff changed; retry", file=sys.stderr)
+                return 2
+            result = db[aq.CONTROL_COLLECTION].update_one(
+                {"_id": aq.CONTROL_ID, "launch_cutoff_utc": cutoff, "legacy_writer_token": token,
+                 "$and": [{"launch_cutoff_utc": {"$gt": now_fn()}}]},
+                {"$set": {"mode": aq.MODE_DISABLED, "updated_at": now_utc,
+                          "cancelled_cohort_cutoff": cutoff},
+                 "$unset": {"launch_cutoff_utc": "", "legacy_admission_closed": ""}})
+            if not result.modified_count:
+                return 2
+            aq.restore_activation_cohort(db, cutoff=cutoff)
+            db[aq.CONTROL_COLLECTION].update_one(
+                {"_id": aq.CONTROL_ID, "legacy_writer_token": token, "cancelled_cohort_cutoff": cutoff},
+                {"$unset": {"cancelled_cohort_cutoff": ""}})
+        print(json.dumps({"cancelled": True}))
+        return 0
 
     if args.cmd == "requeue":
         from bson import ObjectId

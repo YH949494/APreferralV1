@@ -15,6 +15,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 import requests
+import mongomock
 from pymongo import ReturnDocument
 
 import scheduler
@@ -132,6 +133,10 @@ class _FakeSchedulerDB:
         self.users = _UsersCollection(user_docs)
         self.referral_award_events = _AwardEvents()
         self.referral_events = _ReferralEvents()
+        self.affiliate_qualification_control = mongomock.MongoClient().db.affiliate_qualification_control
+
+    def __getitem__(self, name):
+        return getattr(self, name)
 
 
 class _FakeResponse:

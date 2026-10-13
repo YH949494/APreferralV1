@@ -42,6 +42,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -56,8 +57,15 @@ from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError  # noqa: E402
 
 SAMPLE_LIMIT = 20
-PLANNER_VERSION = "historical_account_coverage_v2"
+PLANNER_VERSION = "historical_account_coverage_v3"
 BULK_SIZE = 500
+
+
+def _seed_identity_fingerprint(row):
+    # Audit seeded coverage without exposing raw account or invitee IDs in
+    # admin output. Additional discoveries after launch do not invalidate it.
+    return hashlib.sha256(json.dumps([row.get("account_key"), row.get("invitee_id"),
+                                      str(row.get("qualified_event_id"))]).encode()).hexdigest()
 
 
 def _write_db():
@@ -277,7 +285,10 @@ def _source_coverage(db, config, latest, *, now_utc):
             "gap_end_utc": latest.isoformat() if gap else None}
 
 
-def build_plan(db, *, config: dict | None, seed_from_linkage: bool, now_utc: datetime | None = None) -> dict:
+def build_plan(db, *, config: dict | None, seed_from_linkage: bool, now_utc: datetime | None = None,
+               history_policy: str = aq.HISTORY_STRICT) -> dict:
+    if history_policy not in (aq.HISTORY_STRICT, aq.HISTORY_FORWARD):
+        raise ValueError("unsupported history policy")
     now_utc = aq._aware_utc(now_utc or datetime.now(timezone.utc))
     problems = aq.validate_source_config(config)
     welcome_codes = _welcome_codes(db)
@@ -301,7 +312,7 @@ def build_plan(db, *, config: dict | None, seed_from_linkage: bool, now_utc: dat
             else:
                 users[uid] = user
         for row in db[aq.REGISTRY_COLLECTION].find(
-            {"invitee_id": {"$in": chunk}, "rule_version": aq.RULE_VERSION,
+            {"invitee_id": {"$in": chunk},
              "state": {"$in": [aq.REG_SEEDED, aq.REG_CREDITED_LEGACY]}},
             {"invitee_id": 1, "qualified_event_id": 1, "account_key": 1}):
             registry[int(row["invitee_id"])].append(row)
@@ -433,8 +444,15 @@ def build_plan(db, *, config: dict | None, seed_from_linkage: bool, now_utc: dat
     blockers = list(problems) + list(coverage["problems"])
     if unresolved:
         blockers.append("unresolved_historical_identities")
+    if history_policy == aq.HISTORY_FORWARD:
+        # These gaps are explicitly accepted, never reported as full coverage.
+        # Feed health, malformed config and invalid future coverage still block.
+        blockers = [b for b in blockers if b not in {
+            "unresolved_historical_identities", "source_coverage_unknown", "source_coverage_older_than_history"}]
     return {
         "planner_version": PLANNER_VERSION,
+        "history_policy": history_policy,
+        "history_limitation": aq.HISTORY_LIMITATION if history_policy == aq.HISTORY_FORWARD else None,
         "historical_events": len(historical), "unresolved_events": unresolved,
         "historical_invitees": len(uids),
         "resolved_invitees": len({int(q["invitee_id"]) for _, q, _ in resolved}),
@@ -469,16 +487,20 @@ def apply_seeds(db, seeds: list[dict], *, now_utc: datetime) -> dict:
     return out
 
 
-def run(db, *, apply: bool, seed_from_linkage: bool, now_utc: datetime) -> dict:
+def run(db, *, apply: bool, seed_from_linkage: bool, now_utc: datetime,
+        history_policy: str = aq.HISTORY_STRICT, acknowledge_unknown_history: bool = False) -> dict:
     control = aq.get_control(db) or {}
     report = {"apply": apply, "now_utc": now_utc.isoformat(), "history_before": history_snapshot(db, as_of=now_utc)}
     report["indexes_before"] = aq.index_readiness(db)
-    plan = build_plan(db, config=control.get("source_config"), seed_from_linkage=seed_from_linkage, now_utc=now_utc)
+    plan = build_plan(db, config=control.get("source_config"), seed_from_linkage=seed_from_linkage,
+                      now_utc=now_utc, history_policy=history_policy)
     seeds = plan.pop("_seeds")
     report["plan"], report["seed_marker_written"] = plan, False
     token = None
     if apply:
         blockers = list(plan["apply_blockers"])
+        if history_policy == aq.HISTORY_FORWARD and not acknowledge_unknown_history:
+            blockers.append("forward_only_requires_unknown_history_acknowledgement")
         if control.get("mode", aq.MODE_DISABLED) != aq.MODE_DISABLED or aq.launch_cutoff(control) is not None:
             blockers.append("migration_requires_disabled_unlaunched_rule")
         if (control.get("seeded_identity_config") and
@@ -510,21 +532,33 @@ def run(db, *, apply: bool, seed_from_linkage: bool, now_utc: datetime) -> dict:
                 and report["consistency"]["ok"]):
             # Re-plan before marking complete: the identity sources may have
             # changed during seeding. A crash or race leaves no completion marker.
-            final = build_plan(db, config=control.get("source_config"), seed_from_linkage=seed_from_linkage, now_utc=now_utc)
+            final = build_plan(db, config=control.get("source_config"), seed_from_linkage=seed_from_linkage,
+                               now_utc=now_utc, history_policy=history_policy)
             def ownership_plan(rows):
                 return sorted((r["account_key"], r["invitee_id"], str(r["qualified_event_id"]),
                                r["historical_qualification_count"]) for r in rows)
-            if (final["apply_safe"] and ownership_plan(final["_seeds"]) == ownership_plan(seeds)
+            if (final["apply_safe"] and final["historical_events"] == plan["historical_events"]
+                    and final["unresolved_events"] == plan["unresolved_events"]
+                    and final["source_coverage"] == plan["source_coverage"]
+                    and ownership_plan(final["_seeds"]) == ownership_plan(seeds)
                     and not report["seed_result"]["held_by_other"]):
                 result = db[aq.CONTROL_COLLECTION].update_one(
                     {"_id": aq.CONTROL_ID, "migration_lease_token": token,
                      "migration_lease_until": {"$gt": datetime.now(timezone.utc)},
                      "mode": aq.MODE_DISABLED, "launch_cutoff_utc": {"$exists": False},
+                     "legacy_writer_token": {"$exists": False},
                      "source_config": control.get("source_config")},
                     {"$set": {"seed_completed_at": now_utc,
                               "seeded_identity_config": aq.identity_config(control.get("source_config")),
+                              "history_policy": history_policy,
+                              "unknown_history_acknowledged_at": now_utc if acknowledge_unknown_history else None,
+                              "history_limitation": aq.HISTORY_LIMITATION if history_policy == aq.HISTORY_FORWARD else None,
                               "seed_summary": {"planner_version": PLANNER_VERSION, "counts": plan["counts"],
-                                               "unresolved_events": 0, "historical_events": plan["historical_events"],
+                                               "history_policy": history_policy,
+                                               "unresolved_events": plan["unresolved_events"],
+                                               "accounts_seeded": len(seeds),
+                                               "seed_identity_fingerprints": sorted(_seed_identity_fingerprint(s) for s in seeds),
+                                               "historical_events": plan["historical_events"],
                                                "source_coverage": plan["source_coverage"],
                                                "historical_duplicate_accounts": plan["historical_duplicate_accounts"]},
                               "updated_at": now_utc}},
@@ -546,9 +580,22 @@ def completion_readiness(db, control):
     problems = []
     if summary.get("planner_version") != PLANNER_VERSION:
         problems.append("migration_summary_unverified")
-    if summary.get("unresolved_events") != 0 or not (summary.get("source_coverage") or {}).get("ok"):
+    policy = (control or {}).get("history_policy", aq.HISTORY_STRICT)
+    if policy == aq.HISTORY_FORWARD:
+        if (summary.get("history_policy") != policy or not control.get("unknown_history_acknowledged_at")
+                or control.get("history_limitation") != aq.HISTORY_LIMITATION):
+            problems.append("forward_only_policy_unacknowledged")
+    elif policy != aq.HISTORY_STRICT or summary.get("unresolved_events") != 0 or not (summary.get("source_coverage") or {}).get("ok"):
         problems.append("migration_coverage_unverified")
     query = {"rule_version": {"$ne": aq.RULE_VERSION}}
+    fingerprints = summary.get("seed_identity_fingerprints") or []
+    if len(fingerprints) != summary.get("accounts_seeded", 0):
+        problems.append("seeded_registry_manifest_unverified")
+    if fingerprints:
+        present = {_seed_identity_fingerprint(row) for row in db[aq.REGISTRY_COLLECTION].find(
+            {"state": {"$in": [aq.REG_SEEDED, aq.REG_CREDITED_LEGACY]}})}
+        if not set(fingerprints).issubset(present):
+            problems.append("seeded_registry_ownership_changed")
     count = db.qualified_events.count_documents(query)
     if summary.get("historical_events") != count:
         problems.append("historical_qualifications_changed_since_seed")
@@ -557,7 +604,9 @@ def completion_readiness(db, control):
     current = when.isoformat() if when else None
     if (count and when is None) or (summary.get("source_coverage") or {}).get("latest_historical_qualification_utc") != current:
         problems.append("historical_qualification_time_changed_since_seed")
-    return {"ok": not problems, "problems": sorted(set(problems))}
+    return {"ok": not problems, "problems": sorted(set(problems)), "history_policy": policy,
+            "unresolved_historical_events": summary.get("unresolved_events"),
+            "history_limitation": aq.HISTORY_LIMITATION if policy == aq.HISTORY_FORWARD else None}
 
 
 def main(argv=None, *, db_factory=None, read_only_db_factory=None) -> int:
@@ -565,11 +614,17 @@ def main(argv=None, *, db_factory=None, read_only_db_factory=None) -> int:
     parser.add_argument("--apply", action="store_true", help="create indexes, seed registry (default: dry run)")
     parser.add_argument("--seed-from-linkage", action="store_true",
                         help="also seed invitees with no redemption rows but exactly one verified linked account")
+    parser.add_argument("--history-policy", choices=[aq.HISTORY_STRICT, aq.HISTORY_FORWARD], default=aq.HISTORY_STRICT)
+    parser.add_argument("--acknowledge-unknown-history", action="store_true",
+                        help="explicitly accept that unknown historical Account IDs cannot be protected")
     parser.add_argument("--output", help="also write the JSON report to this path")
     args = parser.parse_args(argv)
+    if args.history_policy == aq.HISTORY_FORWARD and not args.acknowledge_unknown_history:
+        parser.error("known_history_plus_post_cutoff requires --acknowledge-unknown-history, including dry runs")
     try:
         db = (db_factory or _write_db)() if args.apply else (read_only_db_factory or _read_only_db)()
-        report = run(db, apply=args.apply, seed_from_linkage=args.seed_from_linkage, now_utc=datetime.now(timezone.utc))
+        report = run(db, apply=args.apply, seed_from_linkage=args.seed_from_linkage, now_utc=datetime.now(timezone.utc),
+                     history_policy=args.history_policy, acknowledge_unknown_history=args.acknowledge_unknown_history)
     except Exception as exc:
         # Mongo errors can contain duplicate key values (raw account/user ids).
         print(json.dumps({"apply": args.apply, "migration_failed": type(exc).__name__, "seed_marker_written": False}))

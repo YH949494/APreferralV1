@@ -59,7 +59,7 @@ def urow(code, account, wall, *, basis="naive_wallclock", observation="upsert", 
     export's GMT+8 wall clock; Databot stores naive digits as if UTC."""
     digits = datetime.strptime(wall, "%Y-%m-%d %H:%M:%S") if wall else None
     return {
-        "coupon_new_player": "1", "after_total_bet_amount": "10", "qualification_fields_version": 1,
+        "coupon_new_player": "1", "after_total_bet_amount": "80", "qualification_fields_version": 1,
         "observation": observation, "coupon_code": code, "account": account, "account_basis": account_basis,
         "file_type": file_type,
         "redeemed_at_utc": digits.replace(tzinfo=timezone.utc).isoformat() if digits else None,
@@ -460,7 +460,7 @@ def test_outage_shows_unavailable_or_stale_never_zero():
     sync(w, feed, now=later)
     out = preview(w.db, now=later)
     assert out["source"]["blocked"] is False
-    assert out["source"]["evidence_incomplete"] == ["evidence_sync_stale"]
+    assert out["source"]["evidence_incomplete"] == ["evidence_feed_last_attempt_failed", "evidence_sync_stale"]
     assert out["source"]["sync"]["stale"] is True and out["source"]["sync"]["last_error"].startswith("feed_http_503")
     assert out["totals"]["historical_would_qualify"] == 1  # last known evidence, flagged stale
     # Preflight (activation gate) refuses stale evidence.

@@ -293,6 +293,11 @@ def _sync_rows(db, fetch, *, now_utc: datetime, max_rows: int, out: dict) -> Non
                     "redeemed_at_wallclock", "redeemed_at_basis", "redeemed_at_raw", "redeemed_at_column",
                     "campaign", "source_period", "provenance", "provenance_version",
                 )}
+                if "seven_day_complete" in row:
+                    doc["seven_day_complete"] = row["seven_day_complete"]
+                # Distinguish an optional marker absent in the actual feed
+                # from an old local row whose sync code discarded it.
+                doc["seven_day_completeness_retained_version"] = 1
                 doc.update({"_id": row["ref"], "batch_id": batch["_id"], "synced_at": now_utc})
                 try:
                     db[ROWS_COLLECTION].insert_one(doc)
@@ -393,6 +398,8 @@ def sync_health(db, *, now_utc: datetime, stale_after: timedelta = DEFAULT_STALE
         for k, v in (b.get("counters") or {}).items():
             totals[k] = totals.get(k, 0) + int(v or 0)
     problems = []
+    if state.get("last_error") and last_failure is not None and (last_success is None or last_failure >= last_success):
+        problems.append("evidence_feed_last_attempt_failed")
     if last_success is None:
         problems.append("evidence_sync_never_succeeded")
     elif stale:
