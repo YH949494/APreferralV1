@@ -92,3 +92,41 @@ def test_real_forward_seed_manifest_detects_lost_registry_ownership(real_db):
     real_db[aq.REGISTRY_COLLECTION].delete_many({})  # disposable local fault injection
     assert "seeded_registry_ownership_changed" in migration.completion_readiness(real_db, control)["problems"]
     assert activate(w, "--acknowledge-unknown-history") == 2
+
+
+def test_real_old_completed_sync_cannot_lose_explicit_incomplete_marker(real_db, monkeypatch):
+    w, feed = databot_world(db=real_db, fields={"seven_day_complete": False})
+    real_db.uim_redemption_rows.update_many({}, {"$unset": {
+        "seven_day_complete": "", "seven_day_completeness_retained_version": ""}})
+    assert real_db.uim_redemption_batches.find_one()["rows_complete"]
+    sync(w, feed)
+    run(w, monkeypatch)
+    assert real_db[aq.EVIDENCE_COLLECTION].find_one()["status"] == aq.EV_REVIEW
+    assert real_db.qualified_events.count_documents({}) == real_db.xp_events.count_documents({}) == 0
+    assert preview.build_preview(real_db, month=None, now_utc=NOW)["activation_cohort"]["pass"] == 0
+
+
+def test_real_mark_and_cancel_are_serialized_and_stale_mark_is_refused(real_db, monkeypatch):
+    w = prepared_world(db=real_db)
+    assert activate(w, cutoff=NOW + timedelta(days=1)) == 0
+    w.join(900, 101, at=NOW, status="pending_channel")
+    stale = aq.get_control(real_db)
+    entered, release = threading.Event(), threading.Event()
+    original = aq._mark_activation_cohort
+    def delayed_mark(*args, **kwargs):
+        entered.set()
+        assert release.wait(timeout=10)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(aq, "_mark_activation_cohort", delayed_mark)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(aq.mark_activation_cohort, real_db, control=stale, now_utc=NOW)
+        assert entered.wait(timeout=10)
+        try:
+            assert admin.main(["cancel-scheduled", "--commit"], db_factory=lambda: real_db, now_fn=lambda: NOW) == 2
+        finally:
+            release.set()
+        assert future.result(timeout=10) == 1
+    monkeypatch.setattr(aq, "_mark_activation_cohort", original)
+    assert admin.main(["cancel-scheduled", "--commit"], db_factory=lambda: real_db, now_fn=lambda: NOW) == 0
+    assert aq.mark_activation_cohort(real_db, control=stale, now_utc=NOW) == 0
+    assert real_db.pending_referrals.find_one()["status"] == "pending_channel"

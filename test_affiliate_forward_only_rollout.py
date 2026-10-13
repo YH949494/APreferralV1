@@ -335,7 +335,7 @@ def test_cancel_before_future_cutoff_restores_prior_pending_statuses():
     assert activate(w, cutoff=NOW + timedelta(days=1)) == 0
     assert admin.main(["cancel-scheduled", "--commit"], db_factory=lambda: w.db, now_fn=lambda: NOW) == 0
     assert aq.legacy_award_allowed(aq.get_control(w.db), NOW)
-    assert {r["status"] for r in w.db.pending_referrals.find()} == set(aq.ACTIVE_PENDING_STATUSES)
+    assert {r["status"] for r in w.db.pending_referrals.find()} == set(aq.ACTIVE_PENDING_STATUSES) - {"processing"}
 
 
 def test_explicit_immature_source_report_retries_when_completed(monkeypatch):
@@ -391,3 +391,70 @@ def test_later_exact_account_identity_is_not_conflicted_by_prior_absence(monkeyp
     run(w, monkeypatch, now=NOW + timedelta(minutes=1))
     assert w.db.qualified_events.count_documents({}) == 1
     assert w.db.qualified_events.find_one()["account_key"] == "uim_global:000CaseID"
+
+
+@pytest.mark.parametrize("upstream_complete", [False, True])
+def test_already_synced_rows_with_discarded_completeness_remain_pending(upstream_complete, monkeypatch):
+    w, feed = databot_world(fields={"seven_day_complete": upstream_complete})
+    assert w.db.uim_redemption_batches.find_one()["rows_complete"]
+    # Simulate the deployed sync before it retained the optional feed marker.
+    w.db.uim_redemption_rows.update_many({}, {"$unset": {
+        "seven_day_complete": "", "seven_day_completeness_retained_version": ""}})
+    sync(w, feed)  # insert-only completed batches cannot recover the omission
+    assert "seven_day_complete" not in w.db.uim_redemption_rows.find_one()
+    previewed = preview.build_preview(w.db, month=None, now_utc=NOW)
+    assert previewed["activation_cohort"]["pass"] == 0
+    assert previewed["pending_maturity"]["unverified_completeness_synced_rows"] == 1
+    run(w, monkeypatch)
+    assert w.db[aq.EVIDENCE_COLLECTION].find_one()["status"] == aq.EV_REVIEW
+    assert w.db.qualified_events.count_documents({}) == w.db.xp_events.count_documents({}) == 0
+    assert w.db.referral_events.count_documents({}) == 0
+    feed.add_batch([{**urow("GATE11", "000CaseID", "2026-10-05 10:00:00"), "seven_day_complete": True}])
+    sync(w, feed, now=NOW + timedelta(minutes=1))
+    run(w, monkeypatch, now=NOW + timedelta(minutes=1))
+    assert w.db.qualified_events.count_documents({}) == 1
+
+
+def test_prepatch_cached_v2_evidence_without_completeness_is_not_eligible():
+    w, _ = databot_world()
+    aq.extract_committed_batches(w.db, config=DATABOT_CONFIG, now_utc=NOW)
+    ev = w.db[aq.EVIDENCE_COLLECTION].find_one()
+    ev["qualification_fields"].pop("seven_day_complete")
+    result = aq.assess_evidence(ev, control=aq.get_control(w.db), now_utc=NOW, lookup=aq.DbLookup(w.db))
+    assert result == {"status": aq.EV_REVIEW, "reason": "seven_day_completeness_unverified", "invitee_id": 11, "inviter_id": 1}
+
+
+def test_stale_mark_after_cancellation_cannot_repark_restored_rows():
+    w = prepared_world()
+    w.join(900, 101, at=CUTOFF, status="pending_channel")
+    assert activate(w, cutoff=NOW + timedelta(days=1)) == 0
+    stale = aq.get_control(w.db)
+    assert admin.main(["cancel-scheduled", "--commit"], db_factory=lambda: w.db, now_fn=lambda: NOW) == 0
+    assert aq.mark_activation_cohort(w.db, control=stale, now_utc=NOW) == 0
+    assert w.db.pending_referrals.find_one()["status"] == "pending_channel"
+
+
+def test_cancellation_refuses_while_marking_holds_control_barrier():
+    w = prepared_world()
+    assert activate(w, cutoff=NOW + timedelta(days=1)) == 0
+    with aq.cohort_writer_guard(w.db, cutoff=aq.launch_cutoff(aq.get_control(w.db)), now_utc=NOW) as token:
+        assert token
+        assert admin.main(["cancel-scheduled", "--commit"], db_factory=lambda: w.db, now_fn=lambda: NOW) == 2
+        assert aq.launch_cutoff(aq.get_control(w.db)) is not None
+
+
+def test_interrupted_cancellation_repairs_before_legacy_settlement(monkeypatch):
+    w = prepared_world()
+    w.join(900, 101, at=NOW, status="pending_channel")
+    assert activate(w, cutoff=NOW + timedelta(days=1)) == 0
+    original = aq.restore_activation_cohort
+    monkeypatch.setattr(aq, "restore_activation_cohort", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("crash")))
+    with pytest.raises(RuntimeError, match="crash"):
+        admin.main(["cancel-scheduled", "--commit"], db_factory=lambda: w.db, now_fn=lambda: NOW)
+    assert aq.get_control(w.db)["cancelled_cohort_cutoff"]
+    assert not admin.preflight_report(w.db, now_utc=NOW)["ok"]
+    monkeypatch.setattr(aq, "restore_activation_cohort", original)
+    monkeypatch.setattr(scheduler, "db", w.db)
+    scheduler.settle_pending_referrals()
+    assert w.db.pending_referrals.find_one()["status"] == "pending_channel"
+    assert "cancelled_cohort_cutoff" not in aq.get_control(w.db)

@@ -85,8 +85,15 @@ For a future scheduled cutoff, **legacy admission closes when activation is
 committed**, before the cutoff. Rows wait for v2 until cutoff. This conservative
 behavior prevents a previously admitted worker from straddling a future cutoff.
 Prefer immediate activation after quiescing legacy writers. Pre-cutoff
-`cancel-scheduled` restores captured pending statuses; after cutoff, rollback is
-pause-only and cannot reopen legacy awards.
+`cancel-scheduled` restores captured pending statuses; orphaned processing claims
+resume as pending because their old processing ownership was cleared. Marking
+and cancellation share the control writer barrier: a stale cutoff snapshot
+cannot repark restored rows, and overlapping cancellation refuses safely for
+retry. A persisted cancellation repair marker survives an interruption after
+cutoff removal. After stopped-writer recovery when necessary, legacy settlement
+repairs those rows under the barrier before scanning; activation refuses while
+repair is outstanding. After cutoff, rollback is pause-only and cannot reopen
+legacy awards.
 
 Pending marking is repeatable after the switch CAS. If marking crashes, the
 next scheduler pass repairs it. Validation reads active referrals directly, so
@@ -114,6 +121,17 @@ A later successful sync also retries nonconflicted held rows with available
 committed source rows. Removed observations, core success/time conflicts,
 in-flight decisions and earned corrections still require manual reconciliation.
 Earned effects are not automatically revoked. Preview retains persisted holds.
+
+New sync rows record `seven_day_completeness_retained_version=1`: this proves
+the sync code retained any optional `seven_day_complete` field supplied by the
+feed. Only then may absence in the actual feed use the owner-attested completed
+metric contract. Already-completed, insert-only synced batches are not silently
+rewritten or replayed. Older local rows missing both the field and retention
+proof remain pending, as do cached v2 evidence documents missing completeness.
+Preflight/preview report `unverified_completeness_synced_rows`. A later committed
+observation captured by the new sync can supply definitive evidence; any targeted
+refresh of an old immutable row needs separate source/provenance review and write
+authorization. Missing retained data is never guessed from turnover >=80.
 
 Last supplied production coverage, **not refreshed here**, is
 2026-10-02 15:19:03 GMT+8. Runtime preflight reports actual source coverage,

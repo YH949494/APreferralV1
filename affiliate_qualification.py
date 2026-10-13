@@ -252,7 +252,63 @@ def legacy_writer_guard(db, *, now_utc: datetime):
                            {"$unset": {"legacy_writer_token": "", "legacy_writer_started_at": ""}})
 
 
+@contextmanager
+def cohort_writer_guard(db, *, cutoff: datetime, now_utc: datetime):
+    """Use the same non-expiring control barrier for marking/cancellation.
+
+    Matching the current cutoff rejects a stale scheduler snapshot. Sharing
+    the legacy token also makes existing stopped-writer recovery applicable.
+    """
+    token = uuid.uuid4().hex
+    locked = db[CONTROL_COLLECTION].find_one_and_update(
+        {"_id": CONTROL_ID, "launch_cutoff_utc": cutoff,
+         "legacy_writer_token": {"$exists": False}},
+        {"$set": {"legacy_writer_token": token, "legacy_writer_started_at": now_utc}},
+        return_document=ReturnDocument.AFTER)
+    try:
+        yield token if locked is not None else None
+    finally:
+        if locked is not None:
+            db[CONTROL_COLLECTION].update_one(
+                {"_id": CONTROL_ID, "legacy_writer_token": token},
+                {"$unset": {"legacy_writer_token": "", "legacy_writer_started_at": ""}})
+
+
 def mark_activation_cohort(db, *, control: dict, now_utc: datetime) -> int:
+    cutoff = launch_cutoff(control)
+    if cutoff is None:
+        return 0
+    with cohort_writer_guard(db, cutoff=cutoff, now_utc=now_utc) as token:
+        if token is None:
+            return 0
+        return _mark_activation_cohort(db, control=control, now_utc=now_utc)
+
+
+def restore_activation_cohort(db, *, cutoff: datetime) -> None:
+    """Caller holds the control writer barrier, including after cancellation."""
+    for prior in ACTIVE_PENDING_STATUSES:
+        db.pending_referrals.update_many(
+            {"activation_cutoff_utc": cutoff, "activation_prior_status": prior,
+             "status": PENDING_AWAITING_REDEMPTION},
+            # Marking cleared processing ownership/timestamps. No admitted
+            # legacy writer remains, so resume an orphaned claim as pending.
+            {"$set": {"status": "pending" if prior == "processing" else prior}, "$unset": {"activation_cutoff_utc": "",
+                "activation_prior_status": "", "qualification_rule_version": "", "awaiting_redemption_since": ""}})
+
+
+def repair_cancelled_cohort(db) -> None:
+    """Under legacy_writer_guard, repair cancellation interrupted after CAS."""
+    control = get_control(db) or {}
+    if launch_cutoff(control) is not None or not control.get("cancelled_cohort_cutoff"):
+        return
+    cutoff = control["cancelled_cohort_cutoff"]
+    restore_activation_cohort(db, cutoff=cutoff)
+    db[CONTROL_COLLECTION].update_one(
+        {"_id": CONTROL_ID, "cancelled_cohort_cutoff": cutoff},
+        {"$unset": {"cancelled_cohort_cutoff": ""}})
+
+
+def _mark_activation_cohort(db, *, control: dict, now_utc: datetime) -> int:
     """Repeatable hand-off after the switch CAS; never rewrite awarded history.
 
     The switch itself closes legacy admission atomically. This marking may be
@@ -625,6 +681,9 @@ def pending_maturity_report(db, *, config: dict | None, now_utc: datetime) -> di
     query = {"status": {"$in": list(ACTIVE_PENDING_STATUSES)}}
     return {
         "active_pending_manual_rows": db.pending_referrals.count_documents(query),
+        "unverified_completeness_synced_rows": db.uim_redemption_rows.count_documents(
+            {"seven_day_complete": {"$exists": False}, "seven_day_completeness_retained_version": {"$ne": 1}})
+            if source_name(config) == SOURCE_DATABOT_UIM else None,
         "source_coverage_end_utc": end.isoformat() if end else None,
         "source_coverage_end_gmt8": end.astimezone(KL_TZ).isoformat() if end else None,
         "joined_after_available_coverage": db.pending_referrals.count_documents(
@@ -1051,7 +1110,9 @@ def _parse_databot_row(row: dict, cfg: dict) -> dict | None:
             "after_total_bet_amount": row.get("after_total_bet_amount"),
             "source_columns": row.get("qualification_source_columns"),
             "transport_version": row.get("qualification_fields_version"),
-            **({"seven_day_complete": row["seven_day_complete"]} if "seven_day_complete" in row else {}),
+            "seven_day_complete": (row.get("seven_day_complete") if "seven_day_complete" in row else
+                True if type(row.get("seven_day_completeness_retained_version")) is int
+                and row["seven_day_completeness_retained_version"] == 1 else None),
         },
         "evidence_basis": {
             "success": cfg.get("success_basis"),
@@ -1381,6 +1442,8 @@ def assess_qualification_fields(fields: dict | None, *, require_transport_versio
         # True, "1", 1.0 and missing/future versions are not that contract.
         if type(version) is not int or version != 1:
             return {"status": EV_REVIEW, "reason": "unsupported_qualification_transport_version"}
+        if "seven_day_complete" not in fields:
+            return {"status": EV_REVIEW, "reason": "seven_day_completeness_unverified"}
     if "seven_day_complete" in fields and fields["seven_day_complete"] is not True:
         return {"status": EV_REVIEW, "reason": "seven_day_data_incomplete"}
     flag = fields.get("coupon_new_player")

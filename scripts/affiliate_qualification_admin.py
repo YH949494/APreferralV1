@@ -94,6 +94,7 @@ def preflight_report(db, *, now_utc: datetime) -> dict:
         "consistency": aq.consistency_report(db, now_utc=now_utc),
         "rule_revision_ready": control.get("rule_version") == aq.RULE_VERSION,
         "legacy_writer_in_flight": bool(control.get("legacy_writer_token")),
+        "cancellation_repair_pending": bool(control.get("cancelled_cohort_cutoff")),
         "v1_qualified_events": db.qualified_events.count_documents({"rule_version": aq.LEGACY_RULE_VERSION}),
         "pending_maturity": aq.pending_maturity_report(db, config=control.get("source_config"), now_utc=now_utc),
     }
@@ -106,6 +107,7 @@ def preflight_report(db, *, now_utc: datetime) -> dict:
         and report["consistency"]["ok"]
         and report["rule_revision_ready"]
         and not report["legacy_writer_in_flight"]
+        and not report["cancellation_repair_pending"]
         and report["v1_qualified_events"] == 0
     )
     return report
@@ -412,6 +414,7 @@ def main(argv=None, *, db_factory=None, read_only_db_factory=None, now_fn=_now) 
             {"_id": aq.CONTROL_ID, "mode": aq.MODE_DISABLED, "rule_version": aq.RULE_VERSION,
              "launch_cutoff_utc": {"$exists": False}, "legacy_writer_token": {"$exists": False},
              "migration_lease_token": {"$exists": False}, "source_config": control.get("source_config"),
+             "cancelled_cohort_cutoff": {"$exists": False},
              "seed_summary": control.get("seed_summary"), "seed_completed_at": control.get("seed_completed_at"),
              "history_policy": control.get("history_policy")}, update)
         if not result.modified_count:
@@ -438,19 +441,22 @@ def main(argv=None, *, db_factory=None, read_only_db_factory=None, now_fn=_now) 
         if not args.commit:
             print(json.dumps({"dry_run": True, "would_cancel_cutoff": cutoff.isoformat()}))
             return 0
-        result = db[aq.CONTROL_COLLECTION].update_one(
-            {"_id": aq.CONTROL_ID, "launch_cutoff_utc": cutoff,
-             "$and": [{"launch_cutoff_utc": {"$gt": now_utc}}]},
-            {"$set": {"mode": aq.MODE_DISABLED, "updated_at": now_utc},
-             "$unset": {"launch_cutoff_utc": "", "legacy_admission_closed": ""}})
-        if not result.modified_count:
-            return 2
-        for prior in aq.ACTIVE_PENDING_STATUSES:
-            db.pending_referrals.update_many(
-                {"activation_cutoff_utc": cutoff, "activation_prior_status": prior,
-                 "status": aq.PENDING_AWAITING_REDEMPTION},
-                {"$set": {"status": prior}, "$unset": {"activation_cutoff_utc": "",
-                    "activation_prior_status": "", "qualification_rule_version": "", "awaiting_redemption_since": ""}})
+        with aq.cohort_writer_guard(db, cutoff=cutoff, now_utc=now_utc) as token:
+            if token is None:
+                print("refused: cohort/control writer in flight or cutoff changed; retry", file=sys.stderr)
+                return 2
+            result = db[aq.CONTROL_COLLECTION].update_one(
+                {"_id": aq.CONTROL_ID, "launch_cutoff_utc": cutoff, "legacy_writer_token": token,
+                 "$and": [{"launch_cutoff_utc": {"$gt": now_fn()}}]},
+                {"$set": {"mode": aq.MODE_DISABLED, "updated_at": now_utc,
+                          "cancelled_cohort_cutoff": cutoff},
+                 "$unset": {"launch_cutoff_utc": "", "legacy_admission_closed": ""}})
+            if not result.modified_count:
+                return 2
+            aq.restore_activation_cohort(db, cutoff=cutoff)
+            db[aq.CONTROL_COLLECTION].update_one(
+                {"_id": aq.CONTROL_ID, "legacy_writer_token": token, "cancelled_cohort_cutoff": cutoff},
+                {"$unset": {"cancelled_cohort_cutoff": ""}})
         print(json.dumps({"cancelled": True}))
         return 0
 

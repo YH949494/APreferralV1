@@ -3959,6 +3959,7 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
             return
         with affiliate_qualification.legacy_writer_guard(db, now_utc=now_utc()) as admitted:
             if admitted:
+                affiliate_qualification.repair_cancelled_cohort(db)
                 _settle_pending_referrals(batch_limit)
     except Exception:
         logger.exception("[SCHED][REFERRAL] skipped reason=legacy_barrier_unavailable")
