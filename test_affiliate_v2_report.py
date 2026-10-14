@@ -293,19 +293,15 @@ def test_bad_windows_are_refused(start, end):
 # Disabled / paused / not launched
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("make", [
-    lambda: disabled_world(),                                            # disabled, no cutoff
-    lambda: _world_with(mode=aq.MODE_ACTIVE, cutoff=NOW + timedelta(days=3)),  # scheduled, not reached
-    lambda: _world_with(mode=aq.MODE_DISABLED, cutoff=CUTOFF),           # explicitly disabled
-])
-def test_inactive_returns_null_metrics_not_zeros(make):
-    w = make()
-    w.join(1, 11)  # an existing pending/manual row must NOT be classified as a V2 result
+def test_explicitly_disabled_after_a_passed_cutoff_reports_nothing_not_zeros():
+    w = _world_with(mode=aq.MODE_DISABLED, cutoff=CUTOFF)
+    w.join(1, 11)
     out = rep.refresh_snapshot(w.db, now_utc=NOW)
-    assert out["ok"] and out["launched"] is False
+    assert out["ok"] and out["report_mode"] == rep.MODE_INACTIVE and out["launched"] is False
     body = report(w)
-    assert body["rule_active"] is False and body["status"] == "inactive"
+    assert body["report_mode"] == "inactive" and body["rule_active"] is False and body["status"] == "inactive"
     assert body["totals"] is None and body["affiliates"] is None and body["snapshot"] is None
+    assert body["effects_written"] is False
     assert w.db[rep.ROWS_COLLECTION].count_documents({}) == 0
 
 
@@ -320,7 +316,7 @@ def test_paused_after_launch_still_reports_recorded_decisions(monkeypatch):
     w.db[aq.CONTROL_COLLECTION].update_one({"_id": aq.CONTROL_ID}, {"$set": {"mode": aq.MODE_PAUSED}})
     snapshot(w)
     body = report(w)
-    assert body["rule_active"] is False and body["rule_mode"] == aq.MODE_PAUSED
+    assert body["rule_active"] is False and body["rule_mode"] == aq.MODE_PAUSED and body["report_mode"] == "live"
     assert body["totals"]["v2_qualified"] == 2
 
 
@@ -573,7 +569,7 @@ def test_route_authentication_and_private_network_only(monkeypatch, client):
     assert c.get(URL, headers={"Authorization": "Bearer dedicated", "Fly-Client-IP": "1.2.3.4"}).status_code == 200
 
 
-def test_route_rejects_bad_input_and_reports_inactive(monkeypatch, client):
+def test_route_rejects_bad_input_and_reports_preview_without_snapshot(monkeypatch, client):
     monkeypatch.setenv("AFFILIATE_V2_REPORT_ENABLED", "true")
     monkeypatch.setenv("DATABOT_API_KEY", "k")
     headers = {"Authorization": "Bearer k"}
@@ -582,7 +578,9 @@ def test_route_rejects_bad_input_and_reports_inactive(monkeypatch, client):
     assert c.get(f"{api.PREFIX}/summary?start_date=x&end_date=y", headers=headers).status_code == 400
     assert c.get(URL + "&limit=abc", headers=headers).status_code == 400
     body = c.get(URL, headers=headers).get_json()
-    assert body["rule_active"] is False and body["status"] == "inactive" and body["totals"] is None
+    # Never activated: preview mode, no snapshot built yet -> no numbers, and the request wrote nothing.
+    assert body["report_mode"] == "preview" and body["rule_active"] is False and body["effects_written"] is False
+    assert body["status"] == "no_snapshot" and body["totals"] is None
     assert w.db[rep.ROWS_COLLECTION].count_documents({}) == 0 and w.db[rep.STATE_COLLECTION].count_documents({}) == 0
 
 

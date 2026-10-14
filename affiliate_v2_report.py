@@ -32,6 +32,25 @@ the previous state wholesale - a new generation of ``affiliate_v2_report_rows``
 re-runs/retries are idempotent. The read path (:func:`build_report`) never
 runs the activation preview or any aggregation over source collections.
 
+Two report modes, never mixed (different field names, ``report_mode`` on every
+response, a snapshot of the other mode is never served):
+
+* ``live`` - V2 launched: the persisted decisions above. ``effects_written: true``.
+* ``preview`` - V2 NOT launched (disabled, or a cutoff still in the future):
+  ``rule_active: false``, ``effects_written: false``. The leased refresh job
+  replays the committed evidence through the production validator
+  (``affiliate_qualification_preview._replay`` -> ``assess_evidence``, the same
+  code live processing runs) for EVERY active pending/manual referral and
+  reports what activation would do: ``would_qualify`` / ``would_remain_pending``
+  / ``would_reject`` / ``would_be_duplicate`` / ``projected_7d_turnover``, one
+  state per invitee with the same precedence. Missing, incomplete, immature,
+  stale or feed-error evidence stays pending exactly as live holds it. The
+  build runs against a read-only database handle, so it cannot write a
+  qualification, referral status, registry entry, reward, XP or history. When
+  the rule launches, the last preview generation is kept as an audit snapshot
+  (``preview_audit``) and the report switches to live decisions on its own.
+  The replay runs only in the refresh job, never in an HTTP request.
+
 Writes (and only these): ``affiliate_v2_report_state`` and
 ``affiliate_v2_report_rows``. No raw voucher codes or gaming Account IDs are
 read into, stored in or returned by this module.
@@ -94,6 +113,54 @@ TURNOVER_COMPLETE = "complete"
 TURNOVER_PARTIAL = "partial"
 TURNOVER_UNAVAILABLE = "unavailable"
 
+MODE_LIVE = "live"
+MODE_PREVIEW = "preview"
+MODE_INACTIVE = "inactive"
+
+# Published field names per mode. Distinct on purpose: a preview payload can
+# never be mistaken for (or rendered as) an actual V2 result.
+FIELDS = {
+    MODE_LIVE: {"qualified": "v2_qualified", "pending": "v2_pending", "rejected": "v2_rejected",
+                "duplicate": "duplicate_account_excluded", "turnover": "seven_day_turnover",
+                "tstatus": "seven_day_turnover_status"},
+    MODE_PREVIEW: {"qualified": "would_qualify", "pending": "would_remain_pending", "rejected": "would_reject",
+                   "duplicate": "would_be_duplicate", "turnover": "projected_7d_turnover",
+                   "tstatus": "projected_turnover_status"},
+}
+
+_READ_METHODS = frozenset({"find", "find_one", "count_documents", "estimated_document_count", "distinct",
+                           "aggregate", "list_indexes", "index_information", "name", "full_name"})
+
+
+class _ReadOnlyCollection:
+    def __init__(self, col):
+        self._col = col
+
+    def __getattr__(self, name):
+        if name in _READ_METHODS:
+            return getattr(self._col, name)
+        raise PermissionError(f"read-only reporting build: {name!r} is not allowed")
+
+
+class ReadOnlyDb:
+    """Database handle for the snapshot BUILD phase: every collection exposes
+    reads only, so no code reached from here (including the shared validator)
+    can write a qualification, status, registry entry, reward, XP or history."""
+
+    def __init__(self, db):
+        self._db = db
+
+    def __getitem__(self, name):
+        return _ReadOnlyCollection(self._db[name])
+
+    def __getattr__(self, name):
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return _ReadOnlyCollection(getattr(self._db, name))
+
+    def list_collection_names(self):
+        return self._db.list_collection_names()
+
 
 def enabled() -> bool:
     return os.getenv("AFFILIATE_V2_REPORT_ENABLED", "false").strip().lower() == "true"
@@ -145,14 +212,25 @@ def gmt8_day(moment: datetime) -> str:
 def rule_status(control: dict | None, now_utc: datetime) -> dict:
     """``launched``: V2 has a persisted cutoff that has passed and was not
     disabled - decisions exist and are reportable (also while paused).
-    ``rule_active``: V2 is currently processing (aq.new_rule_active)."""
+    ``rule_active``: V2 is currently processing (aq.new_rule_active).
+    ``report_mode``: ``live`` once launched; ``preview`` while no cutoff has
+    been reached (never activated, or activation scheduled for later);
+    ``inactive`` for any other state (a passed cutoff that is not a launched
+    V2 rule) - nothing is guessed there."""
     mode = (control or {}).get("mode") or aq.MODE_DISABLED
     cutoff = aq.launch_cutoff(control)
     launched = bool(
         control and control.get("rule_version") == aq.RULE_VERSION and cutoff is not None
         and aq._aware_utc(now_utc) >= cutoff and mode in (aq.MODE_ACTIVE, aq.MODE_PAUSED)
     )
-    return {"rule_active": aq.new_rule_active(control, now_utc), "launched": launched, "rule_mode": mode}
+    if launched:
+        report_mode = MODE_LIVE
+    elif cutoff is None or aq._aware_utc(now_utc) < cutoff:
+        report_mode = MODE_PREVIEW
+    else:
+        report_mode = MODE_INACTIVE
+    return {"rule_active": aq.new_rule_active(control, now_utc), "launched": launched, "rule_mode": mode,
+            "report_mode": report_mode}
 
 
 def source_status(db, control: dict | None, now_utc: datetime) -> dict:
@@ -234,59 +312,24 @@ def _chunks(items, size=CHUNK):
         yield items[i:i + size]
 
 
-def build_rows(db, *, now_utc: datetime, max_active: int | None = None) -> tuple[list[dict], dict]:
-    """One current state per invitee -> rows keyed by (affiliate, GMT+8 join
-    day). Pure function of the persisted decisions; reads only."""
-    stats: Counter = Counter()
-    state = _collect_states(db, max_active=max_active or DEFAULT_MAX_ACTIVE_PENDING, stats=stats)
-
-    # A legacy (non-V2) qualification is historical and unchanged: it belongs
-    # to no V2 column.
-    for chunk in _chunks([i for i, s in state.items() if s["state"] != ST_QUALIFIED]):
-        for ev in db.qualified_events.find({"invitee_id": {"$in": chunk}, "rule_version": {"$ne": aq.RULE_VERSION}},
-                                           {"invitee_id": 1}):
-            invitee = _int(ev.get("invitee_id"))
-            if invitee in state:
-                del state[invitee]
-                stats["legacy_qualified_excluded"] += 1
-
-    referral_rows: dict[int, list[dict]] = defaultdict(list)
-    for chunk in _chunks(state):
+def _referral_rows(db, invitees) -> dict[int, list[dict]]:
+    out: dict[int, list[dict]] = defaultdict(list)
+    far = datetime.max.replace(tzinfo=timezone.utc)
+    for chunk in _chunks(invitees):
         for row in db.pending_referrals.find(
             {"invitee_user_id": {"$in": chunk}},
             {"invitee_user_id": 1, "inviter_user_id": 1, "status": 1, "revoked_reason": 1, "created_at_utc": 1},
         ):
             invitee = _int(row.get("invitee_user_id"))
             if invitee is not None:
-                referral_rows[invitee].append(row)
-    far = datetime.max.replace(tzinfo=timezone.utc)
+                out[invitee].append(row)
+    for rows in out.values():
+        rows.sort(key=lambda r: aq._aware_utc(r.get("created_at_utc")) or far)
+    return out
 
-    placed: dict[int, tuple[int, str]] = {}
-    for invitee, info in state.items():
-        rows = sorted(referral_rows.get(invitee, []), key=lambda r: aq._aware_utc(r.get("created_at_utc")) or far)
-        original = aqp._original_referral(rows, invitee)
-        affiliate, joined = (original if original else (None, None))
-        if info["state"] == ST_QUALIFIED:
-            # Frozen attribution on the event itself wins; the referral row it
-            # points at supplies the join time.
-            affiliate = info.get("referrer") if info.get("referrer") is not None else affiliate
-            linked = next((r for r in rows if r.get("_id") == info.get("pending_id")), None)
-            if linked is not None and aq._aware_utc(linked.get("created_at_utc")) is not None:
-                joined = aq._aware_utc(linked["created_at_utc"])
-        if affiliate is None or joined is None:
-            stats[f"unattributed_{info['state']}"] += 1
-            continue
-        placed[invitee] = (int(affiliate), gmt8_day(joined))
 
-    turnover: dict[int, Decimal | None] = {}
-    qualified = [i for i in placed if state[i]["state"] == ST_QUALIFIED]
-    by_evidence = {state[i]["evidence_id"]: i for i in qualified if state[i].get("evidence_id") is not None}
-    for chunk in _chunks(by_evidence):
-        for ev in db[aq.EVIDENCE_COLLECTION].find({"_id": {"$in": chunk}},
-                                                  {"qualification_fields.after_total_bet_amount": 1}):
-            amount = exact_decimal(((ev.get("qualification_fields") or {}).get("after_total_bet_amount")))
-            turnover[by_evidence[ev["_id"]]] = amount
-
+def _tally(placed: dict, state: dict, turnover: dict, stats: Counter) -> list[dict]:
+    """(affiliate, GMT+8 join day) cells from one-state-per-invitee."""
     cells: dict[tuple[str, str], dict] = {}
     for invitee, (affiliate, day) in placed.items():
         cell = cells.setdefault((str(affiliate), day), {
@@ -310,7 +353,125 @@ def build_rows(db, *, now_utc: datetime, max_active: int | None = None) -> tuple
     stats["placed"] = len(placed)
     for st in _FIELD:
         stats[f"state_{st}"] = sum(1 for i in placed if state[i]["state"] == st)
-    return out, dict(stats)
+    return out
+
+
+def build_rows(db, *, now_utc: datetime, max_active: int | None = None) -> tuple[list[dict], dict]:
+    """LIVE mode: one current state per invitee from persisted V2 decisions ->
+    rows keyed by (affiliate, GMT+8 join day). Pure function of stored data."""
+    stats: Counter = Counter()
+    state = _collect_states(db, max_active=max_active or DEFAULT_MAX_ACTIVE_PENDING, stats=stats)
+
+    # A legacy (non-V2) qualification is historical and unchanged: it belongs
+    # to no V2 column.
+    for chunk in _chunks([i for i, s in state.items() if s["state"] != ST_QUALIFIED]):
+        for ev in db.qualified_events.find({"invitee_id": {"$in": chunk}, "rule_version": {"$ne": aq.RULE_VERSION}},
+                                           {"invitee_id": 1}):
+            invitee = _int(ev.get("invitee_id"))
+            if invitee in state:
+                del state[invitee]
+                stats["legacy_qualified_excluded"] += 1
+
+    referral_rows = _referral_rows(db, state)
+    placed: dict[int, tuple[int, str]] = {}
+    for invitee, info in state.items():
+        rows = referral_rows.get(invitee, [])
+        original = aqp._original_referral(rows, invitee)
+        affiliate, joined = (original if original else (None, None))
+        if info["state"] == ST_QUALIFIED:
+            # Frozen attribution on the event itself wins; the referral row it
+            # points at supplies the join time.
+            affiliate = info.get("referrer") if info.get("referrer") is not None else affiliate
+            linked = next((r for r in rows if r.get("_id") == info.get("pending_id")), None)
+            if linked is not None and aq._aware_utc(linked.get("created_at_utc")) is not None:
+                joined = aq._aware_utc(linked["created_at_utc"])
+        if affiliate is None or joined is None:
+            stats[f"unattributed_{info['state']}"] += 1
+            continue
+        placed[invitee] = (int(affiliate), gmt8_day(joined))
+
+    turnover: dict[int, Decimal | None] = {}
+    qualified = [i for i in placed if state[i]["state"] == ST_QUALIFIED]
+    by_evidence = {state[i]["evidence_id"]: i for i in qualified if state[i].get("evidence_id") is not None}
+    for chunk in _chunks(by_evidence):
+        for ev in db[aq.EVIDENCE_COLLECTION].find({"_id": {"$in": chunk}},
+                                                  {"qualification_fields.after_total_bet_amount": 1}):
+            amount = exact_decimal(((ev.get("qualification_fields") or {}).get("after_total_bet_amount")))
+            turnover[by_evidence[ev["_id"]]] = amount
+    return _tally(placed, state, turnover, stats), dict(stats)
+
+
+def build_preview_rows(db, *, control: dict, now_utc: datetime, max_active: int | None = None) -> tuple[list[dict], dict]:
+    """PREVIEW mode (V2 not launched): what activation would do to every active
+    pending/manual referral, from the production validator over committed
+    evidence. ``db`` must be read-only. One state per invitee; a source that
+    is blocked, stale, partially synced, failed its last sync or was truncated
+    keeps EVERYONE pending - exactly how live processing holds."""
+    stats: Counter = Counter()
+    cap = max_active or DEFAULT_MAX_ACTIVE_PENDING
+    active: set[int] = set()
+    for row in db.pending_referrals.find({"status": {"$in": list(aq.ACTIVE_PENDING_STATUSES)}},
+                                         {"invitee_user_id": 1}):
+        invitee = _int(row.get("invitee_user_id"))
+        if invitee is None:
+            continue
+        if invitee not in active and len(active) >= cap:
+            stats["truncated_active_pending"] = 1
+            break
+        active.add(invitee)
+
+    config = control.get("source_config")
+    problems = aq.validate_source_config(config)
+    integration = aq.integration_readiness(db, config, now_utc=now_utc) if not problems else {"ok": False}
+    all_problems = sorted(set(problems + list(integration.get("problems") or [])))
+    blocking = [p for p in all_problems if p not in aqp.NON_BLOCKING_PROBLEMS]
+    usable = not blocking and not any(p in aqp.NON_BLOCKING_PROBLEMS for p in all_problems) \
+        and not stats.get("truncated_active_pending")
+
+    outcomes: dict[int, dict[str, dict]] = defaultdict(dict)   # invitee -> status -> first outcome seen
+    if blocking or stats.get("truncated_active_pending"):
+        real_q: set[int] = set()
+        for chunk in _chunks(active):
+            real_q.update(_int(q["invitee_id"]) for q in db.qualified_events.find(
+                {"invitee_id": {"$in": chunk}}, {"invitee_id": 1}))
+        referral_rows = _referral_rows(db, active)
+    else:
+        replay = aqp._replay(db, control=control, config=config, cutoff=aq.launch_cutoff(control),
+                             integration=integration, is_databot=(config or {}).get("source") == aq.SOURCE_DATABOT_UIM,
+                             active_invitees=active, cohort_invitees=set(), now_utc=now_utc)
+        stats["truncated_source_rows"] = int(bool(replay["stats"].get("truncated")))
+        usable = usable and not stats["truncated_source_rows"]
+        real_q = {int(i) for i in replay["real_q"]}
+        referral_rows = replay["pending_by_invitee"]
+        for o in replay["at_launch"]:
+            if o["invitee_id"] is not None:
+                outcomes[int(o["invitee_id"])].setdefault(o["status"], o)
+    stats["source_usable"] = int(usable)
+
+    population = active - real_q          # invitees with an existing (legacy) qualification are unchanged history
+    stats["already_qualified_unchanged"] = len(active & real_q)
+    state: dict[int, dict] = {}
+    turnover: dict[int, Decimal | None] = {}
+    for invitee in population:
+        got = outcomes.get(invitee, {}) if usable else {}
+        if aq.EV_QUALIFIED in got:
+            state[invitee] = {"state": ST_QUALIFIED}
+            turnover[invitee] = exact_decimal(got[aq.EV_QUALIFIED].get("after_total_bet"))
+        elif aq.EV_DUPLICATE_ACCOUNT in got:
+            state[invitee] = {"state": ST_DUPLICATE}
+        elif aq.EV_REJECTED in got:
+            state[invitee] = {"state": ST_REJECTED}
+        else:
+            state[invitee] = {"state": ST_PENDING}     # review/held/no evidence/unusable source
+
+    placed: dict[int, tuple[int, str]] = {}
+    for invitee, info in state.items():
+        original = aqp._original_referral(referral_rows.get(invitee, []), invitee)
+        if original is None:
+            stats[f"unattributed_{info['state']}"] += 1
+            continue
+        placed[invitee] = (int(original[0]), gmt8_day(original[1]))
+    return _tally(placed, state, turnover, stats), dict(stats)
 
 
 def ensure_indexes(db) -> None:
@@ -336,10 +497,27 @@ def _acquire(db, now_utc: datetime) -> str | None:
     return owner if doc and doc.get("lease_owner") == owner else None
 
 
+def _sum_rows(rows) -> dict:
+    """Totals over stored cells (internal keys) - used for the audit summary."""
+    t = {"qualified": 0, "pending": 0, "rejected": 0, "duplicate": 0, "turnover": Decimal(0), "unresolved": 0}
+    for r in rows:
+        for k in ("qualified", "pending", "rejected", "duplicate"):
+            t[k] += int(r.get(k) or 0)
+        amount = exact_decimal(r.get("turnover"))
+        if amount is not None:
+            t["turnover"] = _EXACT.add(t["turnover"], amount)
+        t["unresolved"] += int(r.get("turnover_unresolved") or 0)
+    f = FIELDS[MODE_PREVIEW]
+    return {f["qualified"]: t["qualified"], f["pending"]: t["pending"], f["rejected"]: t["rejected"],
+            f["duplicate"]: t["duplicate"], f["turnover"]: _plain(t["turnover"]),
+            "turnover_cells_unresolved": t["unresolved"]}
+
+
 def refresh_snapshot(db, *, now_utc: datetime) -> dict:
-    """Rebuild the snapshot from persisted decisions and swap it in. The
-    previous generation stays current until the new one is fully written, so
-    a failure leaves the last good snapshot in place."""
+    """Rebuild the snapshot (preview or live, by rule state) and swap it in.
+    The previous generation stays current until the new one is fully written,
+    so a failure leaves the last good snapshot in place. The build phase gets a
+    read-only handle; only this module's two collections are written."""
     out = {"ok": False}
     owner = _acquire(db, now_utc)
     if owner is None:
@@ -349,31 +527,52 @@ def refresh_snapshot(db, *, now_utc: datetime) -> dict:
     try:
         control = aq.get_control(db)
         rule = rule_status(control, now_utc)
-        meta = {"rule_mode": rule["rule_mode"], "rule_active": rule["rule_active"], "launched": rule["launched"],
-                "rule_version": aq.RULE_VERSION, "generated_at": now_utc, "last_error": None,
-                "last_success_at": now_utc, "lease_until": None}
-        if not rule["launched"]:
-            # Nothing to report; never publish operational zeros before launch.
+        mode = rule["report_mode"]
+        previous = db[STATE_COLLECTION].find_one({"_id": STATE_ID}) or {}
+        audit = previous.get("preview_audit")
+        if mode == MODE_LIVE and previous.get("report_mode") == MODE_PREVIEW and previous.get("generation"):
+            # Activation: keep the final pre-launch preview as an audit snapshot.
+            audit = {"kind": "pre_launch_preview", "generation": previous["generation"],
+                     "generated_at": previous.get("generated_at"), "preserved_at": now_utc,
+                     "source": previous.get("source"), "build": previous.get("build"),
+                     "totals": _sum_rows(db[ROWS_COLLECTION].find({"generation": previous["generation"]}))}
+        keep = [audit["generation"]] if audit and audit.get("generation") else []
+        meta = {"report_mode": mode, "rule_mode": rule["rule_mode"], "rule_active": rule["rule_active"],
+                "launched": rule["launched"], "rule_version": aq.RULE_VERSION, "generated_at": now_utc,
+                "last_error": None, "last_success_at": now_utc, "lease_until": None}
+        if audit:
+            meta["preview_audit"] = audit
+        if mode == MODE_INACTIVE:
+            # Nothing to report; never publish operational zeros.
             db[STATE_COLLECTION].update_one({"_id": STATE_ID, "lease_owner": owner},
                                             {"$set": {**meta, "generation": None, "source": None, "build": None}})
-            db[ROWS_COLLECTION].delete_many({})
-            out.update(ok=True, launched=False)
+            db[ROWS_COLLECTION].delete_many({"generation": {"$nin": keep}})
+            out.update(ok=True, report_mode=mode, launched=False)
             return out
         ensure_indexes(db)
-        source = source_status(db, control, now_utc)
-        rows, stats = build_rows(db, now_utc=now_utc,
-                                 max_active=_env_int("AFFILIATE_V2_REPORT_MAX_ACTIVE_PENDING", DEFAULT_MAX_ACTIVE_PENDING))
+        ro = ReadOnlyDb(db)
+        source = source_status(ro, control, now_utc)
+        cap = _env_int("AFFILIATE_V2_REPORT_MAX_ACTIVE_PENDING", DEFAULT_MAX_ACTIVE_PENDING)
+        if mode == MODE_LIVE:
+            rows, stats = build_rows(ro, now_utc=now_utc, max_active=cap)
+        else:
+            rows, stats = build_preview_rows(ro, control=control, now_utc=now_utc, max_active=cap)
+            if not stats.get("source_usable"):
+                source = {**source, "status": source["status"] if source["status"] != SOURCE_OK else SOURCE_PARTIAL}
         generation = uuid.uuid4().hex
         for chunk in _chunks(rows, INSERT_BATCH):
-            db[ROWS_COLLECTION].insert_many([{**r, "generation": generation} for r in chunk], ordered=False)
+            db[ROWS_COLLECTION].insert_many([{**r, "generation": generation, "mode": mode} for r in chunk],
+                                            ordered=False)
         swapped = db[STATE_COLLECTION].update_one(
             {"_id": STATE_ID, "lease_owner": owner},
             {"$set": {**meta, "generation": generation, "source": source,
-                      "build": {**stats, "rows": len(rows), "truncated": bool(stats.get("truncated_active_pending"))}}})
+                      "build": {**stats, "rows": len(rows), "truncated": bool(stats.get("truncated_active_pending")
+                                                                               or stats.get("truncated_source_rows"))}}})
         if not swapped.modified_count:
             raise RuntimeError("lease_lost")
-        db[ROWS_COLLECTION].delete_many({"generation": {"$ne": generation}})
-        out.update(ok=True, launched=True, generation=generation, rows=len(rows), invitees=stats.get("placed", 0))
+        db[ROWS_COLLECTION].delete_many({"generation": {"$nin": [generation, *keep]}})
+        out.update(ok=True, report_mode=mode, launched=rule["launched"], generation=generation, rows=len(rows),
+                   invitees=stats.get("placed", 0))
         return out
     except Exception as exc:
         logger.warning("[V2_REPORT][REFRESH_FAILED] err=%s", exc.__class__.__name__)
@@ -404,7 +603,7 @@ def run_scheduled_refresh(db, *, now_utc: datetime | None = None) -> dict:
     rule = rule_status(aq.get_control(db), now_utc)
     success = aq._aware_utc(state.get("last_success_at"))
     interval = timedelta(seconds=_env_int("AFFILIATE_V2_REPORT_REFRESH_SECONDS", DEFAULT_REFRESH_SECONDS))
-    unchanged = (state.get("rule_mode") == rule["rule_mode"] and bool(state.get("launched")) == rule["launched"])
+    unchanged = (state.get("rule_mode") == rule["rule_mode"] and state.get("report_mode") == rule["report_mode"])
     if success and unchanged and now_utc - success < interval:
         return {"skipped": "fresh"}
     return refresh_snapshot(db, now_utc=now_utc)
@@ -442,9 +641,13 @@ def build_report(db, *, start_date: str, end_date: str, now_utc: datetime, limit
     limit = max(1, min(int(limit or DEFAULT_LIMIT), MAX_LIMIT))
     control = aq.get_control(db)
     rule = rule_status(control, now_utc)
+    mode = rule["report_mode"]
+    f = FIELDS.get(mode)
     report = {
         "contract": CONTRACT,
+        "report_mode": mode,
         "rule_active": rule["rule_active"],
+        "effects_written": mode == MODE_LIVE,     # preview: nothing was or will be written by this report
         "rule_mode": rule["rule_mode"],
         "rule_version": aq.RULE_VERSION,
         "cohort": {"basis": COHORT_BASIS, "timezone": COHORT_TIMEZONE, "start_date": start, "end_date": end},
@@ -457,7 +660,7 @@ def build_report(db, *, start_date: str, end_date: str, now_utc: datetime, limit
         "affiliates_total": None,
         "truncated": False,
     }
-    if not rule["launched"]:
+    if mode == MODE_INACTIVE:
         return report
 
     rows = None
@@ -465,7 +668,9 @@ def build_report(db, *, start_date: str, end_date: str, now_utc: datetime, limit
     for _ in range(2):
         state = db[STATE_COLLECTION].find_one({"_id": STATE_ID}) or {}
         generation = state.get("generation")
-        if not generation or not state.get("launched"):
+        # A snapshot of the other mode (e.g. the last preview right after
+        # activation) is never served as this mode's data.
+        if not generation or state.get("report_mode") != mode:
             break
         rows = list(db[ROWS_COLLECTION].find(
             {"generation": generation, "day": {"$gte": start, "$lte": end}},
@@ -493,16 +698,18 @@ def build_report(db, *, start_date: str, end_date: str, now_utc: datetime, limit
     }
     report["source"] = {k: source.get(k) for k in ("status", "problems", "last_sync_success_at")}
     report["uim_coverage_end"] = source.get("uim_coverage_end")
+    audit = state.get("preview_audit")
+    if mode == MODE_LIVE and audit:
+        report["pre_launch_preview_audit"] = {
+            "generation": audit.get("generation"), "totals": audit.get("totals"),
+            "generated_at": _iso(audit.get("generated_at")), "preserved_at": _iso(audit.get("preserved_at"))}
 
     per: dict[str, dict] = {}
     for r in rows:
-        a = per.setdefault(r["affiliate_id"], {"v2_qualified": 0, "v2_pending": 0, "v2_rejected": 0,
-                                               "duplicate_account_excluded": 0, "_turnover": Decimal(0),
-                                               "_unresolved": 0})
-        a["v2_qualified"] += int(r.get("qualified") or 0)
-        a["v2_pending"] += int(r.get("pending") or 0)
-        a["v2_rejected"] += int(r.get("rejected") or 0)
-        a["duplicate_account_excluded"] += int(r.get("duplicate") or 0)
+        a = per.setdefault(r["affiliate_id"], {"qualified": 0, "pending": 0, "rejected": 0, "duplicate": 0,
+                                               "_turnover": Decimal(0), "_unresolved": 0})
+        for k in ("qualified", "pending", "rejected", "duplicate"):
+            a[k] += int(r.get(k) or 0)
         amount = exact_decimal(r.get("turnover"))
         if amount is None:
             a["_unresolved"] += max(1, int(r.get("qualified") or 0))
@@ -519,19 +726,17 @@ def build_report(db, *, start_date: str, end_date: str, now_utc: datetime, limit
             value, tstatus = None, TURNOVER_UNAVAILABLE
         else:
             value, tstatus = _plain(a["_turnover"]), TURNOVER_COMPLETE if complete else TURNOVER_PARTIAL
-        return {"v2_qualified": a["v2_qualified"], "v2_pending": a["v2_pending"], "v2_rejected": a["v2_rejected"],
-                "duplicate_account_excluded": a["duplicate_account_excluded"],
-                "seven_day_turnover": value, "seven_day_turnover_status": tstatus}
+        return {f["qualified"]: a["qualified"], f["pending"]: a["pending"], f["rejected"]: a["rejected"],
+                f["duplicate"]: a["duplicate"], f["turnover"]: value, f["tstatus"]: tstatus}
 
-    totals_acc = {"v2_qualified": 0, "v2_pending": 0, "v2_rejected": 0, "duplicate_account_excluded": 0,
-                  "_turnover": Decimal(0), "_unresolved": 0}
+    totals_acc = {"qualified": 0, "pending": 0, "rejected": 0, "duplicate": 0, "_turnover": Decimal(0), "_unresolved": 0}
     for a in per.values():
-        for k in ("v2_qualified", "v2_pending", "v2_rejected", "duplicate_account_excluded", "_unresolved"):
+        for k in ("qualified", "pending", "rejected", "duplicate", "_unresolved"):
             totals_acc[k] += a[k]
         totals_acc["_turnover"] = _EXACT.add(totals_acc["_turnover"], a["_turnover"])
     report["totals"] = finish(totals_acc)
 
-    ordered = sorted(per.items(), key=lambda kv: (-kv[1]["v2_qualified"], -kv[1]["v2_pending"], kv[0]))
+    ordered = sorted(per.items(), key=lambda kv: (-kv[1]["qualified"], -kv[1]["pending"], kv[0]))
     report["affiliates_total"] = len(ordered)
     report["truncated"] = len(ordered) > limit
     report["affiliates"] = [{"affiliate_id": aid, **finish(a)} for aid, a in ordered[:limit]]

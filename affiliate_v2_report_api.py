@@ -9,10 +9,17 @@ in the opposite direction:
   every request answers 404, and the whole feature is additionally off until
   ``AFFILIATE_V2_REPORT_ENABLED=true``.
 * ``Authorization: Bearer <token>``, constant-time comparison, else 401.
+* Listener separation: gunicorn serves the public app on ``0.0.0.0:8080`` (Fly
+  edge + health check, unchanged) and, only when ``AFFILIATE_V2_REPORT_ENABLED=true``
+  and ``AFFILIATE_V2_REPORT_PRIVATE_PORT`` is set, a second listener on ``[::]:<port>``
+  for Fly's private IPv6 network (``gunicorn_web.conf.py``). Fly's ``[[services]]``
+  maps only 8080 to the edge, so the private port is not reachable publicly.
+  Defence in depth: this route answers 404 on any other port, and the private
+  port answers 404 for every other path (``install_private_listener_guard``).
 * Requests that came through Fly's public edge proxy (it always adds
   ``Fly-Client-IP`` / ``Fly-Forwarded-Port``) are refused with 403 unless
   ``AFFILIATE_V2_REPORT_ALLOW_PUBLIC=true``. The intended path is Fly private
-  networking (``http://<apreferral-app>.internal:8080``).
+  networking (``http://<apreferral-app>.internal:<AFFILIATE_V2_REPORT_PRIVATE_PORT>``).
 * The handler only reads the precomputed snapshot (see ``affiliate_v2_report``);
   it never runs the activation preview, never aggregates source collections
   and never writes.
@@ -40,6 +47,17 @@ def resolve_token() -> str:
     return (os.getenv("AFFILIATE_V2_REPORT_TOKEN", "").strip() or os.getenv("DATABOT_API_KEY", "").strip())
 
 
+def private_port() -> str | None:
+    raw = os.getenv("AFFILIATE_V2_REPORT_PRIVATE_PORT", "").strip()
+    return raw if raw.isdigit() else None
+
+
+def _listener_port() -> str:
+    # Port of the socket that accepted the connection (gunicorn sets it from
+    # getsockname), not the client-controlled Host header.
+    return str(request.environ.get("SERVER_PORT", ""))
+
+
 def _json(body: dict, status: int = 200):
     response = jsonify(body)
     response.status_code = status
@@ -52,6 +70,9 @@ def _refusal():
     if not report.enabled() or not token:
         return _json({"error": "not_found"}, 404)
     allow_public = os.getenv("AFFILIATE_V2_REPORT_ALLOW_PUBLIC", "false").strip().lower() == "true"
+    port = private_port()
+    if port and not allow_public and _listener_port() != port:
+        return _json({"error": "not_found"}, 404)      # only the private listener serves this route
     if not allow_public and any(h in request.headers for h in _PUBLIC_EDGE_HEADERS):
         logger.warning("[V2_REPORT][REFUSED] reason=public_edge")
         return _json({"error": "private_network_only"}, 403)
@@ -62,6 +83,16 @@ def _refusal():
         logger.warning("[V2_REPORT][REFUSED] reason=bad_token")
         return _json({"error": "unauthorized"}, 401)
     return None
+
+
+def install_private_listener_guard(app) -> None:
+    """The private listener serves ONLY the report route: every other path on
+    that port is 404, so binding it never exposes the rest of the app."""
+    @app.before_request
+    def _private_listener_serves_only_the_report():
+        port = private_port()
+        if port and _listener_port() == port and not request.path.startswith(PREFIX + "/"):
+            return _json({"error": "not_found"}, 404)
 
 
 def make_blueprint(get_db) -> Blueprint:

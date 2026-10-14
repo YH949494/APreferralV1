@@ -24,11 +24,16 @@ Per affiliate: `affiliate_id`, `v2_qualified`, `v2_pending`, `v2_rejected`,
 `duplicate_account_excluded`, `seven_day_turnover` (exact decimal string),
 `seven_day_turnover_status` (`complete | partial | unavailable`).
 
+Field names above are the **live** vocabulary; in `report_mode: preview` the same five
+metrics are `would_qualify`, `would_remain_pending`, `would_reject`, `would_be_duplicate`,
+`projected_7d_turnover` (+ `projected_turnover_status`), and the envelope always carries
+`report_mode`, `rule_active` and `effects_written`.
+
 Never published, stored in the snapshot or logged by this module: voucher
 codes, gaming Account IDs, account keys, tokens, usernames. The snapshot reads
 only Telegram invitee/referrer IDs and the exact `after_total_bet_amount`.
 
-## Metric definitions (one state per invitee, precedence 1 -> 4)
+## Metric definitions - live mode (one state per invitee, precedence 1 -> 4)
 
 1. **V2 Qualified** - a `qualified_events` row with `rule_version == welcome_redemption_v2`. Preview/would-pass rows are not read.
 2. **Duplicate Account** - V2 evidence finalised `duplicate_account` (canonical registry refused it), no V2 qualification. The earlier owner is untouched.
@@ -62,17 +67,57 @@ qualification time and are bucketed by join like everything else. The historical
 `Qualified` column in Databot keeps its qualification-date cohort; the two are
 deliberately not expected to reconcile.
 
-## Disabled / paused
+## Pre-launch preview (`report_mode: preview`)
 
-Before launch (`welcome_redemption_v2` control not active/paused with a passed
-cutoff) the route returns `rule_active: false`, `status: inactive` and
-`totals/affiliates: null`; pending/manual rows are not classified, and the
-refresh job stores no rows. Paused-after-launch still reports recorded
-decisions with `rule_active: false`, `rule_mode: paused`.
+While V2 is **not launched** (never activated, or activated with a cutoff still in
+the future) the same refresh job builds a **preview** instead of publishing nothing.
+Every response says so: `report_mode: "preview"`, `rule_active: false`,
+`effects_written: false`. Preview rows use their own field names - `would_qualify`,
+`would_remain_pending`, `would_reject`, `would_be_duplicate`,
+`projected_7d_turnover` / `projected_turnover_status` - and never `v2_*`, so a preview
+can not be read as an actual result. A snapshot of one mode is never served as the
+other.
+
+* **Evaluator:** `affiliate_qualification_preview._replay`, the block that used to live
+  inside `build_preview` (extracted unchanged; the admin preview calls it too). It
+  replays committed Databot evidence through `affiliate_qualification.assess_evidence` -
+  the validator live processing runs - with the lifetime Account ID registry simulated
+  (earliest redemption wins, later ones are duplicates). Nothing re-implements a gate.
+* **Population:** every active pending/manual referral (`ACTIVE_PENDING_STATUSES`,
+  pre-cutoff joins included). Invitees with an existing qualification are unchanged
+  history and excluded.
+* **One state per invitee**, Qualified > Duplicate > Rejected > Pending. No evidence,
+  held/incomplete/immature evidence stay pending. Confirmed `coupon_new_player = 0`
+  and completed turnover below 80 are rejected. If the source is blocked, stale,
+  partially synced, its last sync failed, or the build was truncated, **everyone stays
+  pending** - exactly how live processing holds.
+* **7D turnover** is the exact Decimal sum of the amounts on the evidence rows that
+  would qualify (`partial` when the source is not fully healthy, `unavailable` when it
+  is blocked).
+* **No writes:** the build phase receives `ReadOnlyDb`, a handle whose collections expose
+  reads only (any write raises). A test also snapshots every other collection before and
+  after. The only writes are the replaced snapshot generation in
+  `affiliate_v2_report_state` / `_rows`.
+* **Never in a request:** the replay runs only in the leased job (`run_scheduled_refresh`);
+  the route reads the stored snapshot (tests make the replay fail if it is reached).
+  Cost is bounded by `PREVIEW_MAX_SOURCE_ROWS` (200k committed rows) and
+  `AFFILIATE_V2_REPORT_MAX_ACTIVE_PENDING`; truncation is reported as `partial`.
+* **Activation:** the first refresh after the rule launches (the job refreshes at once
+  when the rule state changes) keeps the last preview generation as an **audit
+  snapshot** - rows stay in `affiliate_v2_report_rows` (`mode: preview`) and
+  `affiliate_v2_report_state.preview_audit` records generation, generated/preserved
+  times, source status and totals; the live response carries it as
+  `pre_launch_preview_audit`. The report then switches to actual persisted decisions
+  and `v2_*` names on its own. The audit is the last preview built before activation
+  (up to one refresh interval, default 10 minutes, older than the activation instant).
+* A passed cutoff that is not a launched V2 rule (e.g. explicitly disabled afterwards)
+  is `report_mode: inactive`: no numbers, nothing guessed. Paused-after-launch keeps
+  reporting the recorded decisions (`report_mode: live`, `rule_active: false`).
 
 ## Snapshot lifecycle and recovery
 
 * `affiliate_v2_report.run_scheduled_refresh` is a new step at the end of the existing 5-minute job. No-op unless `AFFILIATE_V2_REPORT_ENABLED=true`; rebuilds at most every `AFFILIATE_V2_REPORT_REFRESH_SECONDS` (600), immediately when the rule state changes, never more than once a minute.
+* The scheduler step is the only caller of the (potentially heavy) preview replay.
 * Leased (10 min) so overlapping workers cannot interleave. Cost: one pass over V2 qualified events, V2 terminal evidence and active pending referrals (cap `AFFILIATE_V2_REPORT_MAX_ACTIVE_PENDING`, default 250k, truncation is reported as `partial`), plus chunked lookups by existing indexes.
 * **Replace, not accumulate**: rows of a new generation are written, then one pointer swap on `affiliate_v2_report_state`, then older generations are deleted. A failed build leaves the previous generation current (`last_error` recorded). Re-running is idempotent; an invitee moving pending -> terminal simply appears in its new column next generation.
 * The read path never builds, previews or touches source collections. If a refresh swaps generations mid-read the reader retries instead of reporting zeros.
@@ -84,12 +129,53 @@ decisions with `rule_active: false`, `rule_mode: paused`.
 
 `GET /internal/affiliate-v2-report/v1/summary?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD[&limit=n]`
 
-* 404 unless `AFFILIATE_V2_REPORT_ENABLED=true` **and** a secret exists: `AFFILIATE_V2_REPORT_TOKEN`, else the shared `DATABOT_API_KEY` (already on both services).
-* `Authorization: Bearer`, constant-time compare, else 401.
-* Requests carrying Fly public-edge headers (`Fly-Client-IP`, `Fly-Forwarded-Port`) get 403 unless `AFFILIATE_V2_REPORT_ALLOW_PUBLIC=true` - the same rule as Databot's UIM feed.
-* `Cache-Control: no-store`; response capped by `limit` (default 2000, max 5000, `truncated` flag; totals always cover every affiliate); window <= 400 days; errors are generic.
-* **Deployment prerequisite (not changed here):** `fly.toml` binds gunicorn to `0.0.0.0:8080` (IPv4). Fly `.internal` addressing is IPv6 (6PN), so for Databot to reach `http://apreferralv1.internal:8080` the web process must also listen on `[::]:8080` (e.g. add `--bind [::]:8080`). That is a deploy-affecting change and was deliberately left out; until then the only reachable path is the public edge with `AFFILIATE_V2_REPORT_ALLOW_PUBLIC=true` (token-authenticated TLS), which is not recommended.
+* 404 unless `AFFILIATE_V2_REPORT_ENABLED=true` **and** a secret exists: `AFFILIATE_V2_REPORT_TOKEN`, else the shared `DATABOT_API_KEY`.
+* `Authorization: Bearer`, constant-time compare, else 401. Requests with Fly public-edge headers (`Fly-Client-IP`, `Fly-Forwarded-Port`) get 403 unless `AFFILIATE_V2_REPORT_ALLOW_PUBLIC=true`.
+* `Cache-Control: no-store`; capped by `limit` (default 2000, max 5000, `truncated` flag; totals cover everyone); window <= 400 days; generic errors.
+
+### Private IPv6 listener (Fly `.internal`)
+
+Fly private networking is IPv6 (6PN). The web process used to bind IPv4 only, so
+`apreferralv1.internal` could not reach it. Fix, designed not to touch the public
+listener:
+
+* `fly.toml` web command: `--bind 0.0.0.0:8080` is replaced by `-c gunicorn_web.conf.py`
+  (everything else - workers, threads, timeouts, log format - is byte-identical).
+  `gunicorn_web.conf.py` always binds **`0.0.0.0:8080` first**, exactly as before, so
+  the edge `[[services]]` mapping (80/443 -> 8080) and the `/healthz` check are unchanged.
+* A **second, separate** listener `[::]:<AFFILIATE_V2_REPORT_PRIVATE_PORT>` is added only if
+  `AFFILIATE_V2_REPORT_ENABLED=true` **and** the port is set (1024-65535, not 8080). With
+  those unset the process is byte-for-byte the old behaviour. IPv6-only binding is not
+  assumed to keep IPv4: the IPv4 public socket is a distinct listener and the tests check both.
+* If the container has no IPv6 the private listener is skipped with a warning; the public
+  listener and health check never depend on it.
+* Not reachable from the internet: `[[services]]` maps only 8080 (a test fails if the private
+  port ever appears there). Defence in depth in the app: the report route answers **404 on any
+  other port** (the listener is identified by the accepting socket's port, not the Host header),
+  and the private port answers **404 for every other path** (`install_private_listener_guard`),
+  so it never exposes the rest of the app. Bearer auth and the Fly-edge-header refusal still apply.
+* Tests: `test_web_listeners.py` runs real gunicorn with the real config (public IPv4 `/healthz`,
+  private `[::1]` report 401/403/200, other paths 404, no-IPv6 container); the CI job
+  `web-listener-image-smoke` repeats it in the **built image** (`scripts/smoke_web_listeners_image.py`).
+  The smoke app (`scripts/listener_smoke_app.py`) uses a stub database because `main:app`
+  needs a live MongoDB at import.
+
+### Environment variables (APReferral web + scheduler)
+
+| Variable | Required | Value |
+|---|---|---|
+| `AFFILIATE_V2_REPORT_ENABLED` | yes | `true` (default off: no job, no route, no private listener) |
+| `AFFILIATE_V2_REPORT_PRIVATE_PORT` | yes, for the private listener | e.g. `8081` |
+| `DATABOT_API_KEY` or `AFFILIATE_V2_REPORT_TOKEN` | yes | the bearer secret (must equal Databot's) |
+| `AFFILIATE_V2_REPORT_REFRESH_SECONDS` | no | 600 |
+| `AFFILIATE_V2_REPORT_STALE_AFTER_SECONDS` | no | 1800 |
+| `AFFILIATE_V2_REPORT_MAX_ACTIVE_PENDING` | no | 250000 |
+| `AFFILIATE_V2_REPORT_ALLOW_PUBLIC` | no | leave unset |
+
+The web machines and the scheduler/worker process both need the variables (the worker
+builds the snapshot, the web process serves it). Databot's side is in its own doc;
+its URL is `http://apreferralv1.internal:<AFFILIATE_V2_REPORT_PRIVATE_PORT>`.
 
 ## Tests
 
-`test_affiliate_v2_report.py` (added to the PR gate): real pipeline (Databot-shaped rows -> sync -> live validator -> snapshot) for qualified / legacy exclusion / 79.99, 80, 80.00 / incomplete seven-day data / feed failure / `coupon_new_player = 0` / duplicate account / exact Decimal sums / repeated rows and batches / GMT+8 month boundaries / inactive, scheduled and paused / replace-not-accumulate / failed-refresh keeps last good / stale and partial coverage / generation-swap race / no raw code or Account ID or token anywhere / writes confined / read path never runs the preview / route auth, edge refusal and bad input.
+`test_affiliate_v2_report.py` and `test_affiliate_v2_preview_report.py` (both in the PR gate; the second adds preview/live parity for 79.99, 80.00, new-player false, incomplete data, feed failure, duplicate Account ID and exact Decimal turnover, read-only proof, activation switch and audit) and `test_web_listeners.py`: real pipeline (Databot-shaped rows -> sync -> live validator -> snapshot) for qualified / legacy exclusion / 79.99, 80, 80.00 / incomplete seven-day data / feed failure / `coupon_new_player = 0` / duplicate account / exact Decimal sums / repeated rows and batches / GMT+8 month boundaries / inactive, scheduled and paused / replace-not-accumulate / failed-refresh keeps last good / stale and partial coverage / generation-swap race / no raw code or Account ID or token anywhere / writes confined / read path never runs the preview / route auth, edge refusal and bad input.

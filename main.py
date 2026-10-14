@@ -2771,7 +2771,11 @@ app.register_blueprint(admin_auth_bp)
 
 # Private read-only V2 reporting snapshot for Databot. Serves 404 unless
 # AFFILIATE_V2_REPORT_ENABLED=true and a bearer secret is configured.
-from affiliate_v2_report_api import make_blueprint as _make_affiliate_v2_report_bp
+from affiliate_v2_report_api import (
+    install_private_listener_guard as _install_private_listener_guard,
+    make_blueprint as _make_affiliate_v2_report_bp,
+)
+_install_private_listener_guard(app)
 app.register_blueprint(_make_affiliate_v2_report_bp(lambda: db))
 
 from campaigns import campaigns_bp
