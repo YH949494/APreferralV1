@@ -1672,7 +1672,7 @@ def _random_pool_summary(campaign: dict, block: dict) -> dict | None:
         "available_inventory": available,
         "issued_inventory": issued,
         "estimated_winning_probability": estimated_probability,
-        "scheduled_close_at": ends_at.isoformat() if isinstance(ends_at, datetime) else None,
+        "scheduled_close_at": _as_utc(ends_at).isoformat() if isinstance(ends_at, datetime) else None,
         "lifecycle_status": random_pool_lifecycle_status(campaign),
         "auto_draw": block.get("auto_draw", True),
         "auto_issue": block.get("auto_issue", True),

@@ -481,13 +481,13 @@ test("QA: changing B's schedule writes only B and leaves untouched instants byte
 
   mod.dispatch("edit", "camp-b");
   await h.flush();
-  h.set("mp-e-starts", "2026-09-07T09:30:15");
+  h.set("mp-e-starts", "2026-09-06T09:30:15");
   mod.dispatch("save-edit", "camp-b");
   await h.flush();
 
   assert.deepEqual(backend.writes.map((w) => [w.op, w.campaign_id]), [["update", "camp-b"]]);
   assert.equal(backend.campaigns["camp-b"].schedule.starts_at,
-    new Date("2026-09-07T09:30:15").toISOString());
+    "2026-09-06T01:30:15.000Z"); // 09:30:15 GMT+8
   // The end instant was never touched, so it must come back byte-identical —
   // schedule.ends_at is one of Phase 1's eligibility cutoffs.
   assert.equal(backend.campaigns["camp-b"].schedule.ends_at, bEndsBefore);
