@@ -29,6 +29,14 @@ on:
       - "affiliate_denomination_shortage.py"
       - "affiliate_qualification.py"
       - "affiliate_qualification_preview.py"
+      - "affiliate_v2_report.py"
+      - "affiliate_v2_report_api.py"
+      - "gunicorn_web.conf.py"
+      - "gunicorn_web_conf_loader.py"
+      - "scripts/listener_smoke_app.py"
+      - "scripts/smoke_web_listeners_image.py"
+      - "test_web_listeners.py"
+      - "Dockerfile"
       - "referral_rules.py"
       - "scripts/affiliate_qualification_admin.py"
       - "scripts/migrate_affiliate_account_dedupe.py"
@@ -78,6 +86,9 @@ env:
     test_affiliate_ci_gate.py
     test_affiliate_query_plan_checklist.py
     test_affiliate_surplus_sweep_index_hint.py
+    test_affiliate_v2_report.py
+    test_affiliate_v2_preview_report.py
+    test_web_listeners.py
     test_affiliate_reward_retention.py
     test_affiliate_my_stats_api.py
     test_affiliate_out_of_stock_retry.py
@@ -183,3 +194,18 @@ jobs:
 
       - name: Compare the failure set to ci/known_test_failures.txt
         run: python ci/full_suite_baseline.py
+
+  web-listener-image-smoke:
+    name: Web listeners in the built image
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the production image
+        run: docker build --tag apreferral-listener-smoke:${{ github.sha }} .
+
+      - name: Public health listener and private IPv6 report listener
+        # No secrets, no Fly access: runs the image's gunicorn with the real
+        # gunicorn_web.conf.py against scripts/listener_smoke_app.py.
+        run: python3 scripts/smoke_web_listeners_image.py --image apreferral-listener-smoke:${{ github.sha }}

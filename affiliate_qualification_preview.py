@@ -276,6 +276,8 @@ def _simulate(evidences, *, control, now_utc, lookup, credited: dict) -> list[di
             "account_masked": ev.get("account_key_masked"),
             "code_masked": ev.get("code_masked"),
             "successful": bool(ev.get("redemption_successful")),
+            # Exact source amount of the evidence this verdict was reached on (reporting only).
+            "after_total_bet": (ev.get("qualification_fields") or {}).get("after_total_bet_amount"),
         })
     return outcomes
 
@@ -307,6 +309,107 @@ def _attribution_cohort(pending_by_invitee, window) -> dict[int, int]:
         if original and window["start_utc"] <= original[1] < window["end_utc"]:
             cohort[invitee] = original[0]
     return cohort
+
+
+def _replay(db, *, control: dict, config: dict | None, cutoff, integration: dict, is_databot: bool,
+            active_invitees: set, cohort_invitees: set, now_utc: datetime) -> dict:
+    """Replay every committed source row through the production validator
+    (:func:`affiliate_qualification.assess_evidence`): "had the rule always applied"
+    (``historical``) and "what activation would do now" (``at_launch``). Reads only.
+    Shared by the admin preview and the cached reporting preview so both are the
+    same evaluator over the same inputs."""
+    stats = Counter(rows_scanned=0, batches=0, skipped_campaign=0, missing_code=0, unknown_code=0, non_welcome_code=0,
+                    removed_observations=0)
+    stats["truncated"] = False
+    observations = _load_observations(db, config, stats)
+    recipients = _resolve_recipients(db, {o["code"] for o in observations})
+    evidences = _build_evidences(observations, recipients, now_utc=now_utc, stats=stats,
+                                 source=aq.source_name(config))
+    # Persisted correction holds must survive a fresh source-only simulation.
+    # Otherwise a preview could advertise a pass that live must reconcile.
+    by_ref = {e["source_ref"]: e for e in evidences}
+    for chunk in _chunks(by_ref):
+        for stored in db[aq.EVIDENCE_COLLECTION].find(
+            {"source_ref": {"$in": chunk}, "rule_version": aq.RULE_VERSION}):
+            shadow = by_ref[stored["source_ref"]]
+            if stored.get("source_conflict_at"):
+                shadow["source_conflict_at"] = stored["source_conflict_at"]
+                shadow["source_conflict_reason"] = stored.get("source_conflict_reason")
+            elif (stored.get("observation_fingerprint") != shadow.get("observation_fingerprint")
+                  and (stored.get("status") not in (aq.EV_RECEIVED, aq.EV_REVIEW)
+                       or stored.get("qualification_decision_at") or stored.get("lease_until"))):
+                shadow["_conflicting_observation"] = True
+
+    evidence_invitees = {
+        int(e["recipient_resolution"]["user_id"]) for e in evidences
+        if (e.get("recipient_resolution") or {}).get("status") == "ok"
+    }
+    invitees = evidence_invitees | cohort_invitees | active_invitees
+    pending_by_invitee = defaultdict(list)
+    for chunk in _chunks(invitees):
+        for row in db.pending_referrals.find(
+            {"invitee_user_id": {"$in": chunk}},
+            {"invitee_user_id": 1, "inviter_user_id": 1, "status": 1, "revoked_reason": 1,
+             "created_at_utc": 1, "destination_type": 1},
+        ):
+            pending_by_invitee[int(row["invitee_user_id"])].append(row)
+    for rows in pending_by_invitee.values():
+        rows.sort(key=lambda r: aq._aware_utc(r.get("created_at_utc")) or datetime.max.replace(tzinfo=timezone.utc))
+    user_ids = set(invitees)
+    for rows in pending_by_invitee.values():
+        for row in rows:
+            try:
+                user_ids.add(int(row.get("inviter_user_id")))
+            except (TypeError, ValueError):
+                pass
+    users = {}
+    for chunk in _chunks(user_ids):
+        for row in db.users.find({"user_id": {"$in": chunk}},
+                                 {"user_id": 1, "joined_main_at": 1, "created_at": 1, "linked_gaming_accounts": 1}):
+            users[int(row["user_id"])] = row
+    account_ids = {aq.account_id_from_key(e["account_key"]) for e in evidences if e.get("account_key")}
+    account_links = defaultdict(set)
+    for chunk in _chunks(account_ids):
+        for row in db.users.find({"linked_gaming_accounts": {"$in": chunk}}, {"user_id": 1, "linked_gaming_accounts": 1}):
+            for acct in aq._linked_accounts(row):
+                if acct in account_ids:
+                    account_links[acct].add(int(row["user_id"]))
+    code_accounts = defaultdict(set)
+    for e in evidences:
+        if e.get("redemption_successful") and e.get("account_key"):
+            code_accounts[e["code_hash"]].add(e.get("account_key"))
+    hashes = list(code_accounts)
+    for chunk in _chunks(hashes):
+        for row in db[aq.EVIDENCE_COLLECTION].find(
+            {"code_hash": {"$in": chunk}, "redemption_successful": True, "status": {"$ne": aq.EV_VOIDED}},
+            {"code_hash": 1, "account_key": 1},
+        ):
+            if row.get("account_key"):
+                code_accounts[row["code_hash"]].add(row["account_key"])
+    real_q = {}
+    for chunk in _chunks(invitees):
+        for row in db.qualified_events.find({"invitee_id": {"$in": chunk}}):
+            real_q[int(row["invitee_id"])] = row
+    registry = {}
+    for chunk in _chunks({e["account_key"] for e in evidences if e.get("account_key")}):
+        for row in db[aq.REGISTRY_COLLECTION].find({"account_key": {"$in": chunk}}, {"account_key": 1, "state": 1}):
+            registry[row["account_key"]] = row.get("state")
+
+    def lookup(real):
+        return ShadowLookup(pending_by_invitee=pending_by_invitee, users=users, account_links=account_links,
+                            real_qualifications=real, code_accounts=code_accounts)
+
+    hist_control = {**control, "source_config": config, "launch_cutoff_utc": None}
+    historical = _simulate(evidences, control=hist_control, now_utc=now_utc, lookup=lookup(None), credited={})
+    launch_cutoff_assumed = cutoff or now_utc
+    launch_control = {**control, "source_config": config, "launch_cutoff_utc": launch_cutoff_assumed}
+    if is_databot:
+        launch_control["source_coverage_end_utc"] = aq.parse_redeemed_at(
+            (integration.get("sync") or {}).get("coverage_end"), "Asia/Kuala_Lumpur")
+    at_launch = _simulate(evidences, control=launch_control, now_utc=now_utc, lookup=lookup(real_q),
+                          credited=dict(registry))
+    return {"stats": stats, "evidences": evidences, "historical": historical, "at_launch": at_launch,
+            "pending_by_invitee": pending_by_invitee, "real_q": real_q}
 
 
 def build_preview(db, *, month: str | None, now_utc: datetime, source_config: dict | None = None,
@@ -416,96 +519,12 @@ def build_preview(db, *, month: str | None, now_utc: datetime, source_config: di
         payload["outcome_reasons"] = {}
         return payload
 
-    stats = Counter(rows_scanned=0, batches=0, skipped_campaign=0, missing_code=0, unknown_code=0, non_welcome_code=0,
-                    removed_observations=0)
-    stats["truncated"] = False
-    observations = _load_observations(db, config, stats)
-    recipients = _resolve_recipients(db, {o["code"] for o in observations})
-    evidences = _build_evidences(observations, recipients, now_utc=now_utc, stats=stats,
-                                 source=aq.source_name(config))
-    # Persisted correction holds must survive a fresh source-only simulation.
-    # Otherwise a preview could advertise a pass that live must reconcile.
-    by_ref = {e["source_ref"]: e for e in evidences}
-    for chunk in _chunks(by_ref):
-        for stored in db[aq.EVIDENCE_COLLECTION].find(
-            {"source_ref": {"$in": chunk}, "rule_version": aq.RULE_VERSION}):
-            shadow = by_ref[stored["source_ref"]]
-            if stored.get("source_conflict_at"):
-                shadow["source_conflict_at"] = stored["source_conflict_at"]
-                shadow["source_conflict_reason"] = stored.get("source_conflict_reason")
-            elif (stored.get("observation_fingerprint") != shadow.get("observation_fingerprint")
-                  and (stored.get("status") not in (aq.EV_RECEIVED, aq.EV_REVIEW)
-                       or stored.get("qualification_decision_at") or stored.get("lease_until"))):
-                shadow["_conflicting_observation"] = True
-
-    evidence_invitees = {
-        int(e["recipient_resolution"]["user_id"]) for e in evidences
-        if (e.get("recipient_resolution") or {}).get("status") == "ok"
-    }
-    invitees = evidence_invitees | cohort_invitees | active_invitees
-    pending_by_invitee = defaultdict(list)
-    for chunk in _chunks(invitees):
-        for row in db.pending_referrals.find(
-            {"invitee_user_id": {"$in": chunk}},
-            {"invitee_user_id": 1, "inviter_user_id": 1, "status": 1, "revoked_reason": 1,
-             "created_at_utc": 1, "destination_type": 1},
-        ):
-            pending_by_invitee[int(row["invitee_user_id"])].append(row)
-    for rows in pending_by_invitee.values():
-        rows.sort(key=lambda r: aq._aware_utc(r.get("created_at_utc")) or datetime.max.replace(tzinfo=timezone.utc))
-    user_ids = set(invitees)
-    for rows in pending_by_invitee.values():
-        for row in rows:
-            try:
-                user_ids.add(int(row.get("inviter_user_id")))
-            except (TypeError, ValueError):
-                pass
-    users = {}
-    for chunk in _chunks(user_ids):
-        for row in db.users.find({"user_id": {"$in": chunk}},
-                                 {"user_id": 1, "joined_main_at": 1, "created_at": 1, "linked_gaming_accounts": 1}):
-            users[int(row["user_id"])] = row
-    account_ids = {aq.account_id_from_key(e["account_key"]) for e in evidences if e.get("account_key")}
-    account_links = defaultdict(set)
-    for chunk in _chunks(account_ids):
-        for row in db.users.find({"linked_gaming_accounts": {"$in": chunk}}, {"user_id": 1, "linked_gaming_accounts": 1}):
-            for acct in aq._linked_accounts(row):
-                if acct in account_ids:
-                    account_links[acct].add(int(row["user_id"]))
-    code_accounts = defaultdict(set)
-    for e in evidences:
-        if e.get("redemption_successful") and e.get("account_key"):
-            code_accounts[e["code_hash"]].add(e.get("account_key"))
-    hashes = list(code_accounts)
-    for chunk in _chunks(hashes):
-        for row in db[aq.EVIDENCE_COLLECTION].find(
-            {"code_hash": {"$in": chunk}, "redemption_successful": True, "status": {"$ne": aq.EV_VOIDED}},
-            {"code_hash": 1, "account_key": 1},
-        ):
-            if row.get("account_key"):
-                code_accounts[row["code_hash"]].add(row["account_key"])
-    real_q = {}
-    for chunk in _chunks(invitees):
-        for row in db.qualified_events.find({"invitee_id": {"$in": chunk}}):
-            real_q[int(row["invitee_id"])] = row
-    registry = {}
-    for chunk in _chunks({e["account_key"] for e in evidences if e.get("account_key")}):
-        for row in db[aq.REGISTRY_COLLECTION].find({"account_key": {"$in": chunk}}, {"account_key": 1, "state": 1}):
-            registry[row["account_key"]] = row.get("state")
-
-    def lookup(real):
-        return ShadowLookup(pending_by_invitee=pending_by_invitee, users=users, account_links=account_links,
-                            real_qualifications=real, code_accounts=code_accounts)
-
-    hist_control = {**control, "source_config": config, "launch_cutoff_utc": None}
-    historical = _simulate(evidences, control=hist_control, now_utc=now_utc, lookup=lookup(None), credited={})
-    launch_cutoff_assumed = cutoff or now_utc
-    launch_control = {**control, "source_config": config, "launch_cutoff_utc": launch_cutoff_assumed}
-    if is_databot:
-        launch_control["source_coverage_end_utc"] = aq.parse_redeemed_at(
-            (integration.get("sync") or {}).get("coverage_end"), "Asia/Kuala_Lumpur")
-    at_launch = _simulate(evidences, control=launch_control, now_utc=now_utc, lookup=lookup(real_q),
-                          credited=dict(registry))
+    replay = _replay(db, control=control, config=config, cutoff=cutoff, integration=integration,
+                     is_databot=is_databot, active_invitees=active_invitees, cohort_invitees=cohort_invitees,
+                     now_utc=now_utc)
+    stats, evidences, historical, at_launch = (replay["stats"], replay["evidences"], replay["historical"],
+                                               replay["at_launch"])
+    pending_by_invitee, real_q = replay["pending_by_invitee"], replay["real_q"]
 
     def in_period(o):
         return o["redeemed_at"] is not None and window["start_utc"] <= o["redeemed_at"] < window["end_utc"]
