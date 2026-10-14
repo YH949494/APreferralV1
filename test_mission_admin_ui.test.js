@@ -685,9 +685,10 @@ test("no Mission-specific inventory writer exists in the admin surface", () => {
 // ===========================================================================
 
 test("schedule values keep seconds and round-trip to the same instant", () => {
+  // Display is Asia/Kuala_Lumpur (UTC+8), independent of the host timezone.
   const out = CORE.isoToLocalInput("2026-09-30T12:34:37+00:00");
-  assert.match(out, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/);
-  assert.equal(new Date(out).getTime(), new Date("2026-09-30T12:34:37+00:00").getTime());
+  assert.equal(out, "2026-09-30T20:34:37");
+  assert.equal(CORE.localInputToIso(out), "2026-09-30T12:34:37.000Z");
   assert.equal(CORE.isoToLocalInput(""), "");
   assert.equal(CORE.isoToLocalInput("not-a-date"), "");
 });
@@ -697,9 +698,9 @@ test("an untouched schedule field resends the exact original instant", () => {
   // Unedited: the server's own string goes back verbatim, so no conversion
   // can perturb schedule.ends_at (a Phase 1 eligibility cutoff).
   assert.equal(CORE.scheduleValueForSave(field, field.display), "2026-09-05T12:00:37.123456+00:00");
-  // Edited: converted from what the operator actually typed.
+  // Edited: converted from what the operator actually typed (GMT+8).
   const edited = CORE.scheduleValueForSave(field, "2026-09-05T13:00:00");
-  assert.equal(edited, new Date("2026-09-05T13:00:00").toISOString());
+  assert.equal(edited, "2026-09-05T05:00:00.000Z");
   assert.equal(CORE.scheduleValueForSave(field, ""), null);
 });
 

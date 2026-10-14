@@ -531,7 +531,10 @@ def _serialize(doc: dict) -> dict:
         schedule = dict(out["schedule"])
         for k in ("starts_at", "ends_at"):
             if schedule.get(k):
-                schedule[k] = schedule[k].isoformat()
+                # PyMongo hands back naive-UTC datetimes; a bare isoformat()
+                # drops the offset and every JS Date then reads it as the
+                # viewer's LOCAL time (the 8h admin schedule shift).
+                schedule[k] = _as_utc(schedule[k]).isoformat()
         out["schedule"] = schedule
     return out
 

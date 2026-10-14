@@ -270,19 +270,62 @@
    * schedule.ends_at is one of Phase 1's eligibility cutoffs, so a
    * conversion that moved it by even a second could drop valid submissions.
    */
-  function isoToLocalInput(iso) {
-    if (!iso) return "";
-    var d = new Date(iso);
-    if (isNaN(d.getTime())) return "";
-    var pad = function (n) { return (n < 10 ? "0" : "") + n; };
-    return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) +
-      "T" + pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds());
+  // Admin schedule inputs are Asia/Kuala_Lumpur wall-clock time. KL is a
+  // fixed UTC+8 (no DST), so conversion is exact arithmetic that never reads
+  // the browser's timezone (same rule as admin-dashboard.js ccKlInputToUtcIso,
+  // which drops seconds and so cannot be reused for step=1 inputs).
+  var KL_OFFSET_MS = 8 * 3600 * 1000;
+  var HAS_ZONE = /(Z|[+-]\d{2}:?\d{2})$/i;
+  var WALL_CLOCK = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?$/;
+
+  function pad2(n) { return (n < 10 ? "0" : "") + n; }
+
+  // Parses a server timestamp to a Date. A value with no zone designator is
+  // a naive-UTC datetime (PyMongo drops tzinfo on read) and is read as UTC —
+  // `new Date("2026-10-14T14:00:00")` would otherwise use the browser zone.
+  function parseServerInstant(iso) {
+    if (!iso) return null;
+    var str = String(iso).trim();
+    var d = new Date(HAS_ZONE.test(str) ? str : str + "Z");
+    return isNaN(d.getTime()) ? null : d;
   }
 
+  function klWallClock(d) {
+    var kl = new Date(d.getTime() + KL_OFFSET_MS);
+    return kl.getUTCFullYear() + "-" + pad2(kl.getUTCMonth() + 1) + "-" + pad2(kl.getUTCDate()) +
+      " " + pad2(kl.getUTCHours()) + ":" + pad2(kl.getUTCMinutes()) + ":" + pad2(kl.getUTCSeconds());
+  }
+
+  /** UTC instant -> datetime-local value (KL wall clock, seconds kept). */
+  function isoToLocalInput(iso) {
+    var d = parseServerInstant(iso);
+    return d ? klWallClock(d).replace(" ", "T") : "";
+  }
+
+  /**
+   * KL datetime-local value -> UTC ISO string. An input that carries its own
+   * zone designator (e.g. a pasted "...Z") is honoured as that exact instant.
+   */
   function localInputToIso(value) {
     if (!value) return null;
-    var d = new Date(value);
-    return isNaN(d.getTime()) ? null : d.toISOString();
+    var str = String(value).trim();
+    if (HAS_ZONE.test(str)) {
+      var abs = new Date(str);
+      return isNaN(abs.getTime()) ? null : abs.toISOString();
+    }
+    var m = WALL_CLOCK.exec(str);
+    if (!m) return null;
+    var ms = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +(m[6] || 0)) - KL_OFFSET_MS;
+    var d = new Date(ms);
+    // Date.UTC normalises 2026-02-31 etc.; reject instead of silently shifting.
+    return klWallClock(d).slice(0, 16) === (m[1] + "-" + m[2] + "-" + m[3] + " " + m[4] + ":" + m[5])
+      ? d.toISOString() : null;
+  }
+
+  /** UTC instant -> "YYYY-MM-DD HH:MM:SS GMT+8" for read-only display. */
+  function formatKl(iso) {
+    var d = parseServerInstant(iso);
+    return d ? klWallClock(d) + " GMT+8" : "—";
   }
 
   function scheduleFieldFrom(iso) {
@@ -488,6 +531,7 @@
     localInputToIso: localInputToIso,
     scheduleFieldFrom: scheduleFieldFrom,
     scheduleValueForSave: scheduleValueForSave,
+    formatKl: formatKl,
   };
 
   // =======================================================================
@@ -532,7 +576,7 @@
     return isNaN(n) ? String(v) : n.toLocaleString();
   }
 
-  function dt(v) { return v ? new Date(v).toLocaleString() : "—"; }
+  function dt(v) { return formatKl(v); }
 
   function statePill(state) {
     var kind = { live: "approved", completed: "approved", scheduled: "pending",
@@ -918,7 +962,7 @@
 
   function createStep3(d) {
     var body = field("Start", textInput("mp-c-starts", d.starts_at, "", "datetime-local", ' step="1"'),
-        "Times are entered and shown in this browser's local time (admin operations run on Kuala Lumpur time, GMT+8). Seconds are preserved.") +
+        "Times are entered and shown in Kuala Lumpur time (Asia/Kuala_Lumpur, GMT+8), regardless of this browser's timezone. Seconds are preserved.") +
       field("End", textInput("mp-c-ends", d.ends_at, "", "datetime-local", ' step="1"'),
         "The end time is one of the mission's eligibility cutoffs.") +
       field("Winner Selection", select("mp-c-allocation", d.allocation_method, [
@@ -1075,8 +1119,12 @@
     }
     if (d.step === 2) {
       if (!d.starts_at) return "A start time is required.";
-      if (d.ends_at && localInputToIso(d.ends_at) <= localInputToIso(d.starts_at)) {
-        return "The end time must be after the start time.";
+      var startIso = localInputToIso(d.starts_at);
+      if (!startIso) return "The start time is not a valid date/time.";
+      if (d.ends_at) {
+        var endIso = localInputToIso(d.ends_at);
+        if (!endIso) return "The end time is not a valid date/time.";
+        if (Date.parse(endIso) <= Date.parse(startIso)) return "The end time must be after the start time.";
       }
       return validateRandomPoolFields(d);
     }
@@ -1376,7 +1424,7 @@
       ["Winner count", num(rp.winner_count)],
       ["Available inventory", num(rp.available_inventory)],
       ["Estimated winning probability", probability != null ? (Math.round(probability * 1000) / 10) + "%" : "—"],
-      ["Scheduled close (browser local time)", dt(rp.scheduled_close_at)],
+      ["Scheduled close (GMT+8)", dt(rp.scheduled_close_at)],
       ["Processing state", rp.lifecycle_status || "—"],
     ].map(function (r) {
       return "<tr><td>" + esc(r[0]) + "</td><td>" + r[1] + "</td></tr>";
@@ -1820,6 +1868,15 @@
     var randomPoolProblem = validateRandomPoolFields(f);
     if (randomPoolProblem) { host.toast("❌ " + randomPoolProblem, "error"); return; }
 
+    var startsOut = scheduleValueForSave(es.starts, f.starts_display);
+    var endsOut = scheduleValueForSave(es.ends, f.ends_display);
+    if (!state.schedule_editable) { startsOut = endsOut = null; }
+    else if (f.starts_display && !startsOut) { host.toast("❌ The start time is not a valid date/time.", "error"); return; }
+    else if (f.ends_display && !endsOut) { host.toast("❌ The end time is not a valid date/time.", "error"); return; }
+    else if (startsOut && endsOut && parseServerInstant(endsOut) <= parseServerInstant(startsOut)) {
+      host.toast("❌ The end time must be after the start time.", "error"); return;
+    }
+
     var body = {
       name: (f.name || es.campaign.name || "").trim(),
       mission_pool: Object.assign({
@@ -1866,8 +1923,8 @@
     // untouched field resends the exact original instant.
     if (state.schedule_editable) {
       body.schedule = {
-        starts_at: scheduleValueForSave(es.starts, f.starts_display),
-        ends_at: scheduleValueForSave(es.ends, f.ends_display),
+        starts_at: startsOut,
+        ends_at: endsOut,
       };
     }
 
@@ -1994,7 +2051,7 @@
   /** Moves schedule.ends_at later for a mission that has not locked yet. */
   function runExtendDeadline(campaignId, button) {
     var raw = (typeof window !== "undefined" && window.prompt)
-      ? window.prompt("New scheduled close time (this browser's local time, e.g. 2026-01-31T18:00):") : null;
+      ? window.prompt("New scheduled close time (Kuala Lumpur time, GMT+8, e.g. 2026-01-31T18:00):") : null;
     if (!raw) return Promise.resolve();
     var iso = localInputToIso(raw);
     if (!iso) { host.toast("❌ Could not parse that date/time.", "error"); return Promise.resolve(); }
