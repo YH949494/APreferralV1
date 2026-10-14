@@ -869,6 +869,24 @@ def tick_5min() -> None:
             )
 
             with JobTimer() as step_timer:
+                # Databot Affiliate Performance V2 reporting snapshot. Writes
+                # only affiliate_v2_report_*; reads persisted decisions and never
+                # qualifies. No-op unless AFFILIATE_V2_REPORT_ENABLED=true.
+                try:
+                    import affiliate_v2_report
+
+                    v2_report = affiliate_v2_report.run_scheduled_refresh(db)
+                    if not v2_report.get("skipped"):
+                        logger.info("[JOB][5MIN] affiliate_v2_report run_id=%s result=%s", run_id, v2_report)
+                except Exception as exc:
+                    logger.exception("[JOB][5MIN] step_error name=affiliate_v2_report run_id=%s err=%s", run_id, exc)
+            logger.info(
+                "[JOB][5MIN] step_done name=affiliate_v2_report elapsed_s=%.2f run_id=%s",
+                step_timer.elapsed_s,
+                run_id,
+            )
+
+            with JobTimer() as step_timer:
                 logger.info(
                     "[JOB][5MIN] progress step=settle_xp_snapshots run_id=%s",
                     run_id,
@@ -2750,6 +2768,11 @@ app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024
 app.register_blueprint(vouchers_bp, url_prefix="/v2/miniapp")
 configure_admin_session(app)
 app.register_blueprint(admin_auth_bp)
+
+# Private read-only V2 reporting snapshot for Databot. Serves 404 unless
+# AFFILIATE_V2_REPORT_ENABLED=true and a bearer secret is configured.
+from affiliate_v2_report_api import make_blueprint as _make_affiliate_v2_report_bp
+app.register_blueprint(_make_affiliate_v2_report_bp(lambda: db))
 
 from campaigns import campaigns_bp
 app.register_blueprint(campaigns_bp)
