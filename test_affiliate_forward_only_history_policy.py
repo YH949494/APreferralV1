@@ -930,3 +930,19 @@ def test_reopen_commit_reports_the_actual_refusal_and_exits_nonzero(monkeypatch,
         "revoked_reason": "insufficient_engagement", "created_at_utc": OLD_JOIN}).inserted_id
     ok = {"eligible_rows": [{"pending_id": str(pid2), "invitee_user_id": 402, "inviter_user_id": 900, "chat_id": -100}]}
     assert audit._commit(w2.db, ok, NOW) == 0 and ok["reopened_count"] == 1
+
+
+def test_reopen_lease_is_taken_with_a_fresh_timestamp_after_a_slow_report():
+    from datetime import datetime, timezone
+    import official_channel_reopen_audit as audit
+
+    w = forward_world()
+    pid = w.db.pending_referrals.insert_one({
+        "invitee_user_id": 401, "inviter_user_id": 900, "status": "revoked", "destination_type": "official_channel",
+        "revoked_reason": "insufficient_engagement", "created_at_utc": OLD_JOIN}).inserted_id
+    row = {"pending_id": str(pid), "invitee_user_id": 401, "inviter_user_id": 900, "chat_id": -100}
+    # build_report() started an hour ago and only now hands over: the report timestamp is far older than the lease
+    stale_report_time = datetime.now(timezone.utc) - timedelta(hours=1)
+    result = audit._reopen(w.db, [row], stale_report_time)
+    assert result == {"reopened_count": 1, "lock_blocked_pending_ids": []}
+    assert w.db.pending_referrals.find_one({"_id": pid})["status"] == "pending"
