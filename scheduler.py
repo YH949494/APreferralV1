@@ -4880,6 +4880,9 @@ def run_welcome_redemption_qualification(now_utc_ts: datetime | None = None) -> 
     out = {"active": affiliate_qualification.new_rule_active(control, now_ts)}
     if control and affiliate_qualification.launch_cutoff(control) is not None:
         out["pending_marked"] = affiliate_qualification.mark_activation_cohort(db, control=control, now_utc=now_ts)
+        # The hand-off pass may just have recorded completion: decide on the CURRENT control, not the
+        # snapshot read before marking.
+        control = affiliate_qualification.get_control(db) or control
     if out["active"]:
         config = (control or {}).get("source_config") or {}
         problems = affiliate_qualification.validate_source_config(config)

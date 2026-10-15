@@ -776,3 +776,39 @@ def test_handoff_is_recorded_complete_only_by_a_pass_at_or_after_the_cutoff(monk
     # from here the population is closed
     w.join(900, 102, at=OLD_JOIN, status="pending")
     assert aq.mark_activation_cohort(w.db, control=aq.get_control(w.db), now_utc=cutoff + timedelta(minutes=1)) == 0
+
+
+def test_namespace_column_sources_need_no_fixed_namespace_authorization():
+    w = World(mode=aq.MODE_DISABLED, cutoff=None)
+    cfg = {**aq.get_control(w.db)["source_config"], "account_namespace": None, "namespace_column": "brand"}
+    w.db[aq.CONTROL_COLLECTION].update_one({}, {"$set": {"source_config": cfg, "seeded_identity_config": aq.identity_config(cfg)}})
+    w.db.qualified_events.insert_one({"invitee_id": 999, "referrer_id": 900, "qualified_at": CUTOFF})
+    w.upload([{**w.row("coverage", "coverage-account", NOW), "brand": "advantplay"}])
+    plan = migration.build_plan(w.db, config=cfg, seed_from_linkage=False, now_utc=NOW,
+                                history_policy=aq.HISTORY_FORWARD, activation_cutoff=NOW.isoformat())
+    inputs = {"activation_cutoff": NOW.isoformat(), "operator": "ops", "reason": "launch",
+              "report_fingerprint": plan["report_fingerprint"], "unresolved_count": plan["unresolved_events"],
+              "qualified_history_count": plan["historical_events"], "seeded_count": plan["accounts_to_seed"],
+              "account_namespace": None}
+    blockers = migration._forward_only_blockers(inputs, plan, aq.get_control(w.db))
+    assert blockers == []
+    assert "forward_only_account_namespace_mismatch" in migration._forward_only_blockers(
+        {**inputs, "account_namespace": "advantplay"}, plan, aq.get_control(w.db))   # a stray fixed value still refused
+
+
+def test_membership_decision_uses_the_current_handoff_marker_not_the_callers_stale_control(monkeypatch):
+    w = forward_world()
+    add(w, 102, "acct-102", status="pending")
+    go(w, monkeypatch)                                              # hand-off complete at the cutoff
+    stale = {k: v for k, v in aq.get_control(w.db).items() if k not in ("launch_handoff_completed_cutoff",
+                                                                         "launch_handoff_completed_at")}
+    add(w, 101, "acct-101", status="revoked")                       # terminal pre-cutoff, evidence arrives
+    w.db.pending_referrals.update_one({"invitee_user_id": 101}, {"$set": {"status": "pending"}})   # then reopened
+    run(w, monkeypatch, now=NOW + timedelta(minutes=1))             # extraction creates the evidence
+    e = ev(w, 101)
+    assert (e["status"], e["reason"]) == (aq.EV_REVIEW, "referral_not_active_at_rollout")
+    assert aq.requeue_evidence(w.db, evidence_id=e["_id"], now_utc=NOW)
+    e = w.db[aq.EVIDENCE_COLLECTION].find_one({"_id": e["_id"]})
+    result = aq.evaluate_evidence(w.db, e, control=stale, now_utc=NOW + timedelta(minutes=2))   # stale snapshot
+    assert result == {"status": aq.EV_REVIEW, "reason": "referral_not_active_at_rollout"}
+    assert w.db.qualified_events.count_documents({"invitee_id": 101}) == 0

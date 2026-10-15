@@ -1618,8 +1618,15 @@ def _finalize(db, evidence: dict, status: str, reason: str | None, *, now_utc: d
     # referral_revoked event is manufactured for a never-qualified invitee.
     invitee = fields.get("invitee_id") or (evidence.get("recipient_resolution") or {}).get("user_id")
     if invitee and status in (EV_REVIEW, EV_REJECTED, EV_DUPLICATE_ACCOUNT):
+        flt = {"invitee_user_id": invitee, "status": {"$in": list(ACTIVE_PENDING_STATUSES)}}
+        control = get_control(db)
+        if handoff_complete(control, now_utc):
+            # The population is closed: a verdict never enrols a pre-cutoff referral that was not already a
+            # member (e.g. a historical row reopened after launch); it only updates members/future referrals.
+            flt["$or"] = [{"qualification_rule_version": RULE_VERSION},
+                          {"created_at_utc": {"$gte": launch_cutoff(control)}}]
         db.pending_referrals.update_many(
-            {"invitee_user_id": invitee, "status": {"$in": list(ACTIVE_PENDING_STATUSES)}},
+            flt,
             {"$set": {"status": PENDING_AWAITING_REDEMPTION if status == EV_REVIEW else "rejected",
                       "qualification_rule_version": RULE_VERSION, "qualification_outcome": status,
                       "qualification_reason": reason, "qualification_checked_at": now_utc}},
@@ -1825,6 +1832,12 @@ def evaluate_evidence(db, evidence: dict, *, control: dict, now_utc: datetime) -
     # Workers can hold an earlier snapshot while another extractor observes a
     # correction. Re-read the canonical row before making any award decision.
     evidence = db[EVIDENCE_COLLECTION].find_one({"_id": evidence["_id"]}) or evidence
+    # Membership depends on the hand-off completion marker, which a concurrent marking pass may record
+    # while a long batch is running: read it fresh for every decision instead of trusting the caller's snapshot.
+    fresh = get_control(db) or {}
+    control = {**control, **{k: fresh[k] for k in ("launch_handoff_completed_cutoff",) if k in fresh}}
+    if "launch_handoff_completed_cutoff" not in fresh:
+        control.pop("launch_handoff_completed_cutoff", None)
     if evidence.get("source_row_ids") and _code_from_source_rows(db, evidence, control.get("source_config")) is None:
         return _finalize(db, evidence, EV_REVIEW, "source_row_unavailable", now_utc=now_utc)
     a = assess_evidence(evidence, control=control, now_utc=now_utc, lookup=DbLookup(db))

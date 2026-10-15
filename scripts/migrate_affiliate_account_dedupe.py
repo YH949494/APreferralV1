@@ -520,7 +520,11 @@ def _forward_blockers_expected(plan, control):
 def _forward_only_blockers(forward_only, plan, control) -> list[str]:
     """Every operator input must be present, and every figure must equal the dry run."""
     fo = forward_only or {}
-    blockers = [f"forward_only_missing_{f}" for f in FORWARD_FIELDS if fo.get(f) in (None, "")]
+    expected_ns = _forward_blockers_expected(plan, control)["account_namespace"]
+    # A source that takes its namespace from a column has no fixed namespace to authorize (its identity
+    # config is covered by the fingerprint); only a fixed-namespace source requires the operator's value.
+    required = [f for f in FORWARD_FIELDS if f != "account_namespace" or expected_ns is not None]
+    blockers = [f"forward_only_missing_{f}" for f in required if fo.get(f) in (None, "")]
     for field, expected in _forward_blockers_expected(plan, control).items():
         if fo.get(field) not in (None, "") and str(fo[field]) != str(expected):
             blockers.append(f"forward_only_{field}_mismatch")
