@@ -1,8 +1,9 @@
 """Coverage for the weekly_leaderboard_history duplicate-key incident:
 
 - `scripts/dedupe_weekly_leaderboard_history.py` finds every duplicated
-  week_start, backs up every non-canonical document before deleting it,
-  is a no-op dry-run, and is idempotent on rerun.
+  week_start, keeps the verified pre-reset snapshot (never a zeroed latest
+  one), backs up every document before deleting any, defaults to dry-run,
+  aborts on ambiguity, and survives interrupted backup/cleanup.
 - Canonical selection (`pick_canonical`) is deterministic regardless of
   document order.
 - uniq_weekly_history_week_start can be created after cleanup, and rejects
@@ -22,6 +23,8 @@ from pymongo.errors import DuplicateKeyError
 
 from scripts.dedupe_weekly_leaderboard_history import (
     BACKUP_COLLECTION_NAME,
+    AmbiguousCanonicalError,
+    UnsafeCleanupError,
     INDEX_NAME,
     create_unique_index,
     dedupe,
@@ -61,13 +64,19 @@ def _client_and_collections():
     return db["weekly_leaderboard_history"], db[BACKUP_COLLECTION_NAME]
 
 
-def _doc(week_start, *, source, archived_at, checkin=1, referral=1, week_end="w-end", _id=None):
+def _board(values, field):
+    return [{"user_id": 1000 + i, "username": f"u{i}", field: v} for i, v in enumerate(values)]
+
+
+def _doc(week_start, *, source="live_counters", archived_at=None, xp=(10, 5), refs=(2, 1),
+         week_end="2025-08-31", _id=None):
+    """Snapshot in the persisted schema: weekly_xp / weekly_referrals entries."""
     d = {
         "week_start": week_start,
         "week_end": week_end,
-        "checkin_leaderboard": [{"user_id": i} for i in range(checkin)],
-        "referral_leaderboard": [{"user_id": i} for i in range(referral)],
-        "archived_at": archived_at,
+        "checkin_leaderboard": _board(xp, "weekly_xp"),
+        "referral_leaderboard": _board(refs, "weekly_referrals"),
+        "archived_at": archived_at or datetime.utcnow(),
         "source": source,
     }
     if _id is not None:
@@ -75,38 +84,109 @@ def _doc(week_start, *, source, archived_at, checkin=1, referral=1, week_end="w-
     return d
 
 
+T0 = datetime(2025, 9, 1, 0, 0, 0, 16000)  # naive, as pymongo returns it
+
+
+def _incident(n_zero=20):
+    """Pre-reset snapshot first, then a partial reset, then many zeroed copies;
+    the LATEST snapshot is zeroed (production shape for week 2025-08-25)."""
+    docs = [_doc("2025-08-25", xp=(160, 90, 40), refs=(5, 3, 1), archived_at=T0, _id="pre")]
+    docs.append(_doc("2025-08-25", xp=(70, 0, 0), refs=(5, 3, 1), archived_at=T0 + timedelta(minutes=1), _id="partial"))
+    for i in range(n_zero):
+        docs.append(_doc("2025-08-25", xp=(0, 0, 0), refs=(0, 0, 0),
+                         archived_at=T0 + timedelta(minutes=2 + i), _id=f"zero{i:02d}"))
+    return docs
+
+
 # ---------------------------------------------------------------------------
-# Canonical selection determinism
+# Canonical selection
 # ---------------------------------------------------------------------------
 
-def test_pick_canonical_prefers_most_complete_valid_latest():
-    now = datetime.now(timezone.utc)
-    older = _doc("2025-08-25", source="live_counters", archived_at=now - timedelta(days=1), checkin=1, referral=1)
-    incomplete = {"week_start": "2025-08-25", "source": "legacy", "_id": "incomplete"}  # no week_end/entries
-    newest_complete = _doc("2025-08-25", source="live_counters", archived_at=now, checkin=2, referral=2)
-
-    docs = [older, incomplete, newest_complete]
-    for _id, d in zip(["a", "b", "c"], docs):
-        d["_id"] = _id
-    # incomplete overwritten _id above; keep it distinct
-    incomplete["_id"] = "b"
-
-    canonical = pick_canonical(docs)
-    assert canonical["_id"] == "c"
+def test_pick_canonical_selects_pre_reset_not_latest_zeroed():
+    docs = _incident()
+    assert max(docs, key=lambda d: d["archived_at"])["_id"] == "zero19"  # latest is zeroed
+    assert pick_canonical(docs)["_id"] == "pre"
+    assert pick_canonical(list(reversed(docs)))["_id"] == "pre"
 
 
-def test_pick_canonical_is_order_independent_and_deterministic():
-    now = datetime.now(timezone.utc)
+def test_pick_canonical_not_chosen_by_earliest_timestamp_alone():
+    """Earliest snapshot is a degraded one; a later snapshot holds the real standings."""
     docs = [
-        _doc("2025-08-25", source="s1", archived_at=now, _id="x1"),
-        _doc("2025-08-25", source="s2", archived_at=now, _id="x2"),  # exact tie except _id
+        _doc("w", xp=(50, 0), refs=(1, 0), archived_at=T0, _id="early_degraded"),
+        _doc("w", xp=(160, 90), refs=(5, 3), archived_at=T0 + timedelta(minutes=5), _id="later_real"),
+        _doc("w", xp=(0, 0), refs=(0, 0), archived_at=T0 + timedelta(minutes=9), _id="zero"),
+    ]
+    assert pick_canonical(docs)["_id"] == "later_real"
+
+
+def test_pick_canonical_ignores_zeroed_even_if_most_complete_and_latest():
+    docs = [
+        _doc("w", xp=(9, 4), refs=(1, 0), archived_at=T0, _id="real"),
+        _doc("w", xp=(0,) * 100, refs=(0,) * 100, archived_at=T0 + timedelta(hours=2), _id="zero"),
+    ]
+    assert pick_canonical(docs)["_id"] == "real"
+
+
+def test_pick_canonical_all_zeroed_is_ambiguous():
+    docs = [_doc("w", xp=(0, 0), refs=(0,), _id="a"), _doc("w", xp=(0,), refs=(0,), _id="b")]
+    with pytest.raises(AmbiguousCanonicalError):
+        pick_canonical(docs)
+
+
+def test_pick_canonical_conflicting_rankings_is_ambiguous():
+    """Check-in intact in A, referral intact in B: no snapshot dominates."""
+    docs = [
+        _doc("w", xp=(160, 90), refs=(0, 0), archived_at=T0, _id="A"),
+        _doc("w", xp=(0, 0), refs=(5, 3), archived_at=T0 + timedelta(minutes=1), _id="B"),
+    ]
+    with pytest.raises(AmbiguousCanonicalError, match="conflicting"):
+        pick_canonical(docs)
+
+
+def test_pick_canonical_conflicting_users_is_ambiguous():
+    a = _doc("w", archived_at=T0, _id="A")
+    b = _doc("w", archived_at=T0 + timedelta(minutes=1), _id="B")
+    b["checkin_leaderboard"] = [{"user_id": 1000, "username": "u0", "weekly_xp": 3},
+                                {"user_id": 7777, "username": "z", "weekly_xp": 99}]
+    with pytest.raises(AmbiguousCanonicalError):
+        pick_canonical([a, b])
+
+
+def test_pick_canonical_unparseable_snapshot_is_ambiguous():
+    bad = _doc("w", _id="bad")
+    bad["checkin_leaderboard"] = [{"user_id": 1, "xp": 5}]  # wrong field name for persisted schema
+    with pytest.raises(AmbiguousCanonicalError, match="unparseable"):
+        pick_canonical([_doc("w", _id="ok"), bad])
+
+
+def test_pick_canonical_identical_duplicates_resolve_deterministically():
+    docs = [
+        _doc("w", archived_at=T0 + timedelta(minutes=3), _id="x2"),
+        _doc("w", archived_at=T0, _id="x1"),
+        _doc("w", archived_at=T0 + timedelta(minutes=3), _id="x3"),
     ]
     results = set()
     for _ in range(20):
-        shuffled = list(docs)
-        random.shuffle(shuffled)
-        results.add(pick_canonical(shuffled)["_id"])
-    assert len(results) == 1  # always resolves to the same doc via the _id tiebreak
+        random.shuffle(docs)
+        results.add(pick_canonical(docs)["_id"])
+    assert results == {"x1"}
+
+
+def test_pick_canonical_tolerates_topn_truncation_and_new_week_noise():
+    pre = _doc("w", xp=(160, 90, 40), refs=(5, 3), _id="pre", archived_at=T0)
+    noisy = _doc("w", xp=(0, 0), refs=(0, 0), _id="noisy", archived_at=T0 + timedelta(minutes=1))
+    noisy["checkin_leaderboard"] = [{"user_id": 9999, "username": "n", "weekly_xp": 10}] + noisy["checkin_leaderboard"]
+    # 10 <= pre's lowest entry (40): consistent with a user cut off by top-N, not a conflict
+    assert pick_canonical([pre, noisy])["_id"] == "pre"
+
+
+def test_pinned_canonical_must_still_be_eligible():
+    docs = _incident(3)
+    assert pick_canonical(docs, pinned_id="pre")["_id"] == "pre"
+    with pytest.raises(AmbiguousCanonicalError):
+        pick_canonical(docs, pinned_id="zero00")
+    with pytest.raises(AmbiguousCanonicalError):
+        pick_canonical(docs, pinned_id="missing")
 
 
 # ---------------------------------------------------------------------------
@@ -115,113 +195,192 @@ def test_pick_canonical_is_order_independent_and_deterministic():
 
 def test_dry_run_makes_no_database_changes():
     history, backup = _client_and_collections()
-    now = datetime.now(timezone.utc)
-    history.insert_many([
-        _doc("2025-08-25", source="live_counters", archived_at=now, _id="keep"),
-        _doc("2025-08-25", source="legacy", archived_at=now - timedelta(days=1), _id="dupe"),
-        _doc("2025-09-01", source="live_counters", archived_at=now, _id="lonely"),
-    ])
+    history.insert_many(_incident(5) + [_doc("2025-09-01", _id="lonely")])
 
-    result = dedupe(history_collection=history, backup_collection=backup, dry_run=True)
+    result = dedupe(history_collection=history, backup_collection=backup)  # default = dry-run
 
     assert result["mode"] == "dry_run"
     assert result["duplicate_groups"] == 1
-    assert history.count_documents({}) == 3
+    assert history.count_documents({}) == 8
     assert backup.count_documents({}) == 0
 
 
-def test_apply_backs_up_and_removes_only_non_canonical_duplicates():
+def test_apply_retains_pre_reset_standings_and_backs_up_every_document():
     history, backup = _client_and_collections()
-    now = datetime.now(timezone.utc)
-    history.insert_many([
-        _doc("2025-08-25", source="live_counters", archived_at=now, checkin=5, referral=5, _id="keep"),
-        _doc("2025-08-25", source="legacy", archived_at=now - timedelta(days=1), checkin=1, referral=1, _id="dupe1"),
-        _doc("2025-08-25", source="legacy", archived_at=now - timedelta(days=2), checkin=1, referral=1, _id="dupe2"),
-        _doc("2025-09-01", source="live_counters", archived_at=now, _id="lonely"),
-    ])
+    docs = _incident(298)  # 300 documents, like production
+    assert len(docs) == 300
+    originals = {d["_id"]: dict(d) for d in docs}
+    history.insert_many(docs)
+    history.insert_one(_doc("2025-09-01", _id="lonely"))
 
     result = dedupe(history_collection=history, backup_collection=backup, dry_run=False)
 
     assert result["mode"] == "apply"
-    assert result["duplicate_groups"] == 1
-    assert result["deleted"] == 2
-    assert result["backed_up"] == 2
-
+    assert result["backed_up"] == 300 and result["deleted"] == 299
     remaining = list(history.find({"week_start": "2025-08-25"}))
-    assert len(remaining) == 1
-    assert remaining[0]["_id"] == "keep"
-
-    # lonely week untouched
+    assert [d["_id"] for d in remaining] == ["pre"]
+    assert remaining[0]["checkin_leaderboard"][0]["weekly_xp"] == 160  # not the zeroed latest
     assert history.count_documents({"week_start": "2025-09-01"}) == 1
 
-    backed_up_ids = {d["_id"] for d in backup.find({})}
-    assert backed_up_ids == {"dupe1", "dupe2"}
-    for d in backup.find({}):
-        assert d["_dedupe_meta"]["canonical_id"] == "keep"
-        assert d["_dedupe_meta"]["week_start"] == "2025-08-25"
+    assert backup.count_documents({}) == 300
+    for b in backup.find({}):
+        meta = b.pop("_dedupe_meta")
+        assert b == originals[b["_id"]]
+        assert meta["canonical_id"] == "pre"
+        assert meta["role"] == ("canonical" if b["_id"] == "pre" else "removed")
 
 
 def test_rerun_after_apply_is_a_no_op():
     history, backup = _client_and_collections()
-    now = datetime.now(timezone.utc)
-    history.insert_many([
-        _doc("2025-08-25", source="live_counters", archived_at=now, _id="keep"),
-        _doc("2025-08-25", source="legacy", archived_at=now - timedelta(days=1), _id="dupe1"),
-    ])
-
+    history.insert_many(_incident(3))
     first = dedupe(history_collection=history, backup_collection=backup, dry_run=False)
-    assert first["deleted"] == 1
+    assert first["deleted"] == 4
 
     second = dedupe(history_collection=history, backup_collection=backup, dry_run=False)
     assert second["duplicate_groups"] == 0
-    assert second["deleted"] == 0
-    assert second["backed_up"] == 0
-    # Backup collection still holds the original record — rerun never re-deletes valid data.
-    assert backup.count_documents({}) == 1
+    assert second["deleted"] == 0 and second["backed_up"] == 0
+    assert backup.count_documents({}) == 5
     assert history.count_documents({}) == 1
+
+
+def test_ambiguous_week_aborts_everything_without_any_write():
+    history, backup = _client_and_collections()
+    ok_week = [_doc("2025-09-08", xp=(9, 1), refs=(1,), _id="ok1", archived_at=T0),
+               _doc("2025-09-08", xp=(0, 0), refs=(0,), _id="ok2", archived_at=T0 + timedelta(minutes=1))]
+    conflicting = [_doc("2025-08-25", xp=(160, 90), refs=(0, 0), _id="A", archived_at=T0),
+                   _doc("2025-08-25", xp=(0, 0), refs=(5, 3), _id="B", archived_at=T0 + timedelta(minutes=1))]
+    history.insert_many(ok_week + conflicting)
+
+    result = dedupe(history_collection=history, backup_collection=backup, dry_run=False)
+
+    assert result["mode"] == "aborted"
+    assert result["ambiguous_weeks"] == ["2025-08-25"]
+    assert history.count_documents({}) == 4  # even the unambiguous week is untouched
+    assert backup.count_documents({}) == 0
+
+
+def test_operator_pin_resolves_ambiguity():
+    history, backup = _client_and_collections()
+    history.insert_many([_doc("w", xp=(160, 90), refs=(0, 0), _id="A", archived_at=T0),
+                         _doc("w", xp=(0, 0), refs=(5, 3), _id="B", archived_at=T0 + timedelta(minutes=1))])
+    result = dedupe(history_collection=history, backup_collection=backup, dry_run=False, pinned={"w": "A"})
+    assert result["mode"] == "apply"
+    assert [d["_id"] for d in history.find({})] == ["A"]
+    assert backup.count_documents({}) == 2
+
+
+def test_pin_bypasses_malformed_losers_and_report_survives_scalar_board():
+    history, backup = _client_and_collections()
+    bad = _doc("w", _id="bad", archived_at=T0 + timedelta(minutes=1))
+    bad["checkin_leaderboard"] = 123  # scalar board
+    history.insert_many([_doc("w", _id="good", archived_at=T0), bad])
+
+    result = dedupe(history_collection=history, backup_collection=backup)  # must not crash
+    assert result["mode"] == "aborted"
+
+    result = dedupe(history_collection=history, backup_collection=backup, dry_run=False, pinned={"w": "good"})
+    assert result["mode"] == "apply"
+    assert [d["_id"] for d in history.find({})] == ["good"]
+    assert backup.count_documents({}) == 2
+
+
+class _FailingAfter:
+    """Proxy that lets `n` calls to `method` through, then raises."""
+
+    def __init__(self, coll, method, n):
+        self._coll, self._method, self._n, self.calls = coll, method, n, 0
+
+    def __getattr__(self, name):
+        attr = getattr(self._coll, name)
+        if name != self._method:
+            return attr
+
+        def wrapper(*a, **kw):
+            self.calls += 1
+            if self.calls > self._n:
+                raise RuntimeError("simulated crash")
+            return attr(*a, **kw)
+        return wrapper
+
+
+def test_interrupted_cleanup_loses_nothing_and_rerun_completes():
+    history, backup = _client_and_collections()
+    docs = _incident(30)
+    originals = {d["_id"]: dict(d) for d in docs}
+    history.insert_many(docs)
+
+    crashing = _FailingAfter(history, "delete_many", 1)  # first delete batch succeeds, second crashes
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        dedupe(history_collection=crashing, backup_collection=backup, dry_run=False, delete_batch_size=10)
+
+    # Partial delete: canonical still present, every original recoverable from live+backup.
+    assert history.count_documents({"_id": "pre"}) == 1
+    assert 1 < history.count_documents({}) < len(docs)
+    assert backup.count_documents({}) == len(docs)
+    for d in docs:
+        assert history.find_one({"_id": d["_id"]}) is not None or backup.find_one({"_id": d["_id"]}) is not None
+
+    result = dedupe(history_collection=history, backup_collection=backup, dry_run=False, delete_batch_size=10)
+    assert result["mode"] == "apply"
+    assert [d["_id"] for d in history.find({})] == ["pre"]
+    assert backup.count_documents({}) == len(docs)  # idempotent: no duplicates, no growth
+    for b in backup.find({}):
+        b.pop("_dedupe_meta")
+        assert b == originals[b["_id"]]
+
+
+def test_interrupted_backup_deletes_nothing_and_rerun_completes():
+    history, backup = _client_and_collections()
+    docs = _incident(10)
+    history.insert_many(docs)
+
+    crashing = _FailingAfter(backup, "replace_one", 4)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        dedupe(history_collection=history, backup_collection=crashing, dry_run=False)
+    assert history.count_documents({}) == len(docs)  # nothing deleted before backups finished
+    assert backup.count_documents({}) == 4
+
+    dedupe(history_collection=history, backup_collection=backup, dry_run=False)
+    assert [d["_id"] for d in history.find({})] == ["pre"]
+    assert backup.count_documents({}) == len(docs)
+
+
+def test_mismatched_existing_backup_aborts_before_delete():
+    history, backup = _client_and_collections()
+    history.insert_many(_incident(3))
+    backup.insert_one({"_id": "zero00", "week_start": "tampered"})
+    with pytest.raises(UnsafeCleanupError):
+        dedupe(history_collection=history, backup_collection=backup, dry_run=False)
+    assert history.count_documents({}) == 5
 
 
 def test_dedupe_handles_multiple_distinct_duplicate_weeks():
     history, backup = _client_and_collections()
-    now = datetime.now(timezone.utc)
     history.insert_many([
-        _doc("2025-08-25", source="live_counters", archived_at=now, _id="a-keep"),
-        _doc("2025-08-25", source="legacy", archived_at=now - timedelta(days=1), _id="a-dupe"),
-        _doc("2025-09-01", source="live_counters", archived_at=now, _id="b-keep"),
-        _doc("2025-09-01", source="legacy", archived_at=now - timedelta(days=1), _id="b-dupe"),
-        _doc("2025-09-08", source="live_counters", archived_at=now, _id="c-solo"),
+        _doc("2025-08-25", _id="a-keep", archived_at=T0),
+        _doc("2025-08-25", xp=(0, 0), refs=(0, 0), _id="a-dupe", archived_at=T0 + timedelta(minutes=1)),
+        _doc("2025-09-01", _id="b-keep", archived_at=T0),
+        _doc("2025-09-01", xp=(0, 0), refs=(0, 0), _id="b-dupe", archived_at=T0 + timedelta(minutes=1)),
+        _doc("2025-09-08", _id="c-solo"),
     ])
-
     result = dedupe(history_collection=history, backup_collection=backup, dry_run=False)
-
-    assert result["duplicate_groups"] == 2
-    assert result["deleted"] == 2
-    assert history.count_documents({}) == 3
-    assert {d["week_start"] for d in history.find({})} == {"2025-08-25", "2025-09-01", "2025-09-08"}
+    assert result["duplicate_groups"] == 2 and result["deleted"] == 2
+    assert {d["_id"] for d in history.find({})} == {"a-keep", "b-keep", "c-solo"}
 
 
 def test_dedupe_also_covers_null_and_missing_week_start():
-    """A unique index treats a missing field as null, so two documents that
-    both lack week_start collide on it exactly like two matching strings —
-    they must be found and deduped too, not silently skipped by a
-    string-only filter."""
     history, backup = _client_and_collections()
-    now = datetime.now(timezone.utc)
-    history.insert_many([
-        {"_id": "no-field-1", "week_end": "w", "checkin_leaderboard": [], "referral_leaderboard": [{"x": 1}], "archived_at": now - timedelta(days=1), "source": "legacy"},
-        {"_id": "explicit-null", "week_start": None, "week_end": "w", "checkin_leaderboard": [{"x": 1}, {"x": 2}], "referral_leaderboard": [], "archived_at": now, "source": "legacy"},
-        _doc("2025-08-25", source="live_counters", archived_at=now, _id="solo"),
-    ])
+    keep = _doc("x", _id="explicit-null", archived_at=T0)
+    keep["week_start"] = None
+    missing = _doc("x", xp=(0,), refs=(0,), _id="no-field", archived_at=T0 + timedelta(minutes=1))
+    del missing["week_start"]
+    history.insert_many([keep, missing, _doc("2025-08-25", _id="solo")])
 
     result = dedupe(history_collection=history, backup_collection=backup, dry_run=False)
 
-    assert result["duplicate_groups"] == 1
-    assert result["deleted"] == 1
-    # The most complete of the two null/missing week_start docs survives.
+    assert result["duplicate_groups"] == 1 and result["deleted"] == 1
     assert history.count_documents({"_id": "explicit-null"}) == 1
-    assert history.count_documents({"_id": "no-field-1"}) == 0
-    assert backup.count_documents({"_id": "no-field-1"}) == 1
-    # Unrelated real week_start untouched.
+    assert backup.count_documents({"_id": "no-field"}) == 1
     assert history.count_documents({"_id": "solo"}) == 1
 
 
@@ -232,10 +391,7 @@ def test_dedupe_also_covers_null_and_missing_week_start():
 def test_unique_index_creation_fails_before_cleanup_and_succeeds_after():
     history, backup = _client_and_collections()
     now = datetime.now(timezone.utc)
-    history.insert_many([
-        _doc("2025-08-25", source="live_counters", archived_at=now, _id="keep"),
-        _doc("2025-08-25", source="legacy", archived_at=now - timedelta(days=1), _id="dupe"),
-    ])
+    history.insert_many(_incident(2))
 
     before = create_unique_index(history)
     assert before["status"] == "failed"
@@ -249,7 +405,7 @@ def test_unique_index_creation_fails_before_cleanup_and_succeeds_after():
 
 def test_future_duplicate_insertion_rejected_after_index_created():
     history, backup = _client_and_collections()
-    history.insert_one(_doc("2025-08-25", source="live_counters", archived_at=datetime.now(timezone.utc), _id="a"))
+    history.insert_one(_doc("2025-08-25", _id="a"))
     create_unique_index(history)
 
     with pytest.raises(DuplicateKeyError):
