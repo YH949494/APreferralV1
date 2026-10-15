@@ -62,6 +62,16 @@ PLANNER_VERSION = "historical_account_coverage_v3"
 BULK_SIZE = 500
 
 
+def _cutoff_iso(text):
+    """Normalized UTC form of an operator-supplied cutoff, or None (absent/unparseable)."""
+    if isinstance(text, datetime):
+        return aq._aware_utc(text).isoformat()
+    try:
+        return fwd.kl_cutoff(text).isoformat() if text not in (None, "") else None
+    except (ValueError, TypeError):
+        return None
+
+
 def _seed_identity_fingerprint(row):
     # Audit seeded coverage without exposing raw account or invitee IDs in
     # admin output. Additional discoveries after launch do not invalidate it.
@@ -288,7 +298,7 @@ def _source_coverage(db, config, latest, *, now_utc):
 
 
 def build_plan(db, *, config: dict | None, seed_from_linkage: bool, now_utc: datetime | None = None,
-               history_policy: str = aq.HISTORY_STRICT) -> dict:
+               history_policy: str = aq.HISTORY_STRICT, activation_cutoff: str | None = None) -> dict:
     if history_policy not in (aq.HISTORY_STRICT, aq.HISTORY_FORWARD):
         raise ValueError("unsupported history policy")
     now_utc = aq._aware_utc(now_utc or datetime.now(timezone.utc))
@@ -459,7 +469,8 @@ def build_plan(db, *, config: dict | None, seed_from_linkage: bool, now_utc: dat
         "report_fingerprint": fwd.report_fingerprint(
             planner_version=PLANNER_VERSION, history_policy=history_policy,
             identity_config=aq.identity_config(config), historical_events=len(historical),
-            unresolved_events=unresolved, seed_fingerprints=seed_fps),
+            unresolved_events=unresolved, seed_fingerprints=seed_fps,
+            activation_cutoff_utc=_cutoff_iso(activation_cutoff)),
         "identity_config": aq.identity_config(config),
         "historical_events": len(historical), "unresolved_events": unresolved,
         "historical_invitees": len(uids),
@@ -549,8 +560,9 @@ def run(db, *, apply: bool, seed_from_linkage: bool, now_utc: datetime,
     control = aq.get_control(db) or {}
     report = {"apply": apply, "now_utc": now_utc.isoformat(), "history_before": history_snapshot(db, as_of=now_utc)}
     report["indexes_before"] = aq.index_readiness(db)
+    cutoff_text = (forward_only or {}).get("activation_cutoff") if history_policy == aq.HISTORY_FORWARD else None
     plan = build_plan(db, config=control.get("source_config"), seed_from_linkage=seed_from_linkage,
-                      now_utc=now_utc, history_policy=history_policy)
+                      now_utc=now_utc, history_policy=history_policy, activation_cutoff=cutoff_text)
     seeds = plan.pop("_seeds")
     report["plan"], report["seed_marker_written"] = plan, False
     token = None
@@ -572,6 +584,8 @@ def run(db, *, apply: bool, seed_from_linkage: bool, now_utc: datetime,
             locked = db[aq.CONTROL_COLLECTION].find_one_and_update(
                 {"_id": aq.CONTROL_ID, "mode": aq.MODE_DISABLED, "launch_cutoff_utc": {"$exists": False},
                  "source_config": control.get("source_config"),
+                 # mutual exclusion with legacy writers for the WHOLE plan/seed/complete interval
+                 "legacy_writer_token": {"$exists": False},
                  "$or": [{"migration_lease_until": {"$exists": False}}, {"migration_lease_until": {"$lt": now_utc}}]},
                 {"$set": {"migration_lease_token": token, "migration_lease_until": now_utc + timedelta(minutes=30)},
                  "$unset": {"seed_completed_at": "", "forward_only_marker": ""}}, return_document=ReturnDocument.AFTER,
@@ -594,7 +608,7 @@ def run(db, *, apply: bool, seed_from_linkage: bool, now_utc: datetime,
             # Re-plan before marking complete: the identity sources may have
             # changed during seeding. A crash or race leaves no completion marker.
             final = build_plan(db, config=control.get("source_config"), seed_from_linkage=seed_from_linkage,
-                               now_utc=now_utc, history_policy=history_policy)
+                               now_utc=now_utc, history_policy=history_policy, activation_cutoff=cutoff_text)
             def ownership_plan(rows):
                 return sorted((r["account_key"], r["invitee_id"], str(r["qualified_event_id"]),
                                r["historical_qualification_count"]) for r in rows)
@@ -650,7 +664,8 @@ def _marker_problems(control, summary) -> list[str]:
         planner_version=summary.get("planner_version"), history_policy=aq.HISTORY_FORWARD,
         identity_config=aq.identity_config((control or {}).get("source_config")),
         historical_events=summary.get("historical_events", -1), unresolved_events=summary.get("unresolved_events", -1),
-        seed_fingerprints=summary.get("seed_identity_fingerprints") or [])
+        seed_fingerprints=summary.get("seed_identity_fingerprints") or [],
+        activation_cutoff_utc=_cutoff_iso(marker.get("activation_cutoff_utc")))
     if marker.get("fingerprint") != expected or summary.get("report_fingerprint") != expected:
         problems.append("forward_only_fingerprint_mismatch")
     if (marker.get("seeded_count") != summary.get("accounts_seeded")

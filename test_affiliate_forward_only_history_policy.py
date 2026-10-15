@@ -473,3 +473,109 @@ def test_status_preflight_and_databot_report_show_forward_only_facts(capsys, mon
     assert admin.status_report(w.db, now_utc=NOW)["forward_only"]["pending_manual_cohort"]["size"] == 1
     prev = preview.build_preview(_ReadOnlyDb(w.db), month=None, now_utc=NOW)
     assert prev["forward_only"]["history_policy"] == aq.HISTORY_FORWARD
+
+
+# --- Codex review findings on 9ba0ed7 ---------------------------------------------
+
+def test_fence_is_one_cas_on_exact_token_and_never_touches_the_seed_for_a_stale_writer():
+    w = forward_world()
+    with aq.legacy_writer_guard(w.db, now_utc=NOW) as old:
+        # recovery cleared the old token and a replacement writer owns the barrier
+        w.db[aq.CONTROL_COLLECTION].update_one({}, {"$set": {"legacy_writer_token": "replacement",
+                                                             "legacy_writer_lease_until": NOW + timedelta(hours=1)}})
+        seeded_at = aq.get_control(w.db)["seed_completed_at"]
+        assert aq.invalidate_history_seed(w.db, old, NOW) is False and old.lost
+        assert aq.get_control(w.db)["seed_completed_at"] == seeded_at       # stale writer changed nothing
+        w.db[aq.CONTROL_COLLECTION].update_one({}, {"$unset": {"legacy_writer_token": ""}})
+    w.db[aq.CONTROL_COLLECTION].update_one({}, {"$set": {"legacy_writer_token": "replacement"}})  # not ours to release
+
+
+@pytest.mark.parametrize("how", ["none", "admission_closed", "row_claim_cleared"])
+def test_scheduler_award_aborts_when_activation_lands_after_the_fence(how, monkeypatch):
+    import scheduler
+
+    w = forward_world()
+    w.db[aq.CONTROL_COLLECTION].update_one({}, {"$unset": {"seed_completed_at": ""}})
+    w.user(601, created=NOW - timedelta(days=3))
+    pid = w.db.pending_referrals.insert_one({
+        "invitee_user_id": 601, "inviter_user_id": 900, "status": "pending", "destination_type": "official_channel",
+        "created_at_utc": NOW - timedelta(days=3)}).inserted_id
+    monkeypatch.setattr(scheduler, "db", w.db)
+    monkeypatch.setattr(scheduler, "_referral_hold_hours", lambda: 0)
+    monkeypatch.setattr(scheduler, "_get_official_channel_member_status", lambda *a, **k: "member")
+    real = aq.invalidate_history_seed
+
+    def fence_then_activation_lands(db, lease=None, now_utc=None):
+        ok = real(db, lease, now_utc)  # fence passes, then the (recovered + activated) V2 rule takes over
+        if how == "admission_closed":
+            db[aq.CONTROL_COLLECTION].update_one({}, {"$set": {"legacy_admission_closed": True}})
+        elif how == "row_claim_cleared":
+            db.pending_referrals.update_one({"_id": pid}, {"$set": {"status": aq.PENDING_AWAITING_REDEMPTION},
+                                                           "$unset": {"processing_by": ""}})
+        return ok
+
+    monkeypatch.setattr(aq, "invalidate_history_seed", fence_then_activation_lands)
+    scheduler.settle_pending_referrals(batch_limit=5)
+    awarded = w.db.referral_award_events.count_documents({"invitee_user_id": 601})
+    # Control case proves the scenario really reaches the award; the aborts prove nothing is written.
+    assert awarded == (1 if how == "none" else 0)
+    if how != "none":
+        assert w.db.xp_events.count_documents({"unique_key": "ref:601"}) == 0
+
+
+def test_requeue_after_a_rule_rejection_keeps_rollout_membership_but_absence_rejection_stays_closed(monkeypatch):
+    w = forward_world()
+    add(w, 101, "acct-101", amount="79.99")
+    add(w, 102, "acct-102", amount="79.99")
+    go(w, monkeypatch)
+    assert ev(w, 101)["reason"] == ev(w, 102)["reason"] == "seven_day_turnover_below_80"
+    assert w.db.pending_referrals.find_one({"invitee_user_id": 101})["status"] == "rejected"
+    # 102's rejection was absence-based (the one decision never reopened automatically)
+    w.db.pending_referrals.update_one({"invitee_user_id": 102}, {"$set": {
+        "qualification_reason": aq.ABSENCE_REJECTION_REASON}})
+    for uid in (101, 102):  # corrected data is ingested, operator requeues
+        e = ev(w, uid)
+        w.db[aq.EVIDENCE_COLLECTION].update_one({"_id": e["_id"]}, {"$set": {
+            "qualification_fields.after_total_bet_amount": "80"}})
+        assert aq.requeue_evidence(w.db, evidence_id=e["_id"], now_utc=NOW)
+    run(w, monkeypatch)
+    assert ev(w, 101)["status"] == aq.EV_QUALIFIED
+    assert (ev(w, 102)["status"], ev(w, 102)["reason"]) == (aq.EV_REVIEW, "referral_not_active_at_rollout")
+
+
+def test_migration_and_legacy_writers_are_mutually_exclusive_for_the_whole_interval():
+    w = World(mode=aq.MODE_DISABLED, cutoff=None)
+    w.db.qualified_events.insert_one({"invitee_id": 999, "referrer_id": 900, "qualified_at": CUTOFF})
+    w.upload([w.row("coverage", "coverage-account", NOW)])
+    kwargs = dict(apply=True, seed_from_linkage=False, now_utc=NOW, history_policy=aq.HISTORY_FORWARD,
+                  acknowledge_unknown_history=True, forward_only=forward_inputs(w.db))
+    with aq.legacy_writer_guard(w.db, now_utc=NOW) as writer:       # a legacy writer is active
+        assert writer
+        out = migration.run(w.db, **kwargs)
+        assert out["apply_refused"] == ["migration_lease_unavailable_or_control_changed"]
+        assert not out["seed_marker_written"]
+    # a live migration lease keeps legacy admission out; an expired one does not
+    w.db[aq.CONTROL_COLLECTION].update_one({}, {"$set": {"migration_lease_token": "m",
+                                                         "migration_lease_until": NOW + timedelta(minutes=20)}})
+    with aq.legacy_writer_guard(w.db, now_utc=NOW) as blocked:
+        assert not blocked
+    with aq.legacy_writer_guard(w.db, now_utc=NOW + timedelta(minutes=31)) as admitted:
+        assert admitted
+    w.db[aq.CONTROL_COLLECTION].update_one({}, {"$unset": {"migration_lease_token": "", "migration_lease_until": ""}})
+    assert migration.run(w.db, **kwargs)["seed_marker_written"]
+
+
+def test_activation_cutoff_is_bound_to_the_reviewed_fingerprint():
+    w = World(mode=aq.MODE_DISABLED, cutoff=None)
+    w.db.qualified_events.insert_one({"invitee_id": 999, "referrer_id": 900, "qualified_at": CUTOFF})
+    w.upload([w.row("coverage", "coverage-account", NOW)])
+    reviewed = forward_inputs(w.db, cutoff=NOW)
+    other = {**reviewed, "activation_cutoff": (NOW + timedelta(days=30)).isoformat()}  # same counts and fingerprint
+    before = _snapshot(w.db)
+    out = migration.run(w.db, apply=True, seed_from_linkage=False, now_utc=NOW, history_policy=aq.HISTORY_FORWARD,
+                        acknowledge_unknown_history=True, forward_only=other)
+    assert out["apply_refused"] == ["forward_only_report_fingerprint_mismatch"] and _snapshot(w.db) == before
+    assert forward_inputs(w.db, cutoff=NOW + timedelta(days=30))["report_fingerprint"] != reviewed["report_fingerprint"]
+    ok = migration.run(w.db, apply=True, seed_from_linkage=False, now_utc=NOW, history_policy=aq.HISTORY_FORWARD,
+                       acknowledge_unknown_history=True, forward_only=reviewed)
+    assert ok["seed_marker_written"] and migration.completion_readiness(w.db, aq.get_control(w.db))["ok"]

@@ -36,7 +36,8 @@ def is_forward_only(control: dict | None) -> bool:
 
 
 def report_fingerprint(*, planner_version: str, history_policy: str, identity_config: dict,
-                       historical_events: int, unresolved_events: int, seed_fingerprints: list[str]) -> str:
+                       historical_events: int, unresolved_events: int, seed_fingerprints: list[str],
+                       activation_cutoff_utc: str | None = None) -> str:
     """Stable digest of what a migration dry run found and would seed.
 
     The operator copies it from the reviewed dry run into ``--apply``; the
@@ -45,7 +46,9 @@ def report_fingerprint(*, planner_version: str, history_policy: str, identity_co
     payload = {"planner_version": planner_version, "history_policy": history_policy,
                "identity_config": identity_config, "historical_events": int(historical_events),
                "unresolved_events": int(unresolved_events),
-               "accounts_to_seed": len(seed_fingerprints), "seed_fingerprints": sorted(seed_fingerprints)}
+               "accounts_to_seed": len(seed_fingerprints), "seed_fingerprints": sorted(seed_fingerprints),
+               # the reviewed cutoff is part of the reviewed artifact: a different cutoff = a different fingerprint
+               "activation_cutoff_utc": activation_cutoff_utc}
     return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
 
 

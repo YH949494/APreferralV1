@@ -43,7 +43,8 @@ def test_explicit_incomplete_never_rejects_a_partial_turnover():
 def forward_inputs(db, *, seed_from_linkage=False, cutoff=NOW, **override):
     """The operator-authorized inputs, copied from the reviewed dry run."""
     plan = migration.build_plan(db, config=aq.get_control(db)["source_config"], seed_from_linkage=seed_from_linkage,
-                                now_utc=NOW, history_policy=aq.HISTORY_FORWARD)
+                                now_utc=NOW, history_policy=aq.HISTORY_FORWARD,
+                                activation_cutoff=cutoff.isoformat())
     inputs = {"activation_cutoff": cutoff.isoformat(), "operator": "ops", "reason": "forward-only launch",
               "report_fingerprint": plan["report_fingerprint"], "unresolved_count": plan["unresolved_events"],
               "qualified_history_count": plan["historical_events"], "seeded_count": plan["accounts_to_seed"],

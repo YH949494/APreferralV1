@@ -115,7 +115,7 @@ renew after expiry, so it cannot award after recovery has cleared its token. Sta
 | `expired_recoverable` | expired + 5 min grace | automatic on the next legacy run, or `recover-legacy-writer --commit` |
 | `unleased_recent` / `unleased_stale` | token written by pre-lease code: liveness unprovable | `recover-legacy-writer --token T --acknowledge-writer-stopped --commit`, only once older than 1 hour |
 
-Recovery is a compare-and-set on the exact token and the expiry predicate, appends an audit
+Before every award the writer passes a fence: one compare-and-set on its exact token and an unexpired lease (renewing it and invalidating the seed together), then a claim on its own `processing` row and a re-read that legacy admission is still open. Activation clears row claims and closes admission, so a worker that slept through recovery and activation aborts instead of awarding; only the microseconds between the last check and the first write remain, which no per-collection write can close without transactions. Recovery is a compare-and-set on the exact token and the expiry predicate, appends an audit
 row (`legacy_writer_recoveries`) and never touches an active lease. Activation still requires
 the token to be absent, so old and V2 writers cannot overlap; it refuses (and `preflight`
 fails) until active legacy work has finished or a dead lease was recovered. The legacy
@@ -147,7 +147,8 @@ Operator flow (nothing here is run by this change):
 
 ```sh
 python scripts/migrate_affiliate_account_dedupe.py --history-policy forward_only_from_activation_cutoff \
-  --acknowledge-unknown-history --seed-from-linkage          # dry run: prints report_fingerprint + counts
+  --acknowledge-unknown-history --seed-from-linkage \\
+  --activation-cutoff 2026-11-01T00:00:00+08:00             # dry run: prints report_fingerprint + counts
 python scripts/migrate_affiliate_account_dedupe.py --apply --history-policy forward_only_from_activation_cutoff \
   --acknowledge-unknown-history --seed-from-linkage \
   --activation-cutoff 2026-11-01T00:00:00+08:00 --operator "$OP" --reason "$REASON" \
@@ -157,7 +158,7 @@ python scripts/affiliate_qualification_admin.py snapshot-launch-cohort --commit
 python scripts/affiliate_qualification_admin.py preflight --cutoff 2026-11-01T00:00:00+08:00
 ```
 
-Apply refuses unless every input is present and equals the reviewed dry run. The versioned
+The report fingerprint covers the normalized activation cutoff, so the dry run must be run with the same `--activation-cutoff` that `--apply` will use. Apply refuses unless every input is present and equals the reviewed dry run. Migration and legacy writers are mutually exclusive for the whole plan/seed/complete interval (the migration lease requires no legacy token; legacy admission requires no live migration lease). The versioned
 marker (`forward_only_marker_v1`: fingerprint, cutoff in UTC and Asia/Kuala_Lumpur, operator,
 reason, counts, namespace, limitation) is written atomically with `seed_completed_at`; a retry
 after an interrupted run re-seeds idempotently. `activate --cutoff` must equal the marker's

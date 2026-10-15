@@ -83,6 +83,7 @@ HISTORY_LIMITATION = (
 )
 FORWARD_MARKER_VERSION = "forward_only_marker_v1"
 COHORT_COLLECTION = "affiliate_v2_launch_cohort"
+ABSENCE_REJECTION_REASON = "no_welcome_redemption_in_complete_coverage"  # == uim_coverage.ABSENCE_REASON
 ACTIVE_PENDING_STATUSES = ("pending", "pending_channel", "pending_manual", "manual",
                            "processing", "error", "awaiting_redemption")
 
@@ -292,12 +293,15 @@ class WriterLease:
     def __bool__(self) -> bool:
         return True
 
-    def renew(self, now_utc: datetime | None = None) -> bool:
+    def renew(self, now_utc: datetime | None = None, also_unset: tuple = ()) -> bool:
         """Extend the lease iff this token is still the owner and unexpired."""
         now = _aware_utc(now_utc) if now_utc else datetime.now(timezone.utc)
+        update = {"$set": {"legacy_writer_lease_until": now + self.ttl, "legacy_writer_heartbeat_at": now}}
+        if also_unset:
+            update["$unset"] = {f: "" for f in also_unset}
         res = self.db[CONTROL_COLLECTION].update_one(
             {"_id": CONTROL_ID, "legacy_writer_token": self.token, "legacy_writer_lease_until": {"$gt": now}},
-            {"$set": {"legacy_writer_lease_until": now + self.ttl, "legacy_writer_heartbeat_at": now}})
+            update)
         # matched, not modified: a renewal within the same clock tick rewrites identical values.
         if not res.matched_count:
             self.lost = True
@@ -384,7 +388,11 @@ def legacy_writer_guard(db, *, now_utc: datetime):
     col.update_one({"_id": CONTROL_ID}, {"$setOnInsert": {"mode": MODE_DISABLED}}, upsert=True)
     token = _admit_writer(
         db, {"_id": CONTROL_ID, "legacy_admission_closed": {"$ne": True},
-             "$or": [{"launch_cutoff_utc": {"$exists": False}}, {"launch_cutoff_utc": {"$gt": now_utc}}]},
+             "$and": [{"$or": [{"launch_cutoff_utc": {"$exists": False}}, {"launch_cutoff_utc": {"$gt": now_utc}}]},
+                      # mutual exclusion with a running migration (its lease is held for the whole
+                      # plan/seed/complete interval, and an expired one no longer blocks)
+                      {"$or": [{"migration_lease_until": {"$exists": False}},
+                               {"migration_lease_until": {"$lt": now_utc}}]}]},
         now_utc=now_utc)
     try:
         yield WriterLease(db, token) if token else False
@@ -479,8 +487,10 @@ def invalidate_history_seed(db, lease: "WriterLease | None" = None, now_utc: dat
     the writer's lease it is also the fence immediately before an award: it
     returns False (and invalidates nothing) when the lease is lost.
     """
-    if lease is not None and not lease.renew(now_utc):
-        return False
+    if lease is not None:
+        # ONE compare-and-set on this lease's exact token and an unexpired lease: renews it and
+        # invalidates the seed together, and its match result (not a prior renewal) is the verdict.
+        return lease.renew(now_utc, also_unset=("seed_completed_at",))
     db[CONTROL_COLLECTION].update_one({"_id": CONTROL_ID, "legacy_writer_token": {"$exists": True}},
                                      {"$unset": {"seed_completed_at": ""}})
     return True
@@ -1423,7 +1433,8 @@ class DbLookup:
         return list(
             self.db.pending_referrals.find(
                 {"invitee_user_id": int(invitee_id)},
-                {"inviter_user_id": 1, "status": 1, "revoked_reason": 1, "created_at_utc": 1, "destination_type": 1},
+                {"inviter_user_id": 1, "status": 1, "revoked_reason": 1, "created_at_utc": 1, "destination_type": 1,
+                 "qualification_reason": 1},
             ).sort("created_at_utc", 1)
         )
 
@@ -1439,6 +1450,9 @@ class DbLookup:
 
     def existing_qualification(self, invitee_id: int) -> dict | None:
         return self.db.qualified_events.find_one({"invitee_id": int(invitee_id)})
+
+    def in_launch_cohort(self, invitee_id: int) -> bool:
+        return self.db[COHORT_COLLECTION].find_one({"_id": int(invitee_id)}, {"_id": 1}) is not None
 
     def conflicting_record(self, evidence: dict) -> bool:
         return bool(self.db[EVIDENCE_COLLECTION].find_one(
@@ -1705,7 +1719,12 @@ def assess_evidence(evidence: dict, *, control: dict, now_utc: datetime, lookup)
     # another active row exists, attribution still stays with the ORIGINAL
     # inviter below; never redirect an old attribution to a later inviter.
     pending_rows = lookup.pending_referrals(invitee_id)
-    if (not existing_q and launch_cutoff(control) is not None and pending_rows
+    # The persisted launch-cohort snapshot proves rollout membership, so a later V2 status change
+    # (e.g. a rule rejection followed by a supported requeue with corrected data) cannot erase it.
+    # An absence-based rejection is the one decision deliberately never reopened automatically.
+    in_cohort = (getattr(lookup, "in_launch_cohort", lambda _i: False)(invitee_id)
+                 and not any(r.get("qualification_reason") == ABSENCE_REJECTION_REASON for r in pending_rows))
+    if (not existing_q and not in_cohort and launch_cutoff(control) is not None and pending_rows
             and not any(r.get("status") in ACTIVE_PENDING_STATUSES for r in pending_rows)):
         return verdict(EV_REVIEW, "referral_not_active_at_rollout", invitee_id=invitee_id)
 
