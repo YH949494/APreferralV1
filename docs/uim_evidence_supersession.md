@@ -83,9 +83,11 @@ guard it trips), `excluded_any_guard`, `evidence_total` and `evidence_by_source_
 under a different source/rule_version). Registry / qualified-event ownership is reported per document as
 `skipped_has_effects`.
 **Mismatch refusal.** On the first page, zero candidates while the preview still reports more repairable legacy reasons
-(`redeemed_at_timezone_unverified`, `conflicting_source_observations`, `seven_day_data_incomplete`) than guard-protected
-evidence can account for returns `ok=false`, `error=candidate_selection_preview_mismatch` (CLI exit 1) with
-`preview_repairable_legacy_reasons` - never a silent no-op.
+(`redeemed_at_timezone_unverified`, `conflicting_source_observations`, `seven_day_data_incomplete`) returns
+`ok=false`, `error=candidate_selection_preview_mismatch` (CLI exit 1) when any pending source record has no in-scope
+evidence document. The check is by `source_ref` (a guard-protected document explains only its own record, never
+another's), bounded by `--max-scan-rows`, and reports `source_records_without_evidence` plus masked samples - never a
+silent no-op. A repair also unsets `lease_until`, so the evaluator (which selects an absent or expired lease) picks it up.
 
 Interpreting the preview afterwards: `unverified_completeness_synced_rows` is a raw count of every historical synced
 row (including superseded ones) and is informational; the decision-relevant figure is
@@ -109,3 +111,12 @@ change cannot (and must not) invent a timezone for them. The dry run's `not_atte
 * Source batches/rows are never modified or deleted by any of this.
 * If a dry run looks wrong (counts far from the preview's conflict/unverified figures), do not commit: the dry run
   writes nothing.
+
+## 5. Diagnosing "redemption before Welcome issuance"
+
+`python scripts/affiliate_qualification_admin.py diagnose-issuance-order` (read-only, secondary-preferred connection,
+no `--commit`). For every record the validator flags `redemption_before_welcome_issuance` it reports the
+issued-minus-redeemed gap histogram, which source supplied the earliest issuance time, and how many records each
+clock-basis hypothesis would clear (`claim_time_is_kl_wall_clock_stored_as_utc`,
+`all_issuance_times_are_kl_wall_clock_stored_as_utc`, `redemption_time_is_utc_not_kl`). Gaps inside 0-8h with a
+hypothesis clearing most of them point at a timezone mix-up; large or scattered gaps are real data. It changes no rule.
