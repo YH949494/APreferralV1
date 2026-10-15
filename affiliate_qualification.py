@@ -464,7 +464,11 @@ def mark_activation_cohort(db, *, control: dict, now_utc: datetime) -> int:
         import affiliate_forward_only
 
         affiliate_forward_only.snapshot_launch_cohort(db, now_utc=now_utc, cutoff=cutoff)
-        if _aware_utc((control or {}).get("launch_handoff_completed_cutoff")) != cutoff:
+        # Completion is recorded only by a pass performed at/after the cutoff (the final scan of the
+        # population); passes before it keep marking every active row, so a referral that becomes active
+        # after the last pre-cutoff pass is still caught by the first pass at the cutoff.
+        if (_aware_utc(now_utc) >= cutoff
+                and _aware_utc((control or {}).get("launch_handoff_completed_cutoff")) != cutoff):
             db[CONTROL_COLLECTION].update_one(
                 {"_id": CONTROL_ID, "launch_cutoff_utc": cutoff},
                 {"$set": {"launch_handoff_completed_cutoff": cutoff, "launch_handoff_completed_at": now_utc}})

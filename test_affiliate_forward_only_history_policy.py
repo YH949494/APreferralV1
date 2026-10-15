@@ -758,3 +758,21 @@ def test_a_pre_cutoff_referral_reopened_after_launch_is_not_pulled_into_v2(monke
     later = NOW + timedelta(minutes=2)
     w.join(900, 301, at=later, status="pending")
     assert aq.mark_activation_cohort(w.db, control=aq.get_control(w.db), now_utc=NOW + timedelta(minutes=3)) == 1
+
+
+def test_handoff_is_recorded_complete_only_by_a_pass_at_or_after_the_cutoff(monkeypatch):
+    cutoff = NOW + timedelta(days=1)
+    w = forward_world(cutoff=cutoff)
+    assert activate(w, cutoff=cutoff) == 0                              # scheduled activation; passes before the cutoff
+    assert aq.mark_activation_cohort(w.db, control=aq.get_control(w.db), now_utc=NOW + timedelta(hours=1)) == 0
+    assert "launch_handoff_completed_cutoff" not in aq.get_control(w.db)  # a pre-cutoff pass is never the final scan
+    # an old referral becomes active after the last pre-cutoff pass (e.g. reopened or late-recorded)
+    add(w, 101, "acct-101", status="pending", joined=OLD_JOIN)
+    assert not aq.handoff_complete(aq.get_control(w.db), cutoff)
+    # first pass at the cutoff still marks it, then records completion
+    assert aq.mark_activation_cohort(w.db, control=aq.get_control(w.db), now_utc=cutoff) == 1
+    assert w.db.pending_referrals.find_one({"invitee_user_id": 101})["qualification_rule_version"] == aq.RULE_VERSION
+    assert aq.handoff_complete(aq.get_control(w.db), cutoff)
+    # from here the population is closed
+    w.join(900, 102, at=OLD_JOIN, status="pending")
+    assert aq.mark_activation_cohort(w.db, control=aq.get_control(w.db), now_utc=cutoff + timedelta(minutes=1)) == 0
