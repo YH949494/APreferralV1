@@ -25,7 +25,7 @@ HISTORY_COLLECTIONS = ("qualified_events", "referral_events", "affiliate_ledger"
 OLD_JOIN = CUTOFF - timedelta(days=40)
 
 
-def forward_world(*, historical=(999,), linked=None, redeemed=None, seed_from_linkage=False, snapshot=True, db=None):
+def forward_world(*, historical=(999,), linked=None, redeemed=None, seed_from_linkage=False, snapshot=True, db=None, cutoff=NOW):
     """Disabled rule, deterministic forward-only seeding applied, optionally the cohort snapshot built."""
     w = World(mode=aq.MODE_DISABLED, cutoff=None, db=db)
     for uid in historical:
@@ -42,7 +42,7 @@ def forward_world(*, historical=(999,), linked=None, redeemed=None, seed_from_li
     w.upload([w.row("coverage-only", "coverage-account", NOW)])
     result = migration.run(w.db, apply=True, seed_from_linkage=seed_from_linkage, now_utc=NOW,
                            history_policy=aq.HISTORY_FORWARD, acknowledge_unknown_history=True,
-                           forward_only=forward_inputs(w.db, seed_from_linkage=seed_from_linkage))
+                           forward_only=forward_inputs(w.db, seed_from_linkage=seed_from_linkage, cutoff=cutoff))
     assert result["seed_marker_written"], result
     if snapshot:
         assert admin.main(["snapshot-launch-cohort", "--commit"], db_factory=lambda: w.db, now_fn=lambda: NOW) == 0
@@ -579,3 +579,73 @@ def test_activation_cutoff_is_bound_to_the_reviewed_fingerprint():
     ok = migration.run(w.db, apply=True, seed_from_linkage=False, now_utc=NOW, history_policy=aq.HISTORY_FORWARD,
                        acknowledge_unknown_history=True, forward_only=reviewed)
     assert ok["seed_marker_written"] and migration.completion_readiness(w.db, aq.get_control(w.db))["ok"]
+
+
+# --- Codex round 2 -------------------------------------------------------------------
+
+def test_cohort_snapshot_prunes_members_that_stopped_being_active_before_activation(monkeypatch):
+    w = forward_world(snapshot=False)
+    add(w, 101, "acct-101")
+    add(w, 102, "acct-102")
+    fwd.snapshot_launch_cohort(w.db, now_utc=NOW)                      # preflight-time snapshot has both
+    assert w.db[aq.COHORT_COLLECTION].count_documents({}) == 2
+    w.db.pending_referrals.update_one({"invitee_user_id": 102}, {"$set": {"status": "revoked"}})  # terminal before launch
+    go(w, monkeypatch)                                                 # activation-time rebuild
+    assert {d["_id"] for d in w.db[aq.COHORT_COLLECTION].find()} == {101}
+    assert ev(w, 102) is None or ev(w, 102)["status"] != aq.EV_QUALIFIED
+    assert w.db.qualified_events.count_documents({"invitee_id": 102}) == 0
+
+
+def test_decided_cohort_members_survive_later_top_ups_and_cancel_clears_the_snapshot(monkeypatch):
+    w = forward_world()
+    add(w, 101, "acct-101", amount="79.99")
+    go(w, monkeypatch)                                                 # 101 rejected by a rule, status 'rejected'
+    fwd.snapshot_launch_cohort(w.db, now_utc=NOW, cutoff=aq.launch_cutoff(aq.get_control(w.db)))
+    assert w.db[aq.COHORT_COLLECTION].find_one({"_id": 101})           # decided members are not pruned
+    w2 = forward_world(cutoff=NOW + timedelta(days=1))
+    add(w2, 201, "acct-201")
+    assert activate(w2, cutoff=NOW + timedelta(days=1)) == 0
+    assert w2.db[aq.COHORT_COLLECTION].count_documents({}) == 1
+    assert admin.main(["cancel-scheduled", "--commit"], db_factory=lambda: w2.db, now_fn=lambda: NOW) == 0
+    assert w2.db[aq.COHORT_COLLECTION].count_documents({}) == 0
+    assert "launch_cohort" not in aq.get_control(w2.db)
+
+
+def test_activation_refuses_while_a_legacy_award_is_in_flight_and_operator_can_release_it():
+    w = forward_world()
+    pid = w.db.pending_referrals.insert_one({"invitee_user_id": 701, "inviter_user_id": 900, "status": aq.AWARDING_STATUS,
+                                             "created_at_utc": NOW}).inserted_id
+    report = admin.preflight_report(w.db, now_utc=NOW)
+    assert report["legacy_awarding_rows"] == 1 and not report["ok"]
+    assert activate(w) == 2 and aq.launch_cutoff(aq.get_control(w.db)) is None
+    argv = ["recover-legacy-writer", "--release-awarding", "--commit"]
+    assert admin.main(argv, db_factory=lambda: w.db, now_fn=lambda: NOW) == 2          # needs the stopped-writer ack
+    assert admin.main([*argv, "--acknowledge-writer-stopped"], db_factory=lambda: w.db, now_fn=lambda: NOW) == 0
+    assert w.db.pending_referrals.find_one({"_id": pid})["status"] == "pending"
+    assert activate(w) == 0
+
+
+def test_a_worker_paused_inside_the_award_holds_activation_off(monkeypatch):
+    import scheduler
+
+    w = forward_world()
+    w.db[aq.CONTROL_COLLECTION].update_one({}, {"$unset": {"seed_completed_at": ""}})
+    w.user(601, created=NOW - timedelta(days=3))
+    w.db.pending_referrals.insert_one({"invitee_user_id": 601, "inviter_user_id": 900, "status": "pending",
+                                       "destination_type": "official_channel", "created_at_utc": NOW - timedelta(days=3)})
+    monkeypatch.setattr(scheduler, "db", w.db)
+    monkeypatch.setattr(scheduler, "_referral_hold_hours", lambda: 0)
+    monkeypatch.setattr(scheduler, "_get_official_channel_member_status", lambda *a, **k: "member")
+    seen = {}
+
+    def paused_award(*a, **k):                      # the process "freezes" at the first award write
+        seen["row"] = w.db.pending_referrals.find_one({"invitee_user_id": 601})["status"]
+        seen["activate"] = activate(w)              # lease is still held here, but also assert the row gate alone
+        w.db[aq.CONTROL_COLLECTION].update_one({}, {"$unset": {"legacy_writer_token": "", "legacy_writer_lease_until": ""}})
+        seen["activate_after_recovery"] = activate(w)
+        raise RuntimeError("stop after observing")
+
+    monkeypatch.setattr(w.db.referral_award_events, "insert_one", paused_award, raising=False)
+    scheduler.settle_pending_referrals(batch_limit=5)
+    assert seen["row"] == aq.AWARDING_STATUS
+    assert seen["activate"] == seen["activate_after_recovery"] == 2     # token gone, row still blocks activation

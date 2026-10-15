@@ -118,6 +118,9 @@ def preflight_report(db, *, now_utc: datetime, cutoff: datetime | None = None) -
         "rule_revision_ready": control.get("rule_version") == aq.RULE_VERSION,
         "legacy_writer_in_flight": bool(control.get("legacy_writer_token")),
         "legacy_writer": aq.legacy_writer_state(control, now_utc),
+        # Legacy awards parked between the lease fence and their completion. A paused/crashed worker
+        # leaves these behind: activation must not overtake them.
+        "legacy_awarding_rows": db.pending_referrals.count_documents({"status": aq.AWARDING_STATUS}),
         "cancellation_repair_pending": bool(control.get("cancelled_cohort_cutoff")),
         "v1_qualified_events": db.qualified_events.count_documents({"rule_version": aq.LEGACY_RULE_VERSION}),
         "pending_maturity": aq.pending_maturity_report(db, config=control.get("source_config"), now_utc=now_utc),
@@ -139,6 +142,7 @@ def preflight_report(db, *, now_utc: datetime, cutoff: datetime | None = None) -
         and report["consistency"]["ok"]
         and report["rule_revision_ready"]
         and not report["legacy_writer_in_flight"]
+        and not report["legacy_awarding_rows"]
         and not report["cancellation_repair_pending"]
         and report["v1_qualified_events"] == 0
     )
@@ -194,6 +198,9 @@ def main(argv=None, *, db_factory=None, read_only_db_factory=None, now_fn=_now) 
     recover.add_argument("--token")
     recover.add_argument("--acknowledge-writer-stopped", action="store_true",
                          help="required only for a pre-lease token whose liveness cannot be proven")
+    recover.add_argument("--release-awarding", action="store_true",
+                         help="also return legacy 'awarding' rows to pending (requires --acknowledge-writer-stopped; "
+                              "awards are idempotent per invitee, so a completed one is skipped on retry)")
     sub.add_parser("snapshot-launch-cohort", help="idempotently snapshot active pending/manual referral invitees")
     pf = sub.choices["preflight"]
     pf.add_argument("--cutoff", help="proposed activation cutoff (ISO with offset); must match the forward-only marker")
@@ -305,9 +312,21 @@ def main(argv=None, *, db_factory=None, read_only_db_factory=None, now_fn=_now) 
             if control.get("legacy_writer_token") != args.token:
                 print("refused: writer token changed or absent", file=sys.stderr)
                 return 2
+        awarding = db.pending_referrals.count_documents({"status": aq.AWARDING_STATUS})
         if not args.commit:
-            print(json.dumps({"dry_run": True, "writer": state}, default=str))
-            return 0 if state["in_flight"] else 2
+            print(json.dumps({"dry_run": True, "writer": state, "awarding_rows": awarding}, default=str))
+            return 0 if state["in_flight"] or awarding else 2
+        if args.cmd == "recover-legacy-writer" and args.release_awarding:
+            if not args.acknowledge_writer_stopped or state["state"] == aq.WRITER_ACTIVE:
+                print("refused: --release-awarding needs --acknowledge-writer-stopped and no active lease", file=sys.stderr)
+                return 2
+            released = db.pending_referrals.update_many(
+                {"status": aq.AWARDING_STATUS},
+                {"$set": {"status": "pending", "retry_last_reason": "awarding_released_by_operator"},
+                 "$unset": {"awarding_since": "", "award_fence_token": "", "processing_by": "", "processing_at_utc": ""}})
+            print(json.dumps({"awarding_released": released.modified_count}))
+            if not state["in_flight"]:
+                return 0
         result = aq.recover_legacy_writer(db, now_utc=now_utc, operator=args.operator,
                                           acknowledged_stopped=args.acknowledge_writer_stopped, token=args.token)
         print(json.dumps({"released": result["recovered"], "writer": result}, default=str))
@@ -569,6 +588,9 @@ def main(argv=None, *, db_factory=None, read_only_db_factory=None, now_fn=_now) 
             if not result.modified_count:
                 return 2
             aq.restore_activation_cohort(db, cutoff=cutoff)
+            # The snapshot belongs to the cancelled cutoff; a later launch rebuilds it from scratch.
+            db[aq.COHORT_COLLECTION].delete_many({})
+            db[aq.CONTROL_COLLECTION].update_one({"_id": aq.CONTROL_ID}, {"$unset": {"launch_cohort": ""}})
             db[aq.CONTROL_COLLECTION].update_one(
                 {"_id": aq.CONTROL_ID, "legacy_writer_token": token, "cancelled_cohort_cutoff": cutoff},
                 {"$unset": {"cancelled_cohort_cutoff": ""}})

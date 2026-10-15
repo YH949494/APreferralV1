@@ -118,9 +118,21 @@ def snapshot_launch_cohort(db, *, now_utc: datetime, cutoff: datetime | None = N
         ops.append(UpdateOne({"_id": invitee}, update, upsert=True))
     for start in range(0, len(ops), CHUNK):  # bounded round trips; each op is individually idempotent
         added += col.bulk_write(ops[start:start + CHUNK], ordered=False).upserted_count
+    # Rebuild, not just add: a member whose referral became terminal before the cutoff is not part of
+    # the activation population. After activation, rows marked for THIS cutoff stay members even once
+    # V2 has decided them (a later supported requeue relies on that).
+    keep = {i for i in by_invitee if i not in qualified}
+    if cutoff:
+        keep |= {_valid_invitee(r.get("invitee_user_id")) for r in db.pending_referrals.find(
+            {"activation_cutoff_utc": cutoff}, {"invitee_user_id": 1})}
+    stale = [d["_id"] for d in col.find({}, {"_id": 1}) if d["_id"] not in keep]
+    pruned = 0
+    for start in range(0, len(stale), CHUNK):
+        pruned += col.delete_many({"_id": {"$in": stale[start:start + CHUNK]}}).deleted_count
     size = col.count_documents({})
     marker = {"state": STATE_READY, "built_at": now_utc, "invitees": size,
-              "excluded_already_qualified": len(qualified), "skipped_invalid_invitee": skipped_invalid}
+              "excluded_already_qualified": len(qualified), "skipped_invalid_invitee": skipped_invalid,
+              "pruned_stale": pruned}
     control_col.update_one({"_id": aq.CONTROL_ID}, {"$set": {
         "launch_cohort": {**marker, **({"cutoff_utc": cutoff} if cutoff else {})}}})
     return {**marker, "newly_snapshotted": added}

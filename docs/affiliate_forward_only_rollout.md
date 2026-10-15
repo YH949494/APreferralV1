@@ -115,7 +115,7 @@ renew after expiry, so it cannot award after recovery has cleared its token. Sta
 | `expired_recoverable` | expired + 5 min grace | automatic on the next legacy run, or `recover-legacy-writer --commit` |
 | `unleased_recent` / `unleased_stale` | token written by pre-lease code: liveness unprovable | `recover-legacy-writer --token T --acknowledge-writer-stopped --commit`, only once older than 1 hour |
 
-Before every award the writer passes a fence: one compare-and-set on its exact token and an unexpired lease (renewing it and invalidating the seed together), then a claim on its own `processing` row and a re-read that legacy admission is still open. Activation clears row claims and closes admission, so a worker that slept through recovery and activation aborts instead of awarding; only the microseconds between the last check and the first write remain, which no per-collection write can close without transactions. Recovery is a compare-and-set on the exact token and the expiry predicate, appends an audit
+Before every award the writer passes a fence: one compare-and-set on its exact token and an unexpired lease (renewing it and invalidating the seed together), then a CAS that parks its own row in the `awarding` state (and a re-read that legacy admission is open). `preflight` fails while any `awarding` row exists, so activation cannot overtake a worker paused mid-award; a worker whose claim was already recovered fails the CAS and awards nothing. An `awarding` row left by a crashed worker is released with `recover-legacy-writer --release-awarding --acknowledge-writer-stopped --commit` (awards are idempotent per invitee). V2 and legacy share the `ref:<invitee>` award key, so even a pathological pause can never double-pay. Without multi-document transactions a frozen process that resumes after an operator has released its row remains theoretically able to complete that one award; the operator acknowledgement is the control for that. Recovery is a compare-and-set on the exact token and the expiry predicate, appends an audit
 row (`legacy_writer_recoveries`) and never touches an active lease. Activation still requires
 the token to be absent, so old and V2 writers cannot overlap; it refuses (and `preflight`
 fails) until active legacy work has finished or a dead lease was recovered. The legacy
@@ -130,7 +130,7 @@ fails) until active legacy work has finished or a dead lease was recovered. The 
   date or UIM upload date, plus every future referral. Pre-activation UIM evidence is usable.
   `snapshot-launch-cohort` snapshots the invitee ids (one document per invitee in
   `affiliate_v2_launch_cohort`, `_id = invitee_user_id`; already-qualified invitees excluded);
-  it is replayable, and activation tops it up under the control barrier (repeated by the
+  it is replayable and rebuilt (members that stopped being active before the cutoff are pruned; decided members of the launched cutoff are kept; `cancel-scheduled` clears it), and activation tops it up under the control barrier (repeated by the
   scheduler after a crash). Preflight requires it `ready`.
 * Decision: successful own Welcome redemption, `coupon_new_player=1`, exact completed
   `after_total_bet_amount >= 80` (Decimal), canonical Account ID passes duplicate enforcement.

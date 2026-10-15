@@ -83,6 +83,9 @@ HISTORY_LIMITATION = (
 )
 FORWARD_MARKER_VERSION = "forward_only_marker_v1"
 COHORT_COLLECTION = "affiliate_v2_launch_cohort"
+# A legacy worker that passed the lease fence parks its row here until the award finishes. Deliberately NOT an
+# active-pending status: activation neither marks nor strands it, it REFUSES while any such row exists.
+AWARDING_STATUS = "awarding"
 ABSENCE_REJECTION_REASON = "no_welcome_redemption_in_complete_coverage"  # == uim_coverage.ABSENCE_REASON
 ACTIVE_PENDING_STATUSES = ("pending", "pending_channel", "pending_manual", "manual",
                            "processing", "error", "awaiting_redemption")

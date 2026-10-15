@@ -4493,16 +4493,19 @@ def _settle_pending_referrals(batch_limit: int = 200, lease=None) -> None:
                 _release_for_retry(pending_id, now_utc_ts, 60, "legacy_writer_lease_lost")
                 break
             if lease is not None:
-                # Last checks before the first award write: V2 activation clears processing ownership
-                # of this row and closes legacy admission, so a worker that slept through a recovery
-                # and an activation fails here instead of awarding after the cutoff.
+                # Park the row in the awarding state with a CAS on this worker's own claim. Activation
+                # refuses while any awarding row exists (preflight), so a worker paused from here until
+                # after recovery cannot be overtaken by activation; a worker whose claim was already
+                # recovered/marked fails this CAS and awards nothing.
                 fenced = db.pending_referrals.update_one(
                     {"_id": pending_id, "status": "processing", "processing_by": INSTANCE_ID},
-                    {"$set": {"award_fence_token": lease.token}})
+                    {"$set": {"status": affiliate_qualification.AWARDING_STATUS, "awarding_since": now_utc_ts,
+                              "award_fence_token": lease.token}})
                 if (not fenced.modified_count
                         or not affiliate_qualification.legacy_award_allowed(
                             affiliate_qualification.get_control(db), now_utc())):
                     logger.error("[SCHED][REFERRAL] award_aborted reason=row_or_admission_fence pending_id=%s", pending_id)
+                    _release_for_retry(pending_id, now_utc_ts, 60, "award_fence_failed")
                     break
             # Award key is invitee-scoped (not group_id/chat_id-scoped) so the
             # same invitee cannot be awarded twice across a group-origin and a
