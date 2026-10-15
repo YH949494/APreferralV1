@@ -12,6 +12,8 @@ preflight                   exit 0 only if activation is safe right now
 configure-source ...        persist the authoritative redemption source mapping
 configure-coverage-policy   attest WHAT the UIM coverage dates measure and the Welcome voucher's redemption
                             window - the only thing that lets a MISSING row reject (dry run by default)
+reconcile-uim-evidence      repair already-synced evidence a newer fully attested UIM batch re-observed (evidence only;
+                            dry run by default; --limit/--after-id bound each run; counts + masked samples only)
 snapshot-launch-cohort      snapshot the ids of all active pending/manual referrals (idempotent; dry run by default)
 recover-legacy-writer       clear a dead legacy-writer lease (never an active one); also: release-legacy-writer
 activate --cutoff ISO       persist the launch cutoff (immutable) + mode=active
@@ -250,6 +252,11 @@ def main(argv=None, *, db_factory=None, read_only_db_factory=None, now_fn=_now) 
     sync = sub.add_parser("sync-evidence", help="one Databot evidence sync pass (writes only uim_redemption_*)")
     sync.add_argument("--max-rows", type=int, default=5000)
     sub.add_parser("sync-status")
+    rec = sub.add_parser("reconcile-uim-evidence",
+                         help="repair evidence superseded by a newer attested UIM batch (dry run by default)")
+    rec.add_argument("--limit", type=int, default=500, help="max evidence documents examined this run (<=5000)")
+    rec.add_argument("--after-id", default=None, help="resume after this evidence _id (from next_after_id)")
+    rec.add_argument("--max-scan-rows", type=int, default=500_000, help="abort without writing above this many source rows")
 
     act = sub.add_parser("activate")
     act.add_argument("--cutoff", required=True, help="ISO-8601 with offset")
@@ -263,7 +270,7 @@ def main(argv=None, *, db_factory=None, read_only_db_factory=None, now_fn=_now) 
     vb = sub.add_parser("void-batch")
     vb.add_argument("--upload-batch-id", required=True)
     vb.add_argument("--reason", required=True)
-    for p in (cfg, dcfg, cpol, sync, act, upgrade, release, recover, sub.choices["snapshot-launch-cohort"], pause, sub.choices["resume"], sub.choices["cancel-scheduled"], rq, vb):
+    for p in (cfg, dcfg, cpol, sync, rec, act, upgrade, release, recover, sub.choices["snapshot-launch-cohort"], pause, sub.choices["resume"], sub.choices["cancel-scheduled"], rq, vb):
         p.add_argument("--commit", action="store_true", help="write (default: dry run)")
         p.add_argument("--operator", default=os.environ.get("USER") or "unknown")
     args = parser.parse_args(argv)
@@ -275,6 +282,32 @@ def main(argv=None, *, db_factory=None, read_only_db_factory=None, now_fn=_now) 
         db = (read_only_db_factory or _read_only_db)()
         print(json.dumps(uim_redemption_sync.sync_health(db, now_utc=now_utc), indent=2, default=str))
         return 0
+
+    if args.cmd == "reconcile-uim-evidence":
+        import uim_evidence_reconcile
+
+        if args.limit < 1 or args.limit > uim_evidence_reconcile.MAX_LIMIT:
+            print(f"refused: --limit must be 1..{uim_evidence_reconcile.MAX_LIMIT}", file=sys.stderr)
+            return 2
+        after = None
+        if args.after_id:
+            from bson import ObjectId
+            try:
+                after = ObjectId(args.after_id)
+            except Exception:
+                print("refused: --after-id is not an evidence _id", file=sys.stderr)
+                return 2
+        # Dry run reads through the secondary-preferred, no-index connection; --commit needs the primary.
+        db = (db_factory or _write_db)() if args.commit else (read_only_db_factory or _read_only_db)()
+        control = aq.get_control(db) or {}
+        if args.commit and aq.new_rule_active(control, now_utc):
+            print("refused: welcome_redemption_v2 is active; repair evidence before activation", file=sys.stderr)
+            return 2
+        report = uim_evidence_reconcile.reconcile(
+            db, config=control.get("source_config"), now_utc=now_utc, commit=args.commit, limit=args.limit,
+            after_id=after, max_scan_rows=args.max_scan_rows, operator=args.operator)
+        print(json.dumps(report, indent=2, default=str))
+        return 0 if report["ok"] else 1
 
     if args.cmd == "activation-preview":
         from affiliate_qualification_preview import build_preview
