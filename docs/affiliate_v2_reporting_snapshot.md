@@ -18,8 +18,15 @@ private route Databot reads. See the companion Databot PR for the consumer.
 
 Envelope: `contract`, `rule_active`, `rule_mode`, `rule_version`, `cohort`,
 `status`, `snapshot.{generation,generated_at,age_seconds,stale}`,
-`source.{status,problems,last_sync_success_at}`, `uim_coverage_end` (GMT+8),
-`totals`, `affiliates_total`, `truncated`.
+`source.{status,problems,last_sync_success_at}`, `uim_coverage` (below), `totals`, `affiliates_total`, `truncated`.
+
+`uim_coverage` keeps **four different timestamps apart**: *final coverage* (`final_coverage_start/end`: the inclusive
+GMT+8 days the data owner declared as a complete final UIM report, per `basis`), `latest_observed_redemption_at`
+(newest redemption present in rows - **not** coverage), `source.last_sync_success_at` and `snapshot.generated_at`.
+Also `status` (`complete | inferred_unverified | partial | coverage_gap | unavailable | none`), `intervals`, `gaps`
+and `absence_rejection.{active,blockers}`. `uim_coverage_end` is a **deprecated alias** that now means the *final*
+coverage end (`<date>T23:59:59+08:00`) and is `null` unless the status is `complete`; it no longer carries the
+latest row. Contract and rules: [uim_coverage_contract.md](uim_coverage_contract.md).
 Per affiliate: `affiliate_id`, `v2_qualified`, `v2_pending`, `v2_rejected`,
 `duplicate_account_excluded`, `seven_day_turnover` (exact decimal string),
 `seven_day_turnover_status` (`complete | partial | unavailable`).
@@ -87,8 +94,10 @@ other.
   pre-cutoff joins included). Invitees with an existing qualification are unchanged
   history and excluded.
 * **One state per invitee**, Qualified > Duplicate > Rejected > Pending. No evidence,
-  held/incomplete/immature evidence stay pending. Confirmed `coupon_new_player = 0`
-  and completed turnover below 80 are rejected. If the source is blocked, stale,
+  held/incomplete evidence stay pending. Confirmed `coupon_new_player = 0`
+  and completed turnover below 80 are rejected. An invitee with **no row at all** is rejected only inside proven
+  complete coverage under the owner's attested absence policy (the same `uim_coverage.decide_absences` live uses);
+  otherwise pending. If the source is blocked, stale,
   partially synced, its last sync failed, or the build was truncated, **everyone stays
   pending** - exactly how live processing holds.
 * **7D turnover** is the exact Decimal sum of the amounts on the evidence rows that

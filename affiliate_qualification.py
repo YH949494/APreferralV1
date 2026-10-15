@@ -671,26 +671,39 @@ def integration_readiness(db, config: dict | None, *, sample_batches: int = 3, n
 def pending_maturity_report(db, *, config: dict | None, now_utc: datetime) -> dict:
     """Source coverage is an availability bound, never a failed qualification.
 
-    Transport v1's exact After Total Bet is owner-attested as the completed
-    seven-day metric. Do not add seven days to a completed result. Absence or
-    an explicit incomplete marker is held; join age is diagnostic only.
+    There is exactly ONE seven-day measurement and it is completed BEFORE the
+    UIM file reaches Databot: a committed final result is evaluated as soon as
+    it arrives. No join age and no upload age is ever added to it; the counts
+    below are diagnostics only. Missing, partial or uncovered results stay
+    pending (a missing row is only a rejection inside proven complete coverage,
+    see ``uim_coverage``).
     """
     health = integration_readiness(db, config, now_utc=now_utc)
     sync = health.get("sync") or {}
-    end = parse_redeemed_at(sync.get("coverage_end"), "Asia/Kuala_Lumpur")
+    final = sync.get("final_coverage") or {}
+    final_end_day = final.get("final_coverage_end")
+    final_end = (KL_TZ.localize(datetime.strptime(final_end_day, "%Y-%m-%d") + timedelta(days=1))
+                 .astimezone(timezone.utc) if final_end_day else None)          # exclusive end of the last covered day
+    observed = parse_redeemed_at(sync.get("observed_end"), "Asia/Kuala_Lumpur")
     query = {"status": {"$in": list(ACTIVE_PENDING_STATUSES)}}
     return {
         "active_pending_manual_rows": db.pending_referrals.count_documents(query),
         "unverified_completeness_synced_rows": db.uim_redemption_rows.count_documents(
             {"seven_day_complete": {"$exists": False}, "seven_day_completeness_retained_version": {"$ne": 1}})
             if source_name(config) == SOURCE_DATABOT_UIM else None,
-        "source_coverage_end_utc": end.isoformat() if end else None,
-        "source_coverage_end_gmt8": end.astimezone(KL_TZ).isoformat() if end else None,
-        "joined_after_available_coverage": db.pending_referrals.count_documents(
-            {**query, "created_at_utc": {"$gt": end}}) if end else None,
+        # Three different facts, never one "coverage end":
+        "final_coverage_status": final.get("status"),
+        "final_coverage_start_gmt8": final.get("final_coverage_start"),
+        "final_coverage_end_gmt8": final_end_day,
+        "latest_observed_redemption_utc": observed.isoformat() if observed else None,
+        "latest_observed_redemption_gmt8": observed.astimezone(KL_TZ).isoformat() if observed else None,
+        "last_sync_success_at": sync.get("last_success_at"),
+        "joined_after_final_coverage": db.pending_referrals.count_documents(
+            {**query, "created_at_utc": {"$gte": final_end}}) if final_end else None,
         "joins_less_than_seven_days_old": db.pending_referrals.count_documents(
             {**query, "created_at_utc": {"$gt": now_utc - timedelta(days=7)}}),
-        "policy": "missing, incomplete or uncovered results stay pending; completed seven-day reports need no extra timer",
+        "policy": ("a completed seven-day report needs no extra timer; missing, incomplete or uncovered results "
+                   "stay pending; join age is diagnostic only"),
     }
 
 
@@ -1499,9 +1512,6 @@ def assess_evidence(evidence: dict, *, control: dict, now_utc: datetime, lookup)
         # A redemption cannot postdate its own processing; never attribute
         # (or reward) a future month on a bad source timestamp.
         return verdict(EV_REVIEW, "redeemed_at_in_future")
-    coverage = _aware_utc(control.get("source_coverage_end_utc"))
-    if coverage is not None and redeemed_at > coverage:
-        return verdict(EV_REVIEW, "outside_source_coverage")
     if not evidence.get("redemption_successful"):
         if evidence.get("redemption_status_known") is not True:
             return verdict(EV_REVIEW, "redemption_status_unknown")
@@ -1757,8 +1767,6 @@ def process_pending_evidence(db, *, now_utc: datetime, control: dict | None = No
         if not health["ok"]:
             out["skipped"] = "source_evidence_incomplete"
             return out
-        coverage = parse_redeemed_at(health["sync"].get("coverage_end"), "Asia/Kuala_Lumpur")
-        control = {**control, "source_coverage_end_utc": coverage}
         sync_at = parse_redeemed_at(health["sync"].get("last_success_at"), "UTC")
         if sync_at:
             for held in db[EVIDENCE_COLLECTION].find(
@@ -1794,6 +1802,12 @@ def process_pending_evidence(db, *, now_utc: datetime, control: dict | None = No
             continue
         out["processed"] += 1
         out["by_status"][result["status"]] = out["by_status"].get(result["status"], 0) + 1
+    if source_name(config) == SOURCE_DATABOT_UIM:
+        # The only conclusion drawn from a MISSING row: inside proven complete coverage and an attested policy.
+        # The source is fully healthy here (integration_readiness above) and extraction is complete.
+        import uim_coverage
+
+        out["absence"] = uim_coverage.process_absence_rejections(db, control=control, now_utc=now_utc)
     return out
 
 

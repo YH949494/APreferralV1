@@ -31,6 +31,9 @@ on:
       - "affiliate_qualification_preview.py"
       - "affiliate_v2_report.py"
       - "affiliate_v2_report_api.py"
+      - "uim_coverage.py"
+      - "uim_redemption_sync.py"
+      - "test_uim_*.py"
       - "gunicorn_web.conf.py"
       - "gunicorn_web_conf_loader.py"
       - "scripts/listener_smoke_app.py"
@@ -98,6 +101,7 @@ env:
     test_affiliate_congrats_gating.py
     test_affiliate_welcome_redemption_qualification.py
     test_uim_redemption_sync.py
+    test_uim_coverage_contract.py
     test_affiliate_qualification_rollout_guards.py
     test_affiliate_qualification_gates.py
     test_affiliate_forward_only_rollout.py

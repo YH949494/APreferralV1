@@ -70,6 +70,7 @@ from pymongo.errors import DuplicateKeyError
 
 import affiliate_qualification as aq
 import affiliate_qualification_preview as aqp
+import uim_coverage
 
 logger = logging.getLogger(__name__)
 
@@ -241,7 +242,6 @@ def source_status(db, control: dict | None, now_utc: datetime) -> dict:
     integration = aq.integration_readiness(db, config, now_utc=now_utc) if not problems else {}
     all_problems = sorted(set(problems + list(integration.get("problems") or [])))
     sync = integration.get("sync") or {}
-    coverage = aq.parse_redeemed_at(sync.get("coverage_end"), "Asia/Kuala_Lumpur")
     blocking = [p for p in all_problems if p not in aqp.NON_BLOCKING_PROBLEMS]
     if blocking:
         status = SOURCE_UNAVAILABLE
@@ -256,7 +256,8 @@ def source_status(db, control: dict | None, now_utc: datetime) -> dict:
         "status": status,
         "problems": all_problems,
         "last_sync_success_at": last_ok.isoformat() if last_ok else None,
-        "uim_coverage_end": coverage.astimezone(aq.KL_TZ).isoformat() if coverage else None,
+        # Final (declared complete) coverage, latest observed redemption and absence readiness - NOT one "end".
+        "uim_coverage": uim_coverage.report_view(db, control, now_utc=now_utc) if config else None,
     }
 
 
@@ -429,6 +430,7 @@ def build_preview_rows(db, *, control: dict, now_utc: datetime, max_active: int 
         and not stats.get("truncated_active_pending")
 
     outcomes: dict[int, dict[str, dict]] = defaultdict(dict)   # invitee -> status -> first outcome seen
+    replay_evidence_hashes: set[str] = set()
     if blocking or stats.get("truncated_active_pending"):
         real_q: set[int] = set()
         for chunk in _chunks(active):
@@ -446,10 +448,21 @@ def build_preview_rows(db, *, control: dict, now_utc: datetime, max_active: int 
         for o in replay["at_launch"]:
             if o["invitee_id"] is not None:
                 outcomes[int(o["invitee_id"])].setdefault(o["status"], o)
+        replay_evidence_hashes = {e["code_hash"] for e in replay["evidences"] if e.get("code_hash")}
     stats["source_usable"] = int(usable)
 
     population = active - real_q          # invitees with an existing (legacy) qualification are unchanged history
     stats["already_qualified_unchanged"] = len(active & real_q)
+    # A MISSING row is only ever a rejection inside proven complete coverage under the attested policy - the very
+    # same decision live processing makes (uim_coverage.decide_absences). Everything else stays pending.
+    no_outcome = [i for i in population if not (outcomes.get(i) or {})]
+    absence: dict[int, dict] = {}
+    if usable and no_outcome and (config or {}).get("source") == aq.SOURCE_DATABOT_UIM:
+        cov = uim_coverage.effective_coverage(db, now_utc=now_utc)
+        absence = uim_coverage.decide_absences(db, no_outcome, control=control, cov=cov, source_ok=True,
+                                               evidence_hashes=replay_evidence_hashes)
+        for verdict in absence.values():
+            stats["absence_rejected" if verdict["status"] == "rejected" else f"absence_pending_{verdict['reason']}"] += 1
     state: dict[int, dict] = {}
     turnover: dict[int, Decimal | None] = {}
     for invitee in population:
@@ -460,6 +473,8 @@ def build_preview_rows(db, *, control: dict, now_utc: datetime, max_active: int 
         elif aq.EV_DUPLICATE_ACCOUNT in got:
             state[invitee] = {"state": ST_DUPLICATE}
         elif aq.EV_REJECTED in got:
+            state[invitee] = {"state": ST_REJECTED}
+        elif absence.get(invitee, {}).get("status") == "rejected":
             state[invitee] = {"state": ST_REJECTED}
         else:
             state[invitee] = {"state": ST_PENDING}     # review/held/no evidence/unusable source
@@ -654,6 +669,7 @@ def build_report(db, *, start_date: str, end_date: str, now_utc: datetime, limit
         "status": "inactive",
         "snapshot": None,
         "source": None,
+        "uim_coverage": None,
         "uim_coverage_end": None,
         "totals": None,
         "affiliates": None,
@@ -697,7 +713,12 @@ def build_report(db, *, start_date: str, end_date: str, now_utc: datetime, limit
         "stale": stale, "unattributed_invitees": sum(int(v) for k, v in build.items() if k.startswith("unattributed_")),
     }
     report["source"] = {k: source.get(k) for k in ("status", "problems", "last_sync_success_at")}
-    report["uim_coverage_end"] = source.get("uim_coverage_end")
+    # Final coverage, latest observed redemption, sync time and snapshot time are four separate fields.
+    report["uim_coverage"] = source.get("uim_coverage")
+    final_end = (source.get("uim_coverage") or {}).get("final_coverage_end")
+    report["uim_coverage_end"] = (f"{final_end}T23:59:59+08:00"          # deprecated alias: FINAL coverage end only
+                                  if final_end and (source.get("uim_coverage") or {}).get("status") == "complete"
+                                  else None)
     audit = state.get("preview_audit")
     if mode == MODE_LIVE and audit:
         report["pre_launch_preview_audit"] = {

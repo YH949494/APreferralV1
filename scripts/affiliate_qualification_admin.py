@@ -10,6 +10,8 @@ Subcommands
 status                      control doc, readiness, evidence/registry counts
 preflight                   exit 0 only if activation is safe right now
 configure-source ...        persist the authoritative redemption source mapping
+configure-coverage-policy   attest WHAT the UIM coverage dates measure and the Welcome voucher's redemption
+                            window - the only thing that lets a MISSING row reject (dry run by default)
 activate --cutoff ISO       persist the launch cutoff (immutable) + mode=active
 pause --reason R            stop NEW qualifications (legacy stays disabled)
 resume                      mode=active again (re-runs preflight)
@@ -42,6 +44,7 @@ from datetime import datetime, timedelta, timezone
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import affiliate_qualification as aq  # noqa: E402
+import uim_coverage  # noqa: E402
 
 
 def _write_db():
@@ -97,9 +100,13 @@ def preflight_report(db, *, now_utc: datetime) -> dict:
         "cancellation_repair_pending": bool(control.get("cancelled_cohort_cutoff")),
         "v1_qualified_events": db.qualified_events.count_documents({"rule_version": aq.LEGACY_RULE_VERSION}),
         "pending_maturity": aq.pending_maturity_report(db, config=control.get("source_config"), now_utc=now_utc),
+        # Final UIM coverage + attested absence policy: a missing row may only reject inside proven complete
+        # coverage, and activation does not proceed on unverified/partial/gapped coverage.
+        "coverage": uim_coverage.preflight_section(db, control, now_utc=now_utc),
     }
     report["ok"] = bool(
-        report["indexes"]["ok"]
+        report["coverage"]["ok"]
+        and report["indexes"]["ok"]
         and report["integration"]["ok"]
         and report["migration_seeded"]
         and report["migration_completion"]["ok"]
@@ -188,6 +195,18 @@ def main(argv=None, *, db_factory=None, read_only_db_factory=None, now_fn=_now) 
     dcfg.add_argument("--campaign-ids", default=None, help="comma-separated UIM campaign labels (optional filter)")
     dcfg.add_argument("--unlinked-account-policy", choices=[aq.UNLINKED_POLICY_ACCEPT, aq.UNLINKED_POLICY_REVIEW],
                       default=aq.UNLINKED_POLICY_ACCEPT)
+    cpol = sub.add_parser(
+        "configure-coverage-policy",
+        help="attest the coverage basis + Welcome redemption window that allow absence-based rejection",
+    )
+    cpol.add_argument("--basis", choices=list(uim_coverage.ABSENCE_BASES),
+                      help="what Databot's declared coverage dates measure (only voucher_redemption_date is supported)")
+    cpol.add_argument("--welcome-redemption-window-days", type=int,
+                      help="days a Welcome voucher stays redeemable after issuance (data owner's figure)")
+    cpol.add_argument("--attested-by", help="data owner attesting the basis and the window")
+    cpol.add_argument("--attestation-ref", help="where that attestation is recorded (ticket/email)")
+    cpol.add_argument("--disable", action="store_true", help="switch absence-based rejection off (history is kept)")
+    cpol.add_argument("--reason", required=True)
     sync = sub.add_parser("sync-evidence", help="one Databot evidence sync pass (writes only uim_redemption_*)")
     sync.add_argument("--max-rows", type=int, default=5000)
     sub.add_parser("sync-status")
@@ -204,7 +223,7 @@ def main(argv=None, *, db_factory=None, read_only_db_factory=None, now_fn=_now) 
     vb = sub.add_parser("void-batch")
     vb.add_argument("--upload-batch-id", required=True)
     vb.add_argument("--reason", required=True)
-    for p in (cfg, dcfg, sync, act, upgrade, release, pause, sub.choices["resume"], sub.choices["cancel-scheduled"], rq, vb):
+    for p in (cfg, dcfg, cpol, sync, act, upgrade, release, pause, sub.choices["resume"], sub.choices["cancel-scheduled"], rq, vb):
         p.add_argument("--commit", action="store_true", help="write (default: dry run)")
         p.add_argument("--operator", default=os.environ.get("USER") or "unknown")
     args = parser.parse_args(argv)
@@ -351,6 +370,42 @@ def main(argv=None, *, db_factory=None, read_only_db_factory=None, now_fn=_now) 
                       "updated_at": now_utc},
              "$setOnInsert": {"mode": aq.MODE_DISABLED, "rule_version": aq.RULE_VERSION, "created_at": now_utc}},
             upsert=True,
+        )
+
+    if args.cmd == "configure-coverage-policy":
+        if mode == aq.MODE_ACTIVE:
+            print("refused: pause the rule before changing a decision policy", file=sys.stderr)
+            return 2
+        if (control.get("source_config") or {}).get("source") != aq.SOURCE_DATABOT_UIM:
+            print("refused: configure the Databot UIM source first", file=sys.stderr)
+            return 2
+        existing = (control.get("source_config") or {}).get("absence_rejection") or {}
+        if args.disable:
+            policy = {**existing, "enabled": False, "disabled_at": now_utc, "disabled_by": args.operator}
+        else:
+            policy = {
+                "enabled": True,
+                "coverage_basis": args.basis,
+                "welcome_redemption_window_days": args.welcome_redemption_window_days,
+                "attestation": {"by": args.attested_by, "reference": args.attestation_ref,
+                                "recorded_at": now_utc, "recorded_by": args.operator},
+            }
+            _, problems = uim_coverage.absence_policy({"source_config": {"absence_rejection": policy}})
+            if problems:
+                print(f"refused: invalid coverage policy {problems}", file=sys.stderr)
+                return 2
+        same = (existing.get("enabled"), existing.get("coverage_basis"), existing.get("welcome_redemption_window_days"),
+                (existing.get("attestation") or {}).get("by"), (existing.get("attestation") or {}).get("reference")) == (
+            policy.get("enabled"), policy.get("coverage_basis"), policy.get("welcome_redemption_window_days"),
+            (policy.get("attestation") or {}).get("by"), (policy.get("attestation") or {}).get("reference"))
+        if same:
+            print(json.dumps({"no_change": True, "absence_rejection": existing}, default=str))
+            return 0
+        return _apply(
+            db, args,
+            {"$set": {"source_config.absence_rejection": policy, "updated_at": now_utc},
+             "$push": {"absence_policy_history": {"policy": policy, "at": now_utc, "operator": args.operator,
+                                                   "reason": args.reason}}},
         )
 
     if args.cmd == "sync-evidence":

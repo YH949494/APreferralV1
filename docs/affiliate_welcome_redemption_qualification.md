@@ -197,8 +197,9 @@ Account identity is `"<account_namespace>:<account>"`, case and leading zeros pr
 `build_evidence_doc` path is used by the migration seeding (`_redemptions_by_code` now iterates
 `iter_committed_source_rows`), so seeded keys equal live keys.
 
-**Preview additions.** Source label, last successful sync, last error, coverage (GMT+8 wall clock),
-latest committed UIM batch, success basis (attested vs. "ASSUMED — preview only"), and an all-time
+**Preview additions.** Source label, last successful sync, last error, the redemption range *observed* in the rows
+and — separately — the *final coverage* declared by the data owner (GMT+8, see
+[uim_coverage_contract.md](uim_coverage_contract.md)), latest committed UIM batch, success basis (attested vs. "ASSUMED — preview only"), and an all-time
 reconciliation: rows received / unmatched (not Welcome) / matched to one Welcome recipient / removed
 by later import / would qualify / duplicate Account IDs excluded / requiring review (+ reasons).
 Never synced or no committed batch → blocked ("not zero"); stale sync (> `UIM_REDEMPTION_STALE_AFTER_MINUTES`,

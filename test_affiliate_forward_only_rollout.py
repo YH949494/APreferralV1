@@ -249,12 +249,14 @@ def test_temporary_feed_failure_holds_without_any_failed_or_earned_side_effect(m
     assert w.db.qualified_events.count_documents({}) == 1
 
 
-def test_coverage_and_missing_source_row_hold_instead_of_rejecting(monkeypatch):
+def test_final_row_is_evaluated_immediately_and_missing_source_row_holds_instead_of_rejecting(monkeypatch):
     w, _ = databot_world(fields={"after_total_bet_amount": "1"})
     aq.extract_committed_batches(w.db, config=DATABOT_CONFIG, now_utc=NOW)
     ev = w.db[aq.EVIDENCE_COLLECTION].find_one()
+    # The final row carries completed values, so it is judged at once. The latest observed redemption is NOT a
+    # coverage bound (the old "outside_source_coverage" hold is gone): a stale legacy key is not consulted.
     control = {**aq.get_control(w.db), "source_coverage_end_utc": CUTOFF}
-    assert aq.assess_evidence(ev, control=control, now_utc=NOW, lookup=aq.DbLookup(w.db))["reason"] == "outside_source_coverage"
+    assert aq.assess_evidence(ev, control=control, now_utc=NOW, lookup=aq.DbLookup(w.db))["reason"] == "seven_day_turnover_below_80"
     w.db.uim_redemption_rows.delete_many({})  # synthetic source disappearance
     result = aq.evaluate_evidence(w.db, ev, control=aq.get_control(w.db), now_utc=NOW)
     assert result == {"status": aq.EV_REVIEW, "reason": "source_row_unavailable"}
@@ -354,8 +356,10 @@ def test_unavailable_preview_and_preflight_report_pending_population_and_coverag
     w, feed = databot_world()
     w.join(900, 101, at=NOW, status="manual")
     maturity = admin.preflight_report(w.db, now_utc=NOW)["pending_maturity"]
-    assert maturity["source_coverage_end_gmt8"] == "2026-10-05T10:00:00+08:00"
-    assert maturity["joined_after_available_coverage"] == 1
+    # Latest OBSERVED redemption and FINAL coverage are different facts; nothing was declared complete here.
+    assert maturity["latest_observed_redemption_gmt8"] == "2026-10-05T10:00:00+08:00"
+    assert maturity["final_coverage_status"] == "inferred_unverified" and maturity["final_coverage_end_gmt8"] is None
+    assert maturity["joined_after_final_coverage"] is None
     feed.fail_after = 0
     sync(w, feed, now=NOW + timedelta(hours=1))
     result = preview.build_preview(w.db, month=None, now_utc=NOW + timedelta(hours=1))

@@ -133,12 +133,16 @@ observation captured by the new sync can supply definitive evidence; any targete
 refresh of an old immutable row needs separate source/provenance review and write
 authorization. Missing retained data is never guessed from turnover >=80.
 
-Last supplied production coverage, **not refreshed here**, is
-2026-10-02 15:19:03 GMT+8. Runtime preflight reports actual source coverage,
-pending/manual count, joins beyond coverage and young joins. Rows beyond
-coverage remain pending until later committed imports arrive. A failed feed
-attempt holds processing even after a recent successful sync. No cursor resets
-or guessed enrichment are used.
+The figure previously quoted here, 2026-10-02 15:19:03 GMT+8, was the **latest redemption observed** in
+the synced rows, not coverage; it is superseded. Coverage is now what the data owner declared complete per
+committed batch (inclusive GMT+8 days, with an explicit basis) and is reported separately from the latest observed
+redemption, the last sync and the snapshot time — see [uim_coverage_contract.md](uim_coverage_contract.md).
+Preflight reports final coverage, gaps affecting the launch cohort, the attested absence policy, the
+pending/manual count, joins after the final covered day and young joins (diagnostic only: no join age is ever
+added to a completed result). A completed row is evaluated as soon as it arrives; the latest observed redemption
+is not a bound. A missing row is a rejection **only** inside proven complete coverage under the owner's attested
+policy; unverified/partial/gapped coverage, a failed feed attempt (held even after a recent successful sync) or
+an unsynced batch keep it pending. No cursor resets or guessed enrichment are used.
 
 `activation-preview` is read-only. It counts the entire active population once
 per invitee: pass, reject, pending/review, duplicate-account exclusion, and
