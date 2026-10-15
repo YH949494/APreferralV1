@@ -12,6 +12,8 @@ Canonical selection (see `pick_canonical`)
 Persisted schema (main._archive_week_upsert / database.save_weekly_snapshot):
   checkin_leaderboard:  [{user_id, username, weekly_xp}, ...]        sorted desc
   referral_leaderboard: [{user_id, username, weekly_referrals}, ...] sorted desc
+                        (legacy snapshots: weekly_referral_count; if an entry has both
+                        fields they must be equal, else the snapshot is unparseable)
 
 Duplicates for one week were written while the Monday reset was running, so
 the group mixes the real pre-reset standings with partially/fully zeroed
@@ -68,8 +70,11 @@ BACKUP_COLLECTION_NAME = "weekly_leaderboard_history_dedupe_backup"
 INDEX_NAME = "uniq_weekly_history_week_start"
 DELETE_BATCH_SIZE = 100
 
-CHECKIN_FIELD = "weekly_xp"
-REFERRAL_FIELD = "weekly_referrals"
+CHECKIN_FIELDS = ("weekly_xp",)
+# "weekly_referral_count" is the legacy field verified in production for week
+# 2025-08-25; "weekly_referrals" is written by current archive writers. A
+# missing field is never treated as zero.
+REFERRAL_FIELDS = ("weekly_referrals", "weekly_referral_count")
 LEGACY_KEYS = ("checkin", "referral")  # read-only API fallbacks; never written by archive writers
 
 
@@ -136,7 +141,22 @@ class Analysis:
         return "ELIGIBLE"
 
 
-def _parse_board(entries, value_field: str) -> Board:
+def _entry_value(entry: dict, value_fields: tuple):
+    present = [f for f in value_fields if f in entry]
+    if not present:
+        raise ValueError(f"missing {'/'.join(value_fields)}")
+    values = []
+    for f in present:
+        v = entry[f]
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
+            raise ValueError(f"bad {f}")
+        values.append(v)
+    if any(v != values[0] for v in values[1:]):
+        raise ValueError(f"conflicting {'/'.join(present)} values")
+    return values[0]
+
+
+def _parse_board(entries, value_fields: tuple) -> Board:
     if entries is None:
         entries = []
     if not isinstance(entries, list):
@@ -145,9 +165,7 @@ def _parse_board(entries, value_field: str) -> Board:
     for e in entries:
         if not isinstance(e, dict) or e.get("user_id") is None:
             raise ValueError("entry without user_id")
-        v = e.get(value_field)
-        if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
-            raise ValueError(f"bad {value_field}")
+        v = _entry_value(e, value_fields)
         if e["user_id"] in board.values:
             raise ValueError("duplicate user_id in board")
         board.values[e["user_id"]] = v
@@ -161,8 +179,8 @@ def analyze(doc: dict) -> Analysis:
         a.error = "unsupported legacy keys"
         return a
     try:
-        a.checkin = _parse_board(doc.get("checkin_leaderboard"), CHECKIN_FIELD)
-        a.referral = _parse_board(doc.get("referral_leaderboard"), REFERRAL_FIELD)
+        a.checkin = _parse_board(doc.get("checkin_leaderboard"), CHECKIN_FIELDS)
+        a.referral = _parse_board(doc.get("referral_leaderboard"), REFERRAL_FIELDS)
     except ValueError as exc:
         a.error = str(exc)
     return a
@@ -361,10 +379,14 @@ def _backup_documents(history_collection, backup_collection, group: dict) -> int
 
 
 def _verify_backups(history_collection, backup_collection, group: dict) -> None:
+    """Read back the backup of EVERY document in the group, canonical included."""
     live = {d["_id"]: d for d in history_collection.find({"_id": {"$in": group["all_ids"]}})}
     stored = {d["_id"]: d for d in backup_collection.find({"_id": {"$in": group["all_ids"]}})}
-    for _id in group["remove_ids"]:
-        # A doc already deleted by an interrupted earlier run is fine as long as its backup exists.
+    if group["canonical_id"] not in live:
+        raise UnsafeCleanupError(f"canonical _id={group['canonical_id']!r} missing from history")
+    for _id in group["all_ids"]:
+        # A removable doc already deleted by an interrupted earlier run is fine
+        # as long as its backup exists; the canonical must be live and backed up.
         if _id not in stored:
             raise UnsafeCleanupError(f"backup missing for _id={_id!r}")
         if _id in live and _strip_meta(stored[_id]) != live[_id]:

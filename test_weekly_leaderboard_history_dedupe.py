@@ -28,6 +28,7 @@ from scripts.dedupe_weekly_leaderboard_history import (
     INDEX_NAME,
     create_unique_index,
     dedupe,
+    _verify_backups,
     pick_canonical,
 )
 
@@ -69,13 +70,13 @@ def _board(values, field):
 
 
 def _doc(week_start, *, source="live_counters", archived_at=None, xp=(10, 5), refs=(2, 1),
-         week_end="2025-08-31", _id=None):
+         week_end="2025-08-31", _id=None, ref_field="weekly_referrals"):
     """Snapshot in the persisted schema: weekly_xp / weekly_referrals entries."""
     d = {
         "week_start": week_start,
         "week_end": week_end,
         "checkin_leaderboard": _board(xp, "weekly_xp"),
-        "referral_leaderboard": _board(refs, "weekly_referrals"),
+        "referral_leaderboard": _board(refs, ref_field),
         "archived_at": archived_at or datetime.utcnow(),
         "source": source,
     }
@@ -282,6 +283,160 @@ def test_pin_bypasses_malformed_losers_and_report_survives_scalar_board():
     assert result["mode"] == "apply"
     assert [d["_id"] for d in history.find({})] == ["good"]
     assert backup.count_documents({}) == 2
+
+
+LEGACY = "weekly_referral_count"
+
+
+def _incident_legacy(n_zero=20, ref_field=LEGACY):
+    docs = [_doc("2025-08-25", xp=(160, 90, 40), refs=(5, 3, 1), archived_at=T0, _id="pre", ref_field=ref_field)]
+    docs.append(_doc("2025-08-25", xp=(70, 0, 0), refs=(5, 3, 1), archived_at=T0 + timedelta(minutes=1),
+                     _id="partial", ref_field=ref_field))
+    for i in range(n_zero):
+        docs.append(_doc("2025-08-25", xp=(0, 0, 0), refs=(0, 0, 0), archived_at=T0 + timedelta(minutes=2 + i),
+                         _id=f"zero{i:02d}", ref_field=ref_field))
+    return docs
+
+
+def test_legacy_weekly_referral_count_snapshots_are_parsed():
+    assert pick_canonical(_incident_legacy())["_id"] == "pre"
+
+
+def test_modern_weekly_referrals_snapshots_still_parsed():
+    assert pick_canonical(_incident_legacy(ref_field="weekly_referrals"))["_id"] == "pre"
+
+
+def test_mixed_legacy_and_modern_snapshots_compare_per_user():
+    docs = _incident_legacy(5)
+    docs[1] = _doc("2025-08-25", xp=(70, 0, 0), refs=(5, 3, 1), archived_at=T0 + timedelta(minutes=1),
+                   _id="partial", ref_field="weekly_referrals")  # modern partial vs legacy pre
+    docs[2] = _doc("2025-08-25", xp=(0, 0, 0), refs=(0, 0, 0), archived_at=T0 + timedelta(minutes=2),
+                   _id="zero00", ref_field="weekly_referrals")
+    assert pick_canonical(docs)["_id"] == "pre"
+    # and the reverse: modern pre-reset beats legacy zeroed
+    docs = [_doc("w", refs=(5, 3), _id="modern_pre", archived_at=T0),
+            _doc("w", xp=(0, 0), refs=(0, 0), _id="legacy_zero", archived_at=T0 + timedelta(minutes=1), ref_field=LEGACY)]
+    assert pick_canonical(docs)["_id"] == "modern_pre"
+
+
+def test_dual_field_equal_values_accepted_conflicting_values_ambiguous():
+    ok = _doc("w", _id="ok", archived_at=T0)
+    for e in ok["referral_leaderboard"]:
+        e[LEGACY] = e["weekly_referrals"]
+    assert pick_canonical([ok, _doc("w", xp=(0, 0), refs=(0, 0), _id="z", archived_at=T0 + timedelta(minutes=1))])["_id"] == "ok"
+
+    bad = _doc("w", _id="bad", archived_at=T0 + timedelta(minutes=1))
+    for e in bad["referral_leaderboard"]:
+        e[LEGACY] = e["weekly_referrals"] + 1
+    with pytest.raises(AmbiguousCanonicalError, match="unparseable"):
+        pick_canonical([ok, bad])
+
+
+def test_missing_referral_value_is_not_treated_as_zero():
+    bad = _doc("w", _id="bad", archived_at=T0 + timedelta(minutes=1))
+    del bad["referral_leaderboard"][0]["weekly_referrals"]
+    with pytest.raises(AmbiguousCanonicalError, match="unparseable"):
+        pick_canonical([_doc("w", _id="ok", archived_at=T0), bad])
+    bad["referral_leaderboard"][0]["weekly_referral_count"] = None
+    with pytest.raises(AmbiguousCanonicalError):
+        pick_canonical([_doc("w", _id="ok", archived_at=T0), bad])
+
+
+def test_legacy_strict_numeric_and_sort_validation_preserved():
+    ok = _doc("w", _id="ok", archived_at=T0, ref_field=LEGACY)
+    junk = _doc("w", _id="junk", archived_at=T0 + timedelta(minutes=1), ref_field=LEGACY)
+    junk["referral_leaderboard"][0][LEGACY] = "5"
+    with pytest.raises(AmbiguousCanonicalError):
+        pick_canonical([ok, junk])
+    unsorted = _doc("w", refs=(1, 9), _id="unsorted", archived_at=T0, ref_field=LEGACY)
+    with pytest.raises(AmbiguousCanonicalError, match="no valid"):
+        pick_canonical([unsorted, _doc("w", xp=(0, 0), refs=(0, 0), _id="z", ref_field=LEGACY)])
+
+
+def test_legacy_conflicting_rankings_abort_without_writes():
+    history, backup = _client_and_collections()
+    history.insert_many([
+        _doc("w", xp=(160, 90), refs=(0, 0), _id="A", archived_at=T0, ref_field=LEGACY),
+        _doc("w", xp=(0, 0), refs=(5, 3), _id="B", archived_at=T0 + timedelta(minutes=1), ref_field=LEGACY),
+    ])
+    result = dedupe(history_collection=history, backup_collection=backup, dry_run=False)
+    assert result["mode"] == "aborted"
+    assert history.count_documents({}) == 2 and backup.count_documents({}) == 0
+
+
+def test_production_incident_shape_300_snapshots_50_referral_entries_each():
+    """300 snapshots x 50 referral entries = 15,000 legacy entries; earliest 160 XP, latest 0 XP."""
+    history, backup = _client_and_collections()
+    docs = []
+    for i in range(300):
+        pre = i == 0
+        xp = tuple([160 - k for k in range(50)]) if pre else tuple([0] * 50)
+        refs = tuple([50 - k for k in range(50)]) if i < 3 else tuple([0] * 50)
+        docs.append(_doc("2025-08-25", xp=xp, refs=refs, archived_at=T0 + timedelta(seconds=i * 27),
+                         _id=f"s{i:03d}", ref_field=LEGACY))
+    assert sum(len(d["referral_leaderboard"]) for d in docs) == 15000
+    history.insert_many(docs)
+    before = {d["_id"]: d for d in history.find({})}
+
+    dry = dedupe(history_collection=history, backup_collection=backup)
+    assert dry["mode"] == "dry_run" and backup.count_documents({}) == 0 and history.count_documents({}) == 300
+
+    result = dedupe(history_collection=history, backup_collection=backup, dry_run=False)
+    assert result["mode"] == "apply" and result["backed_up"] == 300 and result["deleted"] == 299
+    kept = history.find_one({"week_start": "2025-08-25"})
+    assert kept["_id"] == "s000" and kept["checkin_leaderboard"][0]["weekly_xp"] == 160
+    # stored documents are never rewritten (no field migration)
+    assert kept == before["s000"] and "weekly_referrals" not in kept["referral_leaderboard"][0]
+    assert backup.count_documents({}) == 300
+    assert backup.find_one({"_id": "s000"})["_dedupe_meta"]["role"] == "canonical"
+
+
+def test_earliest_with_160xp_is_not_trusted_if_it_does_not_dominate():
+    docs = _incident_legacy(3)
+    docs[0] = _doc("2025-08-25", xp=(160, 0, 0), refs=(1, 0, 0), archived_at=T0, _id="pre", ref_field=LEGACY)
+    docs[1] = _doc("2025-08-25", xp=(100, 90, 40), refs=(5, 3, 1), archived_at=T0 + timedelta(minutes=1),
+                   _id="partial", ref_field=LEGACY)
+    with pytest.raises(AmbiguousCanonicalError, match="conflicting"):
+        pick_canonical(docs)
+
+
+def test_canonical_backup_is_read_back_before_any_delete():
+    history, backup = _client_and_collections()
+    history.insert_many(_incident_legacy(5))
+
+    class _DropCanonical:
+        """Backup store whose read-back silently loses the canonical's backup."""
+        def __init__(self, coll):
+            self._c = coll
+
+        def __getattr__(self, n):
+            return getattr(self._c, n)
+
+        def find(self, flt=None, *a, **kw):
+            return [d for d in self._c.find(flt, *a, **kw) if d["_id"] != "pre"]
+
+    with pytest.raises(UnsafeCleanupError, match="backup missing for _id='pre'"):
+        dedupe(history_collection=history, backup_collection=_DropCanonical(backup), dry_run=False)
+    assert history.count_documents({}) == 7  # nothing deleted
+
+    # tampered canonical backup (stale content) is also caught
+    group = {"all_ids": ["pre"], "canonical_id": "pre", "remove_ids": [], "week_start": "2025-08-25"}
+    backup.replace_one({"_id": "pre"}, {"_id": "pre", "week_start": "tampered"}, upsert=True)
+    with pytest.raises(UnsafeCleanupError, match="does not match"):
+        _verify_backups(history, backup, group)
+
+
+def test_interrupted_cleanup_on_legacy_incident_resumes():
+    history, backup = _client_and_collections()
+    docs = _incident_legacy(30)
+    history.insert_many(docs)
+    crashing = _FailingAfter(history, "delete_many", 1)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        dedupe(history_collection=crashing, backup_collection=backup, dry_run=False, delete_batch_size=10)
+    assert history.count_documents({"_id": "pre"}) == 1
+    dedupe(history_collection=history, backup_collection=backup, dry_run=False, delete_batch_size=10)
+    assert [d["_id"] for d in history.find({})] == ["pre"]
+    assert backup.count_documents({}) == len(docs)
 
 
 class _FailingAfter:
