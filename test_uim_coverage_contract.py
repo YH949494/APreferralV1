@@ -741,3 +741,56 @@ def test_a_large_changed_population_is_worked_off_in_bounded_slices(monkeypatch)
     # The periodic safety re-scan still happens (e.g. referrals re-opened since).
     again = ucov.process_absence_rejections(w.db, control=control, now_utc=NOW + ucov.ABSENCE_RECHECK + timedelta(minutes=1), limit=2)
     assert "skipped" not in again
+
+
+def test_a_failed_coverage_fetch_after_a_good_one_invalidates_the_ledger_and_suspends_absence():
+    w, feed = brief_world()
+    assert ucov.absence_blockers(aq.get_control(w.db), ucov.effective_coverage(w.db)) == []
+    feed.coverage_unavailable = True
+    result = sync(w, feed, now=NOW + timedelta(minutes=1))
+    assert result["ok"] and "feed_http_404" in result["coverage_ledger_error"]       # rows still sync
+    cov = ucov.effective_coverage(w.db)
+    assert cov["ledger"]["valid"] is False
+    assert "coverage_ledger_missing" in ucov.absence_blockers(aq.get_control(w.db), cov)
+    activate(w)
+    w.db[aq.CONTROL_COLLECTION].update_one({"_id": aq.CONTROL_ID}, {"$set": {"source_config.absence_rejection": policy(3)}})
+    out = ucov.process_absence_rejections(w.db, control=aq.get_control(w.db), now_utc=NOW + timedelta(minutes=2))
+    assert out.get("skipped") == "coverage_ledger_missing"
+    assert w.db[aq.EVIDENCE_COLLECTION].count_documents({"source": ucov.ABSENCE_SOURCE}) == 0
+    feed.coverage_unavailable = False                                                  # recovers on the next good fetch
+    sync(w, feed, now=NOW + timedelta(minutes=3))
+    assert ucov.absence_blockers(aq.get_control(w.db), ucov.effective_coverage(w.db)) == []
+
+
+def test_http_fetcher_enforces_the_contract_per_endpoint(monkeypatch):
+    import requests
+
+    served = {}
+
+    class Resp:
+        status_code = 200
+
+        def __init__(self, body):
+            self._body = body
+
+        def json(self):
+            return self._body
+
+    class Session:
+        def __init__(self):
+            self.headers = {}
+
+        def get(self, url, params=None, timeout=None):
+            return Resp(served[url.rsplit("/v1", 1)[1]])
+
+    monkeypatch.setattr(requests, "Session", Session)
+    fetch = usync.http_fetcher("http://databot.internal:8080", "tok")
+    ledger = {"contract": ucov.LEDGER_CONTRACT, "batches": []}
+    feed_page = {"contract": usync.FEED_CONTRACT, "batches": []}
+    served.update({"/batches": ledger, "/coverage": feed_page})
+    with pytest.raises(usync.FeedUnavailable, match="feed_contract_mismatch"):
+        fetch("/batches", {})                    # a coverage body can never pass as an empty batch page
+    with pytest.raises(usync.FeedUnavailable, match="feed_contract_mismatch"):
+        fetch("/coverage", {})
+    served.update({"/batches": feed_page, "/coverage": ledger})
+    assert fetch("/batches", {}) is feed_page and fetch("/coverage", {}) is ledger

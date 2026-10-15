@@ -51,7 +51,11 @@ STATE_ID = aq.SOURCE_DATABOT_UIM
 FEED_CONTRACT = "databot.uim_redemption_feed.v1"
 FEED_PREFIX = "/internal/uim-redemption-feed/v1"
 # The coverage ledger is a sibling endpoint of the same private feed with its own contract tag.
-ACCEPTED_CONTRACTS = (FEED_CONTRACT, uim_coverage.LEDGER_CONTRACT)
+COVERAGE_PATH = "/coverage"
+
+
+def contract_for(path: str) -> str:
+    return uim_coverage.LEDGER_CONTRACT if path == COVERAGE_PATH else FEED_CONTRACT
 
 SYNC_LEASE = timedelta(minutes=10)
 DEFAULT_MAX_ROWS = 5000
@@ -108,7 +112,9 @@ def http_fetcher(base_url: str, token: str, *, timeout: float = 15.0):
             body = resp.json()
         except ValueError:
             raise FeedUnavailable(f"feed_bad_json path={path}") from None
-        if body.get("contract") not in ACCEPTED_CONTRACTS:
+        # Endpoint-specific: a coverage body must never be readable as a batch/row page (it would look like an
+        # empty page and let the sync "succeed" without ever seeing the rows), nor the reverse.
+        if body.get("contract") != contract_for(path):
             raise FeedUnavailable(f"feed_contract_mismatch path={path}")
         return body
 
@@ -264,8 +270,11 @@ def _sync_coverage_ledger(db, fetch, *, now_utc: datetime, out: dict) -> None:
     never aborts the evidence sync: without a valid, matching ledger no absence
     conclusion is drawn (``uim_coverage.absence_blockers``)."""
     try:
-        result = uim_coverage.store_ledger(db, fetch("/coverage"), now_utc=now_utc)
+        result = uim_coverage.store_ledger(db, fetch(COVERAGE_PATH), now_utc=now_utc)
     except FeedUnavailable as exc:
+        # A ledger we could not refresh is not authority: drop the previous one so the sync's later "success"
+        # cannot leave stale intervals usable for irreversible absence decisions.
+        uim_coverage.invalidate_ledger(db, now_utc=now_utc, error=str(exc)[:160])
         out["coverage_ledger_error"] = str(exc)[:160]
         return
     out["coverage_ledger"] = result

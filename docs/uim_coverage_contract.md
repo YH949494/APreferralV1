@@ -196,7 +196,7 @@ command) stops new ones and decided history stays.
 
 ## 10. Tests
 
-`test_uim_coverage_contract.py` (67, in the PR gate): block validation (UTC bounds vs GMT+8 dates), declared coverage
+`test_uim_coverage_contract.py` (69, in the PR gate): block validation (UTC bounds vs GMT+8 dates), declared coverage
 beyond the latest row, trailing/zero-row days, inferred/partial/no-policy/unattested cases, gaps and merging,
 overlap, bases never merging, voided/corrected batches, idempotent sync, ledger missing/mismatch/malformed, older
 Databot, stale/failed feed, GMT+8 issuance boundaries, preview == live (incl. effects confined to the rejection

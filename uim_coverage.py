@@ -345,6 +345,14 @@ def store_ledger(db, raw, *, now_utc: datetime) -> dict:
     return {"valid": True, "changed": previous.get("fingerprint") != fingerprint, "fingerprint": fingerprint}
 
 
+def invalidate_ledger(db, *, now_utc: datetime, error: str) -> None:
+    """The ledger could not be refreshed this pass: mark the stored one unusable (fail closed)."""
+    db[LEDGER_COLLECTION].update_one(
+        {"_id": LEDGER_ID},
+        {"$set": {"fetched_at": now_utc, "valid": False, "ledger": None, "fingerprint": None, "last_error": error}},
+        upsert=True)
+
+
 def ledger_state(db, local_all_complete: dict[str, list[tuple[date, date, str]]]) -> dict:
     """Does Databot's stored ledger agree with the per-batch blocks we hold?
     Compared on EVERY complete batch regardless of local row completeness (the
