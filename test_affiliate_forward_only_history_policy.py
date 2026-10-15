@@ -25,9 +25,9 @@ HISTORY_COLLECTIONS = ("qualified_events", "referral_events", "affiliate_ledger"
 OLD_JOIN = CUTOFF - timedelta(days=40)
 
 
-def forward_world(*, historical=(999,), linked=None, redeemed=None, seed_from_linkage=False, snapshot=True):
+def forward_world(*, historical=(999,), linked=None, redeemed=None, seed_from_linkage=False, snapshot=True, db=None):
     """Disabled rule, deterministic forward-only seeding applied, optionally the cohort snapshot built."""
-    w = World(mode=aq.MODE_DISABLED, cutoff=None)
+    w = World(mode=aq.MODE_DISABLED, cutoff=None, db=db)
     for uid in historical:
         w.db.qualified_events.insert_one({"invitee_id": uid, "referrer_id": 900, "qualified_at": CUTOFF})
         w.db.xp_events.insert_one({"user_id": 900, "unique_key": f"ref:{uid}", "type": "referral_award"})
