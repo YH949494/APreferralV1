@@ -127,6 +127,7 @@ import httpx
 import pytz
 import json
 from database import init_db, db, safe_create_index
+import snapshot_publish
 import settings_service
 from settings_service import get_settings as get_app_settings, get_setting as get_app_setting, update_settings as update_app_settings, list_schema as list_settings_schema, all_settings as get_all_app_settings
 
@@ -414,7 +415,9 @@ def _get_user_snapshot(user_id: int) -> tuple[dict | None, str | None, int | Non
     if not user_doc:
         return None, None, None
     _warn_if_deprecated_referral_fields(user_doc, "_get_user_snapshot")        
-    snapshot_ts, snapshot_age_sec = _snapshot_meta(user_doc.get("snapshot_updated_at"), now_utc_ts)
+    snapshot_ts, snapshot_age_sec = _snapshot_meta(
+        snapshot_publish.effective_snapshot_updated_at(db, user_doc.get("snapshot_updated_at")), now_utc_ts
+    )
     snapshot = {
         "user_id": user_id,
         "weekly_xp": int(user_doc.get("weekly_xp", 0)),
@@ -1303,6 +1306,12 @@ def _check_snapshot_freshness() -> None:
         heartbeat_age_sec = int((now_utc_ts - heartbeat_ts).total_seconds())
         if heartbeat_age_sec > 900:
             logger.error("[SNAPSHOT][STALE] age_sec=%s action=investigate", heartbeat_age_sec)
+    # The heartbeat is the publication record (snapshot_publish.py): every
+    # user's effective snapshot time is >= it, so "any user stale" is exactly
+    # the heartbeat check above. Per-user stamps now move only when that
+    # user's numbers do, so the legacy scan below would raise false alarms.
+    if heartbeat_ts is not None:
+        return
     stale_user = users_collection.find_one(
         {"snapshot_updated_at": {"$lt": cutoff}},
         {"snapshot_updated_at": 1},

@@ -275,12 +275,10 @@ def settle_xp_snapshots_incremental(
         batch_limit=batch_limit,
     )
 
-    # Cheap, user-count-scaled "publish" touch — preserves existing
-    # freshness-monitoring behavior (snapshot_updated_at / snapshot_version)
-    # without re-scanning xp_events history.
-    db.users.update_many(
-        {}, {"$set": {"snapshot_updated_at": now_utc_ts, "snapshot_published_at": now_utc_ts}, "$inc": {"snapshot_version": 1}}
-    )
+    # No full-collection "publish" stamp: it wrote one oplog entry per user
+    # every 5 minutes whether or not anything changed. Users whose counters
+    # moved were stamped above; the heartbeat below records the publish once,
+    # and readers take max(user stamp, heartbeat) — see snapshot_publish.py.
     _write_snapshot_heartbeat(db, now_utc_ts)
 
     elapsed_ms = int((time.monotonic() - run_started) * 1000)

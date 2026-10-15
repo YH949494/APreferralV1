@@ -29,6 +29,7 @@ from affiliate_group_access import maybe_unlock_affiliate_group
 import affiliate_qualification
 import referral_invitee_lock
 from referral_ledger import with_not_invalidated
+from db_op_log import db_op
 
 from telegram_utils import send_telegram_http_message
 
@@ -2936,6 +2937,14 @@ def _referral_sign_expr():
         ]
     }
 
+_REFERRAL_LIVE_NEXT_FIELDS = (
+    ("weekly_referrals", "weekly_referrals_next"),
+    ("monthly_referrals", "monthly_referrals_next"),
+    ("total_referrals", "total_referrals_next"),
+)
+_REFERRAL_NEXT_FIELDS = tuple(nxt for _, nxt in _REFERRAL_LIVE_NEXT_FIELDS)
+
+
 def settle_referral_snapshots() -> dict:
     start_perf = time.perf_counter()
     now_utc_ts = now_utc()
@@ -2959,17 +2968,6 @@ def settle_referral_snapshots() -> dict:
             {"$lt": ["$occurred_at", month_end_utc]},
         ]
     }
-
-    db.users.update_many(
-        {},
-        {
-            "$set": {
-                "weekly_referrals_next": 0,
-                "monthly_referrals_next": 0,
-                "total_referrals_next": 0,
-            }
-        },
-    )
 
     pipeline = [
         {
@@ -3016,8 +3014,9 @@ def settle_referral_snapshots() -> dict:
     top_affected_inviters: list[dict] = []
     MAX_NEGATIVE_EXAMPLES = 20
 
+    updates = []
+    staged_uids = []
     if results:
-        updates = []
         for row in results:
             scanned += 1
             uid = row.get("_id")
@@ -3111,6 +3110,7 @@ def settle_referral_snapshots() -> dict:
                             raw_net,
                         )
 
+            staged_uids.append(uid)
             updates.append(
                 UpdateOne(
                     {"user_id": uid},
@@ -3124,9 +3124,30 @@ def settle_referral_snapshots() -> dict:
                     upsert=True,
                 )
             )
-        if updates:
+    # Stage -> publish, writing only users whose numbers changed. The old
+    # shape zeroed *_next on every user, re-set it on every inviter, then
+    # copied next->live and stamped/version-bumped EVERY user: 3x users + 2x
+    # inviters oplog entries per 5-minute tick even when nothing moved. Final
+    # field values are identical: every users doc still ends with all six
+    # fields equal to this run's ledger aggregate (0 when absent).
+    # 1) Users absent from this run's aggregate stage 0. Only docs whose
+    #    staging is not already 0 (incl. missing) are written.
+    with db_op("referral_snapshot", "users", "stage_zero") as op:
+        zero_result = db.users.update_many(
+            {
+                "user_id": {"$nin": staged_uids},
+                "$or": [{field: {"$ne": 0}} for field in _REFERRAL_NEXT_FIELDS],
+            },
+            {"$set": {field: 0 for field in _REFERRAL_NEXT_FIELDS}},
+        )
+        op.record(zero_result)
+    # 2) Inviters stage their aggregate. $set of an identical value is a
+    #    server-side no-op (no document write, no oplog entry).
+    stage_modified = 0
+    if updates:
+        with db_op("referral_snapshot", "users", "stage_bulk", batch_size=len(updates)) as op:
             try:
-                db.users.bulk_write(updates, ordered=False)
+                stage_result = db.users.bulk_write(updates, ordered=False)
                 updated = len(updates)
             except Exception:
                 logger.exception(
@@ -3134,22 +3155,30 @@ def settle_referral_snapshots() -> dict:
                     len(updates),
                 )
                 raise
-
-    publish_result = db.users.update_many(
-        {},
-        [
-            {
-                "$set": {
-                    "weekly_referrals": "$weekly_referrals_next",
-                    "monthly_referrals": "$monthly_referrals_next",
-                    "total_referrals": "$total_referrals_next",
-                    "snapshot_published_at": now_utc_ts,
-                    "snapshot_updated_at": now_utc_ts,
+            op.record(stage_result)
+            stage_modified = int(op.counts.get("modified", 0)) + int(op.counts.get("upserted", 0))
+            unchanged = op.skipped_unchanged = max(0, len(updates) - stage_modified)
+    # 3) Publish only where live differs from staging (missing != 0, so a
+    #    doc that never had live fields still gets them materialised).
+    with db_op("referral_snapshot", "users", "publish_changed") as op:
+        publish_result = db.users.update_many(
+            {"$expr": {"$or": [
+                {"$ne": ["$" + live, "$" + nxt]} for live, nxt in _REFERRAL_LIVE_NEXT_FIELDS
+            ]}},
+            [
+                {
+                    "$set": {
+                        **{live: "$" + nxt for live, nxt in _REFERRAL_LIVE_NEXT_FIELDS},
+                        "snapshot_published_at": now_utc_ts,
+                        "snapshot_updated_at": now_utc_ts,
+                        "snapshot_version": {"$add": [{"$ifNull": ["$snapshot_version", 0]}, 1]},
+                    }
                 }
-            }
-        ],
-    )
-    version_result = db.users.update_many({}, {"$inc": {"snapshot_version": 1}})
+            ],
+        )
+        op.record(publish_result)
+    # 4) The heartbeat below records the publish once for everyone else
+    #    (readers take max(user stamp, heartbeat); see snapshot_publish.py).
     logger.info(
         "[SNAPSHOT] publish_done users=%s version_inc=1",
         publish_result.modified_count,
@@ -3160,7 +3189,8 @@ def settle_referral_snapshots() -> dict:
     logger.info(
         "[SCHED][REFERRAL_SNAPSHOT][DONE] scanned=%s updated=%s unchanged=%s errors=%s "
         "negative_rows=%s negative_examples_logged=%s weekly_sum=%s monthly_sum=%s total_sum=%s "
-        "min_weekly=%s min_monthly=%s min_total=%s duration_ms=%s version_inc=%s",
+        "min_weekly=%s min_monthly=%s min_total=%s duration_ms=%s version_inc=%s "
+        "staged_zeroed=%s staged_changed=%s published_changed=%s",
         scanned,
         updated,
         unchanged,
@@ -3174,7 +3204,10 @@ def settle_referral_snapshots() -> dict:
         min_monthly,
         min_total,
         duration_ms,
-        version_result.modified_count,
+        publish_result.modified_count,
+        getattr(zero_result, "modified_count", 0),
+        stage_modified,
+        publish_result.modified_count,
     )
 
     top_affected_inviters.sort(key=lambda r: abs(r["total"]) + abs(r["weekly"]) + abs(r["monthly"]), reverse=True)
@@ -3189,6 +3222,9 @@ def settle_referral_snapshots() -> dict:
         "total_negative_count": total_negative_count,
         "top_affected_inviters": top_affected_inviters[:20],
         "duration_seconds": round((time.perf_counter() - start_perf), 3),
+        "users_staging_zeroed": int(getattr(zero_result, "modified_count", 0) or 0),
+        "users_staging_changed": stage_modified,
+        "users_published_changed": int(getattr(publish_result, "modified_count", 0) or 0),
     }
 
 def _recover_stale_processing(now_utc_ts: datetime) -> int:

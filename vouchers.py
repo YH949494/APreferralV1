@@ -26,6 +26,7 @@ import hmac, hashlib, urllib.parse, os, json
 import config as _cfg 
  
 from database import db, users_collection, _ensure_equivalent_index
+import snapshot_publish
 from time_utils import as_aware_utc
 from onboarding import record_onboarding_start, record_visible_ping
 from affiliate_rewards import (
@@ -148,6 +149,9 @@ def resolve_referral_counts_with_snapshot_fallback(inviter_id: int | None, user_
     snapshot_weekly = int((user_doc or {}).get("weekly_referrals", 0) or 0)
     snapshot_monthly = int((user_doc or {}).get("monthly_referrals", 0) or 0)
     snapshot_ts = as_aware_utc((user_doc or {}).get("snapshot_updated_at"))
+    if user_doc:
+        # Publication time is a single marker doc; see snapshot_publish.py.
+        snapshot_ts = as_aware_utc(snapshot_publish.effective_snapshot_updated_at(db, snapshot_ts))
     snapshot_age_sec = None if not snapshot_ts else max(0, int((now_ref - snapshot_ts).total_seconds()))
 
     source = "snapshot"

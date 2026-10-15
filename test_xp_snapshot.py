@@ -403,8 +403,9 @@ class XPSnapshotIncrementalTests(unittest.TestCase):
         self.assertEqual(self.db.users.docs[1]["monthly_xp"], 0)
         self.assertEqual(cursor["last_correction_at"], inv_at)
         self.assertEqual(cursor["last_correction_at"].tzinfo, timezone.utc)
-        # Trailing publish touch + heartbeat ran (previously skipped by the TypeError).
-        self.assertEqual(self.db.users.docs[1]["snapshot_published_at"], later)
+        # Trailing publish + heartbeat ran (previously skipped by the TypeError).
+        # The heartbeat is the publication record; only changed users are stamped.
+        self.assertEqual(self.db.users.docs[1]["snapshot_updated_at"], later)
         self.assertEqual(self.db.admin_cache.docs["snapshot_heartbeat"]["ts_utc"], later)
 
     def test_weekly_rollover_resets_only_weekly(self):
