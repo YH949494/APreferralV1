@@ -215,7 +215,9 @@ def _reopen(db, eligible_rows: list[dict], now_ts: datetime) -> dict:
     # needs no cutoff), so a launch can neither slip in between the check and the writes nor overlap them.
     if affiliate_qualification.launch_cutoff(affiliate_qualification.get_control(db)) is not None:
         return {"reopened_count": 0, "lock_blocked_pending_ids": [], "refused": "v2_launched"}
-    with affiliate_qualification.legacy_writer_guard(db, now_utc=now_ts) as lease:
+    # Acquire the lease with a FRESH timestamp: now_ts predates build_report(), which can run for longer than
+    # the lease on a large audit and would otherwise create an already-expired lease that refuses every write.
+    with affiliate_qualification.legacy_writer_guard(db, now_utc=datetime.now(timezone.utc)) as lease:
         if not lease:
             launched = affiliate_qualification.launch_cutoff(affiliate_qualification.get_control(db)) is not None
             return {"reopened_count": 0, "lock_blocked_pending_ids": [],
