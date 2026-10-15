@@ -794,3 +794,30 @@ def test_http_fetcher_enforces_the_contract_per_endpoint(monkeypatch):
         fetch("/coverage", {})
     served.update({"/batches": feed_page, "/coverage": ledger})
     assert fetch("/batches", {}) is feed_page and fetch("/coverage", {}) is ledger
+
+
+def test_reconciled_applied_equivalent_batch_that_we_do_not_ingest_disables_absence_but_never_row_verdicts():
+    """Databot's ledger counts a batch reconciled as applied_equivalent; the local sync only ingests committed
+    batches, so the two views disagree. That must fail closed: no absence rejection, rows judged as always."""
+    w, feed = brief_world()
+    feed.add_batch([], status="reconciled", coverage=coverage_block("2026-10-05", "2026-10-11"))
+    plain = feed.ledger
+
+    def ledger_including_reconciled():
+        body = plain()
+        body["bases"]["voucher_redemption_date"]["intervals"] = [
+            {"start_date": "2026-09-28", "end_date": "2026-10-11",
+             "start_utc": coverage_block("2026-09-28", "2026-10-11")["start_utc"],
+             "end_utc_exclusive": coverage_block("2026-09-28", "2026-10-11")["end_utc_exclusive"]}]
+        return body
+
+    feed.ledger = ledger_including_reconciled
+    sync(w, feed, now=NOW + timedelta(minutes=1))
+    cov = ucov.effective_coverage(w.db)
+    assert cov["ledger"]["matches"] is False
+    assert "coverage_ledger_mismatch" in ucov.absence_blockers(aq.get_control(w.db), cov)
+    body = states(w, now=NOW + timedelta(minutes=2))
+    assert totals(body) == [1, 6, 0, 0]                      # row-based pass kept; absent rows pending, none rejected
+    assert body["uim_coverage"]["absence_rejection"]["active"] is False
+    assert "coverage_ledger_mismatch" in body["uim_coverage"]["absence_rejection"]["blockers"]
+    assert admin.preflight_report(w.db, now_utc=NOW)["coverage"]["ok"] is False      # visible to the activation gate
