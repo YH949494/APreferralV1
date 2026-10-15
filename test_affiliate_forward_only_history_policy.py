@@ -740,7 +740,7 @@ def test_a_pre_cutoff_referral_reopened_after_launch_is_not_pulled_into_v2(monke
     add(w, 102, "acct-102", status="pending")                          # active at the launch
     go(w, monkeypatch)
     control = aq.get_control(w.db)
-    assert aq.handoff_complete(control)
+    assert aq.handoff_complete(control, NOW)
     assert ev(w, 102)["status"] == aq.EV_QUALIFIED
     assert ev(w, 101)["reason"] == "referral_not_active_at_rollout"
     # official_channel_reopen_audit --commit later returns the historical row to pending ...

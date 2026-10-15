@@ -464,7 +464,7 @@ def mark_activation_cohort(db, *, control: dict, now_utc: datetime) -> int:
         import affiliate_forward_only
 
         affiliate_forward_only.snapshot_launch_cohort(db, now_utc=now_utc, cutoff=cutoff)
-        if not handoff_complete(control):
+        if _aware_utc((control or {}).get("launch_handoff_completed_cutoff")) != cutoff:
             db[CONTROL_COLLECTION].update_one(
                 {"_id": CONTROL_ID, "launch_cutoff_utc": cutoff},
                 {"$set": {"launch_handoff_completed_cutoff": cutoff, "launch_handoff_completed_at": now_utc}})
@@ -495,12 +495,15 @@ def repair_cancelled_cohort(db) -> None:
         {"$unset": {"cancelled_cohort_cutoff": ""}})
 
 
-def handoff_complete(control: dict | None) -> bool:
-    """True once the launch hand-off (marking + cohort top-up) finished for THIS cutoff. From then on the
-    population is closed: only referrals created at/after the cutoff are stamped, so a pre-cutoff
-    terminal referral reopened later (e.g. by official_channel_reopen_audit) is not pulled in."""
+def handoff_complete(control: dict | None, now_utc: datetime) -> bool:
+    """True once the launch hand-off (marking + cohort top-up) finished for THIS cutoff AND the cutoff has
+    arrived. From then on the population is closed: only referrals created at/after the cutoff are
+    stamped, so a pre-cutoff terminal referral reopened later (e.g. by official_channel_reopen_audit) is
+    not pulled in. Before the cutoff (scheduled activation) every active referral is still in scope: it
+    will be active at the cutoff."""
     cutoff = launch_cutoff(control)
-    return cutoff is not None and _aware_utc((control or {}).get("launch_handoff_completed_cutoff")) == cutoff
+    return (cutoff is not None and _aware_utc(now_utc) >= cutoff
+            and _aware_utc((control or {}).get("launch_handoff_completed_cutoff")) == cutoff)
 
 
 def _mark_activation_cohort(db, *, control: dict, now_utc: datetime) -> int:
@@ -513,7 +516,7 @@ def _mark_activation_cohort(db, *, control: dict, now_utc: datetime) -> int:
     if launch_cutoff(control) is None:
         return 0
     marked = 0
-    closed = handoff_complete(control)
+    closed = handoff_complete(control, now_utc)
     for status in ACTIVE_PENDING_STATUSES:
         flt = {"status": status, "qualification_rule_version": {"$ne": RULE_VERSION}}
         if closed:
@@ -1780,7 +1783,7 @@ def assess_evidence(evidence: dict, *, control: dict, now_utc: datetime, lookup)
     in_cohort = is_member and not any(r.get("qualification_reason") == ABSENCE_REJECTION_REASON for r in pending_rows)
     # While the hand-off is still running an active row is in scope (it will be stamped); once it is
     # complete, being active is no longer enough: a reopened pre-cutoff referral is not a member.
-    active_in_scope = (not handoff_complete(control)
+    active_in_scope = (not handoff_complete(control, now_utc)
                        and any(r.get("status") in ACTIVE_PENDING_STATUSES for r in pending_rows))
     if (not existing_q and not in_cohort and not active_in_scope and cutoff_at is not None and pending_rows):
         return verdict(EV_REVIEW, "referral_not_active_at_rollout", invitee_id=invitee_id)
@@ -2089,7 +2092,7 @@ def park_pending_referral(db, *, pending_id, invitee_user_id, inviter_user_id, n
     cutoff = launch_cutoff(control)
     # After the hand-off only post-cutoff referrals join the V2 population; a reopened historical row is
     # parked (not awarded) but not stamped as a rollout member.
-    stamp = not handoff_complete(control) or (created is not None and cutoff is not None and created >= cutoff)
+    stamp = not handoff_complete(control, now_utc) or (created is not None and cutoff is not None and created >= cutoff)
     fields = {"status": PENDING_AWAITING_REDEMPTION, "awaiting_redemption_since": now_utc}
     if stamp:
         fields["qualification_rule_version"] = RULE_VERSION
