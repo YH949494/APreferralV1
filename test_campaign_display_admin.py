@@ -20,6 +20,7 @@ update_participant() in campaign_display_override.py rebuilds and writes
 back the whole participants array instead of using them).
 """
 
+import time
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
@@ -465,6 +466,11 @@ def test_stale_concurrent_update_rejected_with_409(client, fake_db):
     with _mock_admin():
         overview = client.get(f"/api/admin/campaign-display/campaigns/{CAMPAIGN_ID}").get_json()
     stale_updated_at = overview["campaign"]["updated_at"]
+
+    # updated_at is millisecond-truncated (cdo._now_ms_utc). On a fast runner the
+    # create and the first PUT can land in the SAME millisecond, so the token never
+    # changes and the "stale" PUT wrongly succeeds. Guarantee a distinct tick.
+    time.sleep(0.005)
 
     # Someone else's edit lands first.
     with _mock_admin():
