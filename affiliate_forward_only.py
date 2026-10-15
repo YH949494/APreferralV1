@@ -100,8 +100,10 @@ def snapshot_launch_cohort(db, *, now_utc: datetime, cutoff: datetime | None = N
             skipped_invalid += 1
             continue
         by_invitee.setdefault(invitee, []).append(row)
-    if cutoff:  # rows already marked for THIS launch belong to the population even once V2 decided them
-        for row in db.pending_referrals.find({"activation_cutoff_utc": cutoff}, {"invitee_user_id": 1, "created_at_utc": 1}):
+    if cutoff:  # rows already marked/decided for THIS launch belong to the population even once V2 decided them
+        for row in db.pending_referrals.find(
+                {"$or": [{"activation_cutoff_utc": cutoff}, {"qualification_rule_version": aq.RULE_VERSION}]},
+                {"invitee_user_id": 1, "created_at_utc": 1}):
             invitee = _valid_invitee(row.get("invitee_user_id"))
             if invitee is not None and all(r["_id"] != row["_id"] for r in by_invitee.get(invitee, [])):
                 by_invitee.setdefault(invitee, []).append(row)

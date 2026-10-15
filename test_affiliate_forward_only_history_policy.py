@@ -703,3 +703,32 @@ def test_migration_is_blocked_by_a_retained_award_barrier_at_acquisition_and_com
     assert len(calls) == 2 and out["apply_refused"] == ["completion_verification_failed"]
     assert not out["seed_marker_written"] and not aq.get_control(w.db).get("seed_completed_at")
     assert "forward_only_marker" not in aq.get_control(w.db)
+
+
+def test_future_referral_survives_a_rejection_and_requeue(monkeypatch):
+    w = forward_world()
+    go(w, monkeypatch)
+    later = NOW + timedelta(minutes=1)
+    add(w, 301, "acct-301", amount="79.99", status="pending", joined=later, issued=later,
+        redeemed=later + timedelta(minutes=1))
+    run(w, monkeypatch, now=NOW + timedelta(minutes=10))
+    assert ev(w, 301)["reason"] == "seven_day_turnover_below_80"
+    assert w.db.pending_referrals.find_one({"invitee_user_id": 301})["status"] == "rejected"
+    e = ev(w, 301)
+    w.db[aq.EVIDENCE_COLLECTION].update_one({"_id": e["_id"]}, {"$set": {"qualification_fields.after_total_bet_amount": "80"}})
+    assert aq.requeue_evidence(w.db, evidence_id=e["_id"], now_utc=NOW + timedelta(minutes=11))
+    run(w, monkeypatch, now=NOW + timedelta(minutes=12))
+    assert ev(w, 301)["status"] == aq.EV_QUALIFIED
+
+
+def test_a_stale_snapshot_document_cannot_make_a_terminal_pre_cutoff_invitee_eligible(monkeypatch):
+    w = forward_world(snapshot=False)
+    add(w, 101, "acct-101", status="revoked")                          # terminal before the launch
+    w.db[aq.COHORT_COLLECTION].insert_one({"_id": 101, "pending_ids": [], "snapshotted_at": NOW})  # stale preflight doc
+    fwd.snapshot_launch_cohort(w.db, now_utc=NOW)
+    w.db[aq.COHORT_COLLECTION].insert_one({"_id": 101, "pending_ids": [], "snapshotted_at": NOW}) if not \
+        w.db[aq.COHORT_COLLECTION].find_one({"_id": 101}) else None
+    go(w, monkeypatch)
+    w.db[aq.COHORT_COLLECTION].update_one({"_id": 101}, {"$setOnInsert": {"snapshotted_at": NOW}}, upsert=True)
+    assert (ev(w, 101)["status"], ev(w, 101)["reason"]) == (aq.EV_REVIEW, "referral_not_active_at_rollout")
+    assert w.db.qualified_events.count_documents({"invitee_id": 101}) == 0

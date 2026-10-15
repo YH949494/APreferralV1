@@ -1469,7 +1469,7 @@ class DbLookup:
             self.db.pending_referrals.find(
                 {"invitee_user_id": int(invitee_id)},
                 {"inviter_user_id": 1, "status": 1, "revoked_reason": 1, "created_at_utc": 1, "destination_type": 1,
-                 "qualification_reason": 1},
+                 "qualification_reason": 1, "qualification_rule_version": 1},
             ).sort("created_at_utc", 1)
         )
 
@@ -1485,9 +1485,6 @@ class DbLookup:
 
     def existing_qualification(self, invitee_id: int) -> dict | None:
         return self.db.qualified_events.find_one({"invitee_id": int(invitee_id)})
-
-    def in_launch_cohort(self, invitee_id: int) -> bool:
-        return self.db[COHORT_COLLECTION].find_one({"_id": int(invitee_id)}, {"_id": 1}) is not None
 
     def conflicting_record(self, evidence: dict) -> bool:
         return bool(self.db[EVIDENCE_COLLECTION].find_one(
@@ -1754,10 +1751,16 @@ def assess_evidence(evidence: dict, *, control: dict, now_utc: datetime, lookup)
     # another active row exists, attribution still stays with the ORIGINAL
     # inviter below; never redirect an old attribution to a later inviter.
     pending_rows = lookup.pending_referrals(invitee_id)
-    # The persisted launch-cohort snapshot proves rollout membership, so a later V2 status change
-    # (e.g. a rule rejection followed by a supported requeue with corrected data) cannot erase it.
-    # An absence-based rejection is the one decision deliberately never reopened automatically.
-    in_cohort = (getattr(lookup, "in_launch_cohort", lambda _i: False)(invitee_id)
+    # Rollout membership is read from the referral rows themselves, never from the cohort snapshot (which
+    # may be stale during the activation window). A row carries qualification_rule_version=V2 only if it
+    # was active when activation marked it, was parked, or was decided under V2 while active, so a later V2
+    # status change (e.g. a rule rejection followed by a supported requeue) cannot erase membership;
+    # referrals created at/after the cutoff are future referrals and always in scope. An absence-based
+    # rejection is the one decision deliberately never reopened automatically.
+    cutoff_at = launch_cutoff(control)
+    in_cohort = (any(r.get("qualification_rule_version") == RULE_VERSION
+                     or (cutoff_at is not None and (_aware_utc(r.get("created_at_utc")) or cutoff_at - timedelta(days=1)) >= cutoff_at)
+                     for r in pending_rows)
                  and not any(r.get("qualification_reason") == ABSENCE_REJECTION_REASON for r in pending_rows))
     if (not existing_q and not in_cohort and launch_cutoff(control) is not None and pending_rows
             and not any(r.get("status") in ACTIVE_PENDING_STATUSES for r in pending_rows)):

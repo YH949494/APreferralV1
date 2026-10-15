@@ -128,7 +128,7 @@ fails) until active legacy work has finished or a dead lease was recovered. The 
   and after the migration; any change refuses the completion marker).
 * Every active pending/manual referral at activation is evaluated under V2 regardless of join
   date or UIM upload date, plus every future referral. Pre-activation UIM evidence is usable.
-  `snapshot-launch-cohort` snapshots the invitee ids (one document per invitee in
+  Rollout membership in decisions is read from the referral rows (stamped `qualification_rule_version=V2` when marked, parked or decided while active; referrals created at/after the cutoff are always in scope), never from the snapshot, so a stale snapshot can neither admit nor exclude anyone. `snapshot-launch-cohort` snapshots the invitee ids (one document per invitee in
   `affiliate_v2_launch_cohort`, `_id = invitee_user_id`; already-qualified invitees excluded);
   it is replayable and rebuilt (members that stopped being active before the cutoff are pruned; decided members of the launched cutoff are kept; `cancel-scheduled` clears it), and activation tops it up under the control barrier (repeated by the
   scheduler after a crash). Preflight requires it `ready`.
