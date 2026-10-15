@@ -111,3 +111,12 @@ change cannot (and must not) invent a timezone for them. The dry run's `not_atte
 * Source batches/rows are never modified or deleted by any of this.
 * If a dry run looks wrong (counts far from the preview's conflict/unverified figures), do not commit: the dry run
   writes nothing.
+
+## 5. Diagnosing "redemption before Welcome issuance"
+
+`python scripts/affiliate_qualification_admin.py diagnose-issuance-order` (read-only, secondary-preferred connection,
+no `--commit`). For every record the validator flags `redemption_before_welcome_issuance` it reports the
+issued-minus-redeemed gap histogram, which source supplied the earliest issuance time, and how many records each
+clock-basis hypothesis would clear (`claim_time_is_kl_wall_clock_stored_as_utc`,
+`all_issuance_times_are_kl_wall_clock_stored_as_utc`, `redemption_time_is_utc_not_kl`). Gaps inside 0-8h with a
+hypothesis clearing most of them point at a timezone mix-up; large or scattered gaps are real data. It changes no rule.

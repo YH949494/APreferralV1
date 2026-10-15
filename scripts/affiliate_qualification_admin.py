@@ -12,6 +12,7 @@ preflight                   exit 0 only if activation is safe right now
 configure-source ...        persist the authoritative redemption source mapping
 configure-coverage-policy   attest WHAT the UIM coverage dates measure and the Welcome voucher's redemption
                             window - the only thing that lets a MISSING row reject (dry run by default)
+diagnose-issuance-order     read-only: gap histogram + clock-basis hypotheses for "redeemed before issued" records
 reconcile-uim-evidence      repair already-synced evidence a newer fully attested UIM batch re-observed (evidence only;
                             dry run by default; --limit/--after-id bound each run; counts + masked samples only)
 snapshot-launch-cohort      snapshot the ids of all active pending/manual referrals (idempotent; dry run by default)
@@ -252,6 +253,9 @@ def main(argv=None, *, db_factory=None, read_only_db_factory=None, now_fn=_now) 
     sync = sub.add_parser("sync-evidence", help="one Databot evidence sync pass (writes only uim_redemption_*)")
     sync.add_argument("--max-rows", type=int, default=5000)
     sub.add_parser("sync-status")
+    dio = sub.add_parser("diagnose-issuance-order",
+                         help="read-only: why do records look redeemed before their voucher was issued (clock-basis test)")
+    dio.add_argument("--max-scan-rows", type=int, default=500_000, help="abort above this many source rows")
     rec = sub.add_parser("reconcile-uim-evidence",
                          help="repair evidence superseded by a newer attested UIM batch (dry run by default)")
     rec.add_argument("--limit", type=int, default=500, help="max evidence documents examined this run (<=5000)")
@@ -282,6 +286,15 @@ def main(argv=None, *, db_factory=None, read_only_db_factory=None, now_fn=_now) 
         db = (read_only_db_factory or _read_only_db)()
         print(json.dumps(uim_redemption_sync.sync_health(db, now_utc=now_utc), indent=2, default=str))
         return 0
+
+    if args.cmd == "diagnose-issuance-order":
+        import uim_issuance_order_diagnostic
+
+        db = (read_only_db_factory or _read_only_db)()
+        report = uim_issuance_order_diagnostic.diagnose(
+            db, config=(aq.get_control(db) or {}).get("source_config"), now_utc=now_utc, max_scan_rows=args.max_scan_rows)
+        print(json.dumps(report, indent=2, default=str))
+        return 0 if report["ok"] else 1
 
     if args.cmd == "reconcile-uim-evidence":
         import uim_evidence_reconcile
