@@ -50,12 +50,13 @@ class DbOpRecord:
                 value = None
             if isinstance(value, int):
                 self.counts[key] = self.counts.get(key, 0) + value
-        if "upserted" not in self.counts:
-            try:
-                if getattr(result, "upserted_id", None) is not None:
-                    self.counts["upserted"] = 1
-            except Exception:
-                pass
+        # UpdateResult carries upserted_id (one per call), not a count.
+        try:
+            if not isinstance(getattr(result, "upserted_count", None), int) and \
+                    getattr(result, "upserted_id", None) is not None:
+                self.counts["upserted"] = self.counts.get("upserted", 0) + 1
+        except Exception:
+            pass
         inserted_ids = getattr(result, "inserted_ids", None)
         if "inserted" not in self.counts and isinstance(inserted_ids, list):
             self.counts["inserted"] = len(inserted_ids)
