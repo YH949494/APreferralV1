@@ -100,11 +100,17 @@ def snapshot_launch_cohort(db, *, now_utc: datetime, cutoff: datetime | None = N
             skipped_invalid += 1
             continue
         by_invitee.setdefault(invitee, []).append(row)
-    qualified = set()
+    if cutoff:  # rows already marked for THIS launch belong to the population even once V2 decided them
+        for row in db.pending_referrals.find({"activation_cutoff_utc": cutoff}, {"invitee_user_id": 1, "created_at_utc": 1}):
+            invitee = _valid_invitee(row.get("invitee_user_id"))
+            if invitee is not None and all(r["_id"] != row["_id"] for r in by_invitee.get(invitee, [])):
+                by_invitee.setdefault(invitee, []).append(row)
+    qualified = set()  # HISTORICAL qualifications only: a V2 qualification of a cohort member keeps its membership
     ids = list(by_invitee)
     for start in range(0, len(ids), CHUNK):
         chunk = ids[start:start + CHUNK]
-        for q in db.qualified_events.find({"invitee_id": {"$in": chunk}}, {"invitee_id": 1}):
+        for q in db.qualified_events.find({"invitee_id": {"$in": chunk}, "rule_version": {"$ne": aq.RULE_VERSION}},
+                                          {"invitee_id": 1}):
             qualified.add(int(q["invitee_id"]))
     added = 0
     ops = []
@@ -122,9 +128,6 @@ def snapshot_launch_cohort(db, *, now_utc: datetime, cutoff: datetime | None = N
     # the activation population. After activation, rows marked for THIS cutoff stay members even once
     # V2 has decided them (a later supported requeue relies on that).
     keep = {i for i in by_invitee if i not in qualified}
-    if cutoff:
-        keep |= {_valid_invitee(r.get("invitee_user_id")) for r in db.pending_referrals.find(
-            {"activation_cutoff_utc": cutoff}, {"invitee_user_id": 1})}
     stale = [d["_id"] for d in col.find({}, {"_id": 1}) if d["_id"] not in keep]
     pruned = 0
     for start in range(0, len(stale), CHUNK):

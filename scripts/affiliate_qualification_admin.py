@@ -118,9 +118,9 @@ def preflight_report(db, *, now_utc: datetime, cutoff: datetime | None = None) -
         "rule_revision_ready": control.get("rule_version") == aq.RULE_VERSION,
         "legacy_writer_in_flight": bool(control.get("legacy_writer_token")),
         "legacy_writer": aq.legacy_writer_state(control, now_utc),
-        # Legacy awards parked between the lease fence and their completion. A paused/crashed worker
-        # leaves these behind: activation must not overtake them.
-        "legacy_awarding_rows": db.pending_referrals.count_documents({"status": aq.AWARDING_STATUS}),
+        # Durable in-flight-award barrier on the control document (the same document activation's CAS
+        # reads). A paused/crashed worker leaves it behind: activation must not overtake it.
+        "legacy_award_inflight": bool(control.get("legacy_award_inflight")),
         "cancellation_repair_pending": bool(control.get("cancelled_cohort_cutoff")),
         "v1_qualified_events": db.qualified_events.count_documents({"rule_version": aq.LEGACY_RULE_VERSION}),
         "pending_maturity": aq.pending_maturity_report(db, config=control.get("source_config"), now_utc=now_utc),
@@ -142,7 +142,7 @@ def preflight_report(db, *, now_utc: datetime, cutoff: datetime | None = None) -
         and report["consistency"]["ok"]
         and report["rule_revision_ready"]
         and not report["legacy_writer_in_flight"]
-        and not report["legacy_awarding_rows"]
+        and not report["legacy_award_inflight"]
         and not report["cancellation_repair_pending"]
         and report["v1_qualified_events"] == 0
     )
@@ -199,7 +199,7 @@ def main(argv=None, *, db_factory=None, read_only_db_factory=None, now_fn=_now) 
     recover.add_argument("--acknowledge-writer-stopped", action="store_true",
                          help="required only for a pre-lease token whose liveness cannot be proven")
     recover.add_argument("--release-awarding", action="store_true",
-                         help="also return legacy 'awarding' rows to pending (requires --acknowledge-writer-stopped; "
+                         help="also clear a dead worker's in-flight-award barrier (requires --acknowledge-writer-stopped; "
                               "awards are idempotent per invitee, so a completed one is skipped on retry)")
     sub.add_parser("snapshot-launch-cohort", help="idempotently snapshot active pending/manual referral invitees")
     pf = sub.choices["preflight"]
@@ -312,18 +312,19 @@ def main(argv=None, *, db_factory=None, read_only_db_factory=None, now_fn=_now) 
             if control.get("legacy_writer_token") != args.token:
                 print("refused: writer token changed or absent", file=sys.stderr)
                 return 2
-        awarding = db.pending_referrals.count_documents({"status": aq.AWARDING_STATUS})
+        awarding = 1 if control.get("legacy_award_inflight") else 0
         if not args.commit:
-            print(json.dumps({"dry_run": True, "writer": state, "awarding_rows": awarding}, default=str))
+            print(json.dumps({"dry_run": True, "writer": state, "award_inflight": control.get("legacy_award_inflight")}, default=str))
             return 0 if state["in_flight"] or awarding else 2
         if args.cmd == "recover-legacy-writer" and args.release_awarding:
             if not args.acknowledge_writer_stopped or state["state"] == aq.WRITER_ACTIVE:
                 print("refused: --release-awarding needs --acknowledge-writer-stopped and no active lease", file=sys.stderr)
                 return 2
-            released = db.pending_referrals.update_many(
-                {"status": aq.AWARDING_STATUS},
-                {"$set": {"status": "pending", "retry_last_reason": "awarding_released_by_operator"},
-                 "$unset": {"awarding_since": "", "award_fence_token": "", "processing_by": "", "processing_at_utc": ""}})
+            released = db[aq.CONTROL_COLLECTION].update_one(
+                {"_id": aq.CONTROL_ID, "legacy_award_inflight": control.get("legacy_award_inflight")},
+                {"$unset": {"legacy_award_inflight": ""},
+                 "$push": {"legacy_writer_recoveries": {"released_award_inflight": True, "operator": args.operator,
+                                                        "at": now_utc}}})
             print(json.dumps({"awarding_released": released.modified_count}))
             if not state["in_flight"]:
                 return 0
@@ -544,6 +545,8 @@ def main(argv=None, *, db_factory=None, read_only_db_factory=None, now_fn=_now) 
         cas = {"_id": aq.CONTROL_ID, "mode": aq.MODE_DISABLED, "rule_version": aq.RULE_VERSION,
              "launch_cutoff_utc": {"$exists": False}, "legacy_writer_token": {"$exists": False},
              "migration_lease_token": {"$exists": False}, "source_config": control.get("source_config"),
+             # same document, same atomic step: no legacy award may be in flight
+             "legacy_award_inflight": {"$exists": False},
              "cancelled_cohort_cutoff": {"$exists": False},
              "seed_summary": control.get("seed_summary"), "seed_completed_at": control.get("seed_completed_at"),
              "forward_only_marker": control.get("forward_only_marker"),

@@ -83,9 +83,6 @@ HISTORY_LIMITATION = (
 )
 FORWARD_MARKER_VERSION = "forward_only_marker_v1"
 COHORT_COLLECTION = "affiliate_v2_launch_cohort"
-# A legacy worker that passed the lease fence parks its row here until the award finishes. Deliberately NOT an
-# active-pending status: activation neither marks nor strands it, it REFUSES while any such row exists.
-AWARDING_STATUS = "awarding"
 ABSENCE_REJECTION_REASON = "no_welcome_redemption_in_complete_coverage"  # == uim_coverage.ABSENCE_REASON
 ACTIVE_PENDING_STATUSES = ("pending", "pending_channel", "pending_manual", "manual",
                            "processing", "error", "awaiting_redemption")
@@ -312,6 +309,39 @@ class WriterLease:
         return bool(res.matched_count)
 
 
+def _begin_award(self, now_utc: datetime | None = None) -> bool:
+    """Atomically open the in-flight-award barrier on the control document.
+
+    ONE compare-and-set that requires this exact token with an unexpired lease, legacy admission still
+    open, no cutoff, and no other award in flight; it renews the lease, invalidates the seed and sets
+    ``legacy_award_inflight``. Activation's own CAS on the same document requires that marker to be
+    absent, so the two are mutually exclusive on one document: either the marker lands first (activation
+    refuses) or activation lands first (this refuses). A worker paused after this point therefore holds
+    activation off instead of being overtaken; a dead worker's marker is released only by an operator.
+    """
+    now = _aware_utc(now_utc) if now_utc else datetime.now(timezone.utc)
+    res = self.db[CONTROL_COLLECTION].update_one(
+        {"_id": CONTROL_ID, "legacy_writer_token": self.token, "legacy_writer_lease_until": {"$gt": now},
+         "legacy_admission_closed": {"$ne": True}, "launch_cutoff_utc": {"$exists": False},
+         "legacy_award_inflight": {"$exists": False}},
+        {"$set": {"legacy_writer_lease_until": now + self.ttl, "legacy_writer_heartbeat_at": now,
+                  "legacy_award_inflight": {"token": self.token, "since": now}},
+         "$unset": {"seed_completed_at": ""}})
+    if not res.matched_count:
+        self.lost = True
+        logger.error("[AFF_QUAL][AWARD_FENCE_REFUSED] legacy award not admitted (lease, admission or in-flight barrier)")
+    return bool(res.matched_count)
+
+
+def _end_award(self) -> None:
+    self.db[CONTROL_COLLECTION].update_one({"_id": CONTROL_ID, "legacy_award_inflight.token": self.token},
+                                           {"$unset": {"legacy_award_inflight": ""}})
+
+
+WriterLease.begin_award = _begin_award
+WriterLease.end_award = _end_award
+
+
 def _lease_fields(token: str, now_utc: datetime) -> dict:
     now = _aware_utc(now_utc)
     return {"legacy_writer_token": token, "legacy_writer_started_at": now_utc,
@@ -373,6 +403,8 @@ def _admit_writer(db, query: dict, *, now_utc: datetime):
 
 
 def _release_writer(db, token: str) -> None:
+    db[CONTROL_COLLECTION].update_one({"_id": CONTROL_ID, "legacy_award_inflight.token": token},
+                                      {"$unset": {"legacy_award_inflight": ""}})
     db[CONTROL_COLLECTION].update_one({"_id": CONTROL_ID, "legacy_writer_token": token},
                                       {"$unset": {f: "" for f in _WRITER_FIELDS}})
 
@@ -493,7 +525,7 @@ def invalidate_history_seed(db, lease: "WriterLease | None" = None, now_utc: dat
     if lease is not None:
         # ONE compare-and-set on this lease's exact token and an unexpired lease: renews it and
         # invalidates the seed together, and its match result (not a prior renewal) is the verdict.
-        return lease.renew(now_utc, also_unset=("seed_completed_at",))
+        return lease.begin_award(now_utc)
     db[CONTROL_COLLECTION].update_one({"_id": CONTROL_ID, "legacy_writer_token": {"$exists": True}},
                                      {"$unset": {"seed_completed_at": ""}})
     return True

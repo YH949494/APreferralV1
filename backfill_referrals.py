@@ -83,7 +83,11 @@ def _backfill(db, dry_run: bool = True, lease=None):
         _require_legacy_awards_allowed(db)
         if not qualification.invalidate_history_seed(db, lease):
             raise RuntimeError("legacy writer lease lost; stopping before any further award")
-        grant_referral_rewards(db, db.users, referrer_id, referred_user_id)
+        try:
+            grant_referral_rewards(db, db.users, referrer_id, referred_user_id)
+        finally:
+            if lease is not None:
+                lease.end_award()
 
     missing_bonus = {}
     for uid, ref_count in ref_counts.items():
@@ -100,13 +104,17 @@ def _backfill(db, dry_run: bool = True, lease=None):
             _require_legacy_awards_allowed(db)
             if not qualification.invalidate_history_seed(db, lease):
                 raise RuntimeError("legacy writer lease lost; stopping before any further award")
-            grant_xp(
-                db,
-                uid,
-                REFERRAL_BONUS_EVENT,
-                f"{REFERRAL_BONUS_EVENT}:{idx}",
-                REFERRAL_BONUS_XP,
-            )
+            try:
+                grant_xp(
+                    db,
+                    uid,
+                    REFERRAL_BONUS_EVENT,
+                    f"{REFERRAL_BONUS_EVENT}:{idx}",
+                    REFERRAL_BONUS_XP,
+                )
+            finally:
+                if lease is not None:
+                    lease.end_award()
 
     return {
         "missing_base": len(missing_base),

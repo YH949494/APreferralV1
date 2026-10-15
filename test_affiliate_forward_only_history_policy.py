@@ -447,6 +447,9 @@ def test_scheduler_stops_claiming_rows_after_losing_the_lease(monkeypatch):
         def renew(self, *_a):
             return False
 
+        def end_award(self):
+            pass
+
     scheduler._settle_pending_referrals(10, lease=Lost())
     assert w.db.pending_referrals.find_one({"invitee_user_id": 501})["status"] == "pending"  # never claimed
 
@@ -490,37 +493,36 @@ def test_fence_is_one_cas_on_exact_token_and_never_touches_the_seed_for_a_stale_
     w.db[aq.CONTROL_COLLECTION].update_one({}, {"$set": {"legacy_writer_token": "replacement"}})  # not ours to release
 
 
-@pytest.mark.parametrize("how", ["none", "admission_closed", "row_claim_cleared"])
-def test_scheduler_award_aborts_when_activation_lands_after_the_fence(how, monkeypatch):
+@pytest.mark.parametrize("how", ["none", "admission_closed_before_fence", "inflight_barrier_held"])
+def test_scheduler_award_is_gated_by_the_atomic_control_barrier(how, monkeypatch):
     import scheduler
 
     w = forward_world()
     w.db[aq.CONTROL_COLLECTION].update_one({}, {"$unset": {"seed_completed_at": ""}})
     w.user(601, created=NOW - timedelta(days=3))
-    pid = w.db.pending_referrals.insert_one({
+    w.db.pending_referrals.insert_one({
         "invitee_user_id": 601, "inviter_user_id": 900, "status": "pending", "destination_type": "official_channel",
-        "created_at_utc": NOW - timedelta(days=3)}).inserted_id
+        "created_at_utc": NOW - timedelta(days=3)})
     monkeypatch.setattr(scheduler, "db", w.db)
     monkeypatch.setattr(scheduler, "_referral_hold_hours", lambda: 0)
     monkeypatch.setattr(scheduler, "_get_official_channel_member_status", lambda *a, **k: "member")
     real = aq.invalidate_history_seed
 
-    def fence_then_activation_lands(db, lease=None, now_utc=None):
-        ok = real(db, lease, now_utc)  # fence passes, then the (recovered + activated) V2 rule takes over
-        if how == "admission_closed":
+    def interfere_then_fence(db, lease=None, now_utc=None):
+        if how == "admission_closed_before_fence":      # activation landed first
             db[aq.CONTROL_COLLECTION].update_one({}, {"$set": {"legacy_admission_closed": True}})
-        elif how == "row_claim_cleared":
-            db.pending_referrals.update_one({"_id": pid}, {"$set": {"status": aq.PENDING_AWAITING_REDEMPTION},
-                                                           "$unset": {"processing_by": ""}})
-        return ok
+        elif how == "inflight_barrier_held":            # another award is still in flight / left behind
+            db[aq.CONTROL_COLLECTION].update_one({}, {"$set": {"legacy_award_inflight": {"token": "x"}}})
+        return real(db, lease, now_utc)
 
-    monkeypatch.setattr(aq, "invalidate_history_seed", fence_then_activation_lands)
+    monkeypatch.setattr(aq, "invalidate_history_seed", interfere_then_fence)
     scheduler.settle_pending_referrals(batch_limit=5)
-    awarded = w.db.referral_award_events.count_documents({"invitee_user_id": 601})
-    # Control case proves the scenario really reaches the award; the aborts prove nothing is written.
-    assert awarded == (1 if how == "none" else 0)
+    # The control case proves the scenario really reaches the award; the others prove nothing is written.
+    assert w.db.referral_award_events.count_documents({"invitee_user_id": 601}) == (1 if how == "none" else 0)
     if how != "none":
         assert w.db.xp_events.count_documents({"unique_key": "ref:601"}) == 0
+    else:
+        assert "legacy_award_inflight" not in aq.get_control(w.db)      # barrier released when the award finished
 
 
 def test_requeue_after_a_rule_rejection_keeps_rollout_membership_but_absence_rejection_stays_closed(monkeypatch):
@@ -611,41 +613,66 @@ def test_decided_cohort_members_survive_later_top_ups_and_cancel_clears_the_snap
     assert "launch_cohort" not in aq.get_control(w2.db)
 
 
-def test_activation_refuses_while_a_legacy_award_is_in_flight_and_operator_can_release_it():
+def test_activation_cas_itself_refuses_a_parked_award_even_after_a_stale_preflight(monkeypatch):
     w = forward_world()
-    pid = w.db.pending_referrals.insert_one({"invitee_user_id": 701, "inviter_user_id": 900, "status": aq.AWARDING_STATUS,
-                                             "created_at_utc": NOW}).inserted_id
-    report = admin.preflight_report(w.db, now_utc=NOW)
-    assert report["legacy_awarding_rows"] == 1 and not report["ok"]
-    assert activate(w) == 2 and aq.launch_cutoff(aq.get_control(w.db)) is None
+    stale = admin.preflight_report(w.db, now_utc=NOW)
+    assert stale["ok"]
+    # A worker parks an award AFTER preflight read the control document and then lost its lease.
+    w.db[aq.CONTROL_COLLECTION].update_one({}, {"$set": {"legacy_award_inflight": {"token": "dead", "since": NOW}}})
+    monkeypatch.setattr(admin, "preflight_report", lambda *a, **k: stale)
+    assert activate(w) == 2 and aq.launch_cutoff(aq.get_control(w.db)) is None     # the CAS, not preflight, refuses
+    monkeypatch.undo()
+    assert not admin.preflight_report(w.db, now_utc=NOW)["ok"]
     argv = ["recover-legacy-writer", "--release-awarding", "--commit"]
     assert admin.main(argv, db_factory=lambda: w.db, now_fn=lambda: NOW) == 2          # needs the stopped-writer ack
     assert admin.main([*argv, "--acknowledge-writer-stopped"], db_factory=lambda: w.db, now_fn=lambda: NOW) == 0
-    assert w.db.pending_referrals.find_one({"_id": pid})["status"] == "pending"
+    assert "legacy_award_inflight" not in aq.get_control(w.db)
     assert activate(w) == 0
 
 
-def test_a_worker_paused_inside_the_award_holds_activation_off(monkeypatch):
-    import scheduler
+def test_a_live_worker_mid_award_blocks_activation_and_its_lease_loss_does_not_release_the_barrier():
+    w = forward_world()
+    with aq.legacy_writer_guard(w.db, now_utc=NOW) as lease:
+        assert lease.begin_award(NOW)
+        assert not lease.begin_award(NOW)                    # one award in flight at a time
+        assert activate(w) == 2
+        later = NOW + aq.LEGACY_WRITER_LEASE + aq.LEGACY_WRITER_RECOVERY_GRACE + timedelta(seconds=1)
+        assert aq.recover_legacy_writer(w.db, now_utc=later)["recovered"]      # token recovered ...
+        assert aq.get_control(w.db)["legacy_award_inflight"]                  # ... barrier is NOT
+        assert activate(w) == 2
+        assert not lease.begin_award(later)                                   # stale worker cannot start another
+    # The stale worker finishing its award (clean exit) is what legitimately releases its own barrier;
+    # a crashed one never gets here and is released by the operator command.
+    assert "legacy_award_inflight" not in aq.get_control(w.db)
+
+
+def test_backfill_awards_pass_the_same_barrier(monkeypatch):
+    import backfill_referrals as bf
 
     w = forward_world()
-    w.db[aq.CONTROL_COLLECTION].update_one({}, {"$unset": {"seed_completed_at": ""}})
-    w.user(601, created=NOW - timedelta(days=3))
-    w.db.pending_referrals.insert_one({"invitee_user_id": 601, "inviter_user_id": 900, "status": "pending",
-                                       "destination_type": "official_channel", "created_at_utc": NOW - timedelta(days=3)})
-    monkeypatch.setattr(scheduler, "db", w.db)
-    monkeypatch.setattr(scheduler, "_referral_hold_hours", lambda: 0)
-    monkeypatch.setattr(scheduler, "_get_official_channel_member_status", lambda *a, **k: "member")
-    seen = {}
+    w.db.referrals.insert_one({"referrer_user_id": 900, "invitee_user_id": 801})
+    granted = []
+    monkeypatch.setattr(bf, "grant_referral_rewards", lambda *a, **k: granted.append(a[2:]))
+    with aq.legacy_writer_guard(w.db, now_utc=datetime_now_aware()) as lease:
+        w.db[aq.CONTROL_COLLECTION].update_one({}, {"$set": {"legacy_award_inflight": {"token": "x"}}})
+        with pytest.raises(RuntimeError):
+            bf._backfill(w.db, dry_run=False, lease=lease)       # barrier held: no award
+        assert granted == []
+        w.db[aq.CONTROL_COLLECTION].update_one({}, {"$unset": {"legacy_award_inflight": ""}})
+        bf._backfill(w.db, dry_run=False, lease=lease)
+        assert granted and "legacy_award_inflight" not in aq.get_control(w.db)
 
-    def paused_award(*a, **k):                      # the process "freezes" at the first award write
-        seen["row"] = w.db.pending_referrals.find_one({"invitee_user_id": 601})["status"]
-        seen["activate"] = activate(w)              # lease is still held here, but also assert the row gate alone
-        w.db[aq.CONTROL_COLLECTION].update_one({}, {"$unset": {"legacy_writer_token": "", "legacy_writer_lease_until": ""}})
-        seen["activate_after_recovery"] = activate(w)
-        raise RuntimeError("stop after observing")
 
-    monkeypatch.setattr(w.db.referral_award_events, "insert_one", paused_award, raising=False)
-    scheduler.settle_pending_referrals(batch_limit=5)
-    assert seen["row"] == aq.AWARDING_STATUS
-    assert seen["activate"] == seen["activate_after_recovery"] == 2     # token gone, row still blocks activation
+def datetime_now_aware():
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc)
+
+
+def test_cohort_rebuild_upserts_invitees_marked_for_the_cutoff_even_if_already_decided(monkeypatch):
+    w = forward_world()
+    add(w, 301, "acct-301", amount="79.99")                            # absent from the preflight snapshot
+    go(w, monkeypatch)
+    assert ev(w, 301)["reason"] == "seven_day_turnover_below_80"
+    w.db[aq.COHORT_COLLECTION].delete_many({})                         # e.g. never created before V2 decided it
+    fwd.snapshot_launch_cohort(w.db, now_utc=NOW, cutoff=aq.launch_cutoff(aq.get_control(w.db)))
+    assert w.db[aq.COHORT_COLLECTION].find_one({"_id": 301})

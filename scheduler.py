@@ -4035,6 +4035,8 @@ def _settle_pending_referrals(batch_limit: int = 200, lease=None) -> None:
     while scanned < batch_limit:
         # Heartbeat + fence: a writer that lost its lease (suspended past
         # expiry, then recovered) must claim no further rows.
+        if lease is not None:
+            lease.end_award()  # the previous row's award is fully finished
         if lease is not None and not lease.renew(now_utc()):
             logger.error("[SCHED][REFERRAL] stopped reason=legacy_writer_lease_lost")
             break
@@ -4492,21 +4494,6 @@ def _settle_pending_referrals(batch_limit: int = 200, lease=None) -> None:
             if not affiliate_qualification.invalidate_history_seed(db, lease, now_utc()):
                 _release_for_retry(pending_id, now_utc_ts, 60, "legacy_writer_lease_lost")
                 break
-            if lease is not None:
-                # Park the row in the awarding state with a CAS on this worker's own claim. Activation
-                # refuses while any awarding row exists (preflight), so a worker paused from here until
-                # after recovery cannot be overtaken by activation; a worker whose claim was already
-                # recovered/marked fails this CAS and awards nothing.
-                fenced = db.pending_referrals.update_one(
-                    {"_id": pending_id, "status": "processing", "processing_by": INSTANCE_ID},
-                    {"$set": {"status": affiliate_qualification.AWARDING_STATUS, "awarding_since": now_utc_ts,
-                              "award_fence_token": lease.token}})
-                if (not fenced.modified_count
-                        or not affiliate_qualification.legacy_award_allowed(
-                            affiliate_qualification.get_control(db), now_utc())):
-                    logger.error("[SCHED][REFERRAL] award_aborted reason=row_or_admission_fence pending_id=%s", pending_id)
-                    _release_for_retry(pending_id, now_utc_ts, 60, "award_fence_failed")
-                    break
             # Award key is invitee-scoped (not group_id/chat_id-scoped) so the
             # same invitee cannot be awarded twice across a group-origin and a
             # channel-origin referral (P0-4: cross-destination duplicate XP).
