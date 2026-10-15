@@ -4883,6 +4883,12 @@ def run_welcome_redemption_qualification(now_utc_ts: datetime | None = None) -> 
         # The hand-off pass may just have recorded completion: decide on the CURRENT control, not the
         # snapshot read before marking.
         control = affiliate_qualification.get_control(db) or control
+        if (out["active"] and affiliate_qualification._aware_utc(control.get("launch_handoff_completed_cutoff"))
+                != affiliate_qualification.launch_cutoff(control)):
+            # Another worker may hold the cohort-writer lease mid-hand-off: membership decisions need the
+            # closed population, so evidence waits until this cutoff's hand-off marker is recorded.
+            out["skipped"] = "launch_handoff_pending"
+            return out
     if out["active"]:
         config = (control or {}).get("source_config") or {}
         problems = affiliate_qualification.validate_source_config(config)

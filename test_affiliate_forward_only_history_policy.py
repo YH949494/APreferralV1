@@ -812,3 +812,20 @@ def test_membership_decision_uses_the_current_handoff_marker_not_the_callers_sta
     result = aq.evaluate_evidence(w.db, e, control=stale, now_utc=NOW + timedelta(minutes=2))   # stale snapshot
     assert result == {"status": aq.EV_REVIEW, "reason": "referral_not_active_at_rollout"}
     assert w.db.qualified_events.count_documents({"invitee_id": 101}) == 0
+
+
+def test_evidence_processing_waits_for_the_launch_handoff_marker(monkeypatch):
+    w = forward_world()
+    add(w, 102, "acct-102", status="pending")
+    assert activate(w) == 0
+    w.db[aq.CONTROL_COLLECTION].update_one({}, {"$unset": {"launch_handoff_completed_cutoff": "",
+                                                           "launch_handoff_completed_at": ""}})
+    # Another worker holds the cohort-writer lease mid-hand-off, so this pass cannot record the marker.
+    w.db[aq.CONTROL_COLLECTION].update_one({}, {"$set": {"legacy_writer_token": "other-worker",
+                                                         "legacy_writer_lease_until": NOW + timedelta(minutes=5)}})
+    out = run(w, monkeypatch)
+    assert out["skipped"] == "launch_handoff_pending" and "evidence" not in out
+    assert w.db.qualified_events.count_documents({"invitee_id": 102}) == 0
+    w.db[aq.CONTROL_COLLECTION].update_one({}, {"$unset": {"legacy_writer_token": "", "legacy_writer_lease_until": ""}})
+    out = run(w, monkeypatch)                                        # the hand-off completes, then decisions run
+    assert "skipped" not in out and ev(w, 102)["status"] == aq.EV_QUALIFIED
