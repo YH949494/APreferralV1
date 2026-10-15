@@ -204,18 +204,20 @@ def pick_canonical(docs: list[dict], pinned_id: str | None = None) -> dict:
     snapshots whose standings are identical.
     """
     analyses = [analyze(d) for d in docs]
+    if pinned_id is not None:
+        # Operator override: only the pinned snapshot must be sound; malformed
+        # losers are backed up and removed like any other non-canonical doc.
+        for a in analyses:
+            if str(a.doc["_id"]) == str(pinned_id) and a.eligible:
+                return a.doc
+        raise AmbiguousCanonicalError(
+            f"pinned _id={pinned_id} is not an eligible (valid, non-reset, sorted) snapshot of this week"
+        )
     bad = [f"{a.doc.get('_id')}: {a.error}" for a in analyses if a.error]
     if bad:
         raise AmbiguousCanonicalError(f"unparseable snapshot(s): {bad}")
 
     eligible = [a for a in analyses if a.eligible]
-    if pinned_id is not None:
-        for a in eligible:
-            if str(a.doc["_id"]) == str(pinned_id):
-                return a.doc
-        raise AmbiguousCanonicalError(
-            f"pinned _id={pinned_id} is not an eligible (valid, non-reset, sorted) snapshot of this week"
-        )
     if not eligible:
         raise AmbiguousCanonicalError("no valid non-reset snapshot exists")
 
@@ -277,6 +279,10 @@ def build_report(history_collection, pinned: dict | None = None) -> list[dict]:
     return report
 
 
+def _safe_len(board) -> int | None:
+    return len(board) if isinstance(board, list) else None
+
+
 def _describe(doc: dict, canonical_id) -> dict:
     a = analyze(doc)
     return {
@@ -285,8 +291,8 @@ def _describe(doc: dict, canonical_id) -> dict:
         "archived_at": doc.get("archived_at"),
         "week_end": doc.get("week_end"),
         "entry_counts": {
-            "checkin": len(doc.get("checkin_leaderboard") or []),
-            "referral": len(doc.get("referral_leaderboard") or []),
+            "checkin": _safe_len(doc.get("checkin_leaderboard")),
+            "referral": _safe_len(doc.get("referral_leaderboard")),
         },
         "rank1": {
             "weekly_xp": a.checkin.top if a.checkin else None,

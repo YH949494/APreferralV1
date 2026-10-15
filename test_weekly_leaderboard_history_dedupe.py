@@ -269,6 +269,21 @@ def test_operator_pin_resolves_ambiguity():
     assert backup.count_documents({}) == 2
 
 
+def test_pin_bypasses_malformed_losers_and_report_survives_scalar_board():
+    history, backup = _client_and_collections()
+    bad = _doc("w", _id="bad", archived_at=T0 + timedelta(minutes=1))
+    bad["checkin_leaderboard"] = 123  # scalar board
+    history.insert_many([_doc("w", _id="good", archived_at=T0), bad])
+
+    result = dedupe(history_collection=history, backup_collection=backup)  # must not crash
+    assert result["mode"] == "aborted"
+
+    result = dedupe(history_collection=history, backup_collection=backup, dry_run=False, pinned={"w": "good"})
+    assert result["mode"] == "apply"
+    assert [d["_id"] for d in history.find({})] == ["good"]
+    assert backup.count_documents({}) == 2
+
+
 class _FailingAfter:
     """Proxy that lets `n` calls to `method` through, then raises."""
 
