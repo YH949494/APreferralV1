@@ -1021,6 +1021,132 @@ def _observation_fingerprint(successful: bool, redeemed_at: datetime | None, fie
     return hashlib.sha256(f"{RULE_VERSION}|{QUALIFICATION_GATE_VERSION}|{int(bool(successful))}|{redemption_status_known}|{stamp}|{encoded}".encode()).hexdigest()[:16]
 
 
+# ---------------------------------------------------------------------------
+# Re-observation of one logical UIM record (code + account): supersession
+# ---------------------------------------------------------------------------
+#
+# A Databot UIM batch re-exports records an earlier batch already carried. The
+# earlier observation may have been UNVERIFIED (legacy redemption time without
+# timezone provenance, no completeness marker, no declared coverage). A newer
+# observation that is fully attested may fill those gaps. It may NEVER
+# overwrite a field the earlier observation did establish: that is a genuine
+# disagreement and stays a conflict.
+
+REOBS_IDENTICAL = "identical"   # same established values, nothing to repair
+REOBS_UPGRADE = "upgrade"       # older one was unverified, newer one is attested and agrees
+REOBS_CONFLICT = "conflict"     # attested observation contradicts an established field
+SOURCE_TZ_NAME = "Asia/Kuala_Lumpur"
+_COVERAGE_BASIS = "voucher_redemption_date"
+
+
+def batch_attests_redemption(coverage: dict | None, redeemed_at: datetime | None, source_timezone: str | None) -> bool:
+    """True only if the batch operator declared COMPLETE, final coverage by voucher redemption date (GMT+8) and
+    the redemption's GMT+8 calendar day lies inside it. Missing/partial/inferred/malformed coverage, a day outside
+    it, a missing redemption time or a source timezone other than GMT+8 attest nothing."""
+    when = _aware_utc(redeemed_at)
+    if not isinstance(coverage, dict) or when is None or source_timezone != SOURCE_TZ_NAME:
+        return False
+    if (coverage.get("status") != "complete" or coverage.get("source") != "operator_declared"
+            or coverage.get("basis") != _COVERAGE_BASIS or coverage.get("undeclared_legacy")):
+        return False
+    start, end = coverage.get("start_date"), coverage.get("end_date")
+    if not (isinstance(start, str) and isinstance(end, str)):
+        return False
+    return start <= when.astimezone(KL_TZ).strftime("%Y-%m-%d") <= end
+
+
+def _flag_value(flag):
+    """coupon_new_player -> 0 / 1, or None when it cannot establish the condition (same vocabulary as the gate)."""
+    if flag is True:
+        return 1
+    if flag is False:
+        return 0
+    if type(flag) in (int, float) and flag in (0, 1):
+        return int(flag)
+    if isinstance(flag, str):
+        text = flag.strip().lower()
+        return {"1": 1, "true": 1, "0": 0, "false": 0}.get(text)
+    return None
+
+
+def _amount_value(raw) -> Decimal | None:
+    """after_total_bet_amount -> exact Decimal (no float, no rounding), or None when unusable."""
+    if isinstance(raw, bool) or not isinstance(raw, (str, int, float, Decimal)):
+        return None
+    text = str(raw).strip()
+    if not re.fullmatch(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?", text):
+        return None
+    try:
+        value = Decimal(text)
+    except (InvalidOperation, ValueError):
+        return None
+    return value if value.is_finite() and value >= 0 else None
+
+
+def observation_core(view: dict) -> dict:
+    """The comparable facts of one evidence-shaped observation. ``None`` = not established."""
+    fields = view.get("qualification_fields") or {}
+    redeemed = _aware_utc(view.get("redeemed_at"))
+    return {
+        "redeemed_at": redeemed,
+        "successful": bool(view.get("redemption_successful")),
+        "coupon_new_player": _flag_value(fields.get("coupon_new_player")),
+        "after_total_bet_amount": _amount_value(fields.get("after_total_bet_amount")),
+    }
+
+
+def observation_attested(view: dict) -> bool:
+    """A committed, ordered Databot observation whose every gate fact is final and verified: redemption instant with
+    provenance, text account, successful per the attested source contract, transport v1 with the seven-day result
+    marked complete, usable coupon_new_player and Decimal turnover, and a redemption day inside the batch's declared
+    complete GMT+8 coverage. Attestation never decides qualification; assess_evidence still does."""
+    if view.get("source") not in (None, SOURCE_DATABOT_UIM) or not view.get("authoritative_order"):
+        return False
+    if view.get("account_reason") or view.get("redeemed_at_reason") or not view.get("account_key"):
+        return False
+    fields = view.get("qualification_fields") or {}
+    version = fields.get("transport_version")
+    core = observation_core(view)
+    return bool(
+        core["redeemed_at"] is not None and core["successful"]
+        and type(version) is int and version == 1 and fields.get("seven_day_complete") is True
+        and core["coupon_new_player"] is not None and core["after_total_bet_amount"] is not None
+        and (view.get("evidence_basis") or {}).get("coverage_attested") is True
+    )
+
+
+def reobservation_verdict(before: dict, after: dict) -> str | None:
+    """How a NEWER observation of the same logical record relates to an older one.
+
+    ``None`` = this rule does not apply (the newer one is not attested, or both are attested but differ, which the
+    existing correction policy handles). Otherwise IDENTICAL / UPGRADE / CONFLICT:
+
+    * the older one already established the same facts -> IDENTICAL (no conflict, no double count: one logical record);
+    * the older one was unverified and every fact it DID establish agrees -> UPGRADE (gaps are filled);
+    * any established fact differs (redemption instant, success, coupon_new_player, exact Decimal turnover)
+      -> CONFLICT, kept for review.
+    """
+    if not observation_attested(after):
+        return None
+    old, new = observation_core(before), observation_core(after)
+    if observation_attested(before):
+        return REOBS_IDENTICAL if old == new else None
+    for name in ("redeemed_at", "coupon_new_player", "after_total_bet_amount"):
+        if old[name] is not None and old[name] != new[name]:
+            return REOBS_CONFLICT
+    if old["successful"] != new["successful"]:
+        return REOBS_CONFLICT
+    return REOBS_UPGRADE
+
+
+def supersession_snapshot(view: dict) -> dict:
+    """What an upgrade replaces, kept on the evidence document (audit history; nothing is deleted)."""
+    return {k: view.get(k) for k in ("redeemed_at", "redeemed_at_reason", "redemption_successful",
+                                      "redemption_status_known", "qualification_fields", "evidence_basis",
+                                      "authoritative_order", "observation_fingerprint", "status", "reason",
+                                      "attempts")}
+
+
 def build_evidence_doc(
     *,
     source: str,
@@ -1153,6 +1279,11 @@ def record_redemption_evidence(
         db[EVIDENCE_COLLECTION].update_one({"_id": before["_id"]}, {k: v for k, v in update.items() if k != "$setOnInsert"})
     if before is None:
         return {"recorded": True, "new": True}
+    if source == SOURCE_DATABOT_UIM and observation_order:
+        outcome = _supersede_on_reobservation(db, before, insert_doc, observation_order=observation_order,
+                                              source_batch_id=source_batch_id, now_utc=now_utc)
+        if outcome is not None:
+            return outcome
     # Only committed Databot observations carry a trustworthy total order.
     # CAS protects concurrent extracts/retries from replacing a newer observation.
     if source == SOURCE_DATABOT_UIM and observation_order and before.get("authoritative_order"):
@@ -1198,6 +1329,120 @@ def record_redemption_evidence(
         _flag_conflicting_observation(db, before, now_utc=now_utc)
         return {"recorded": True, "new": False, "conflict": True}
     return {"recorded": True, "new": False}
+
+
+def _evidence_is_mutable(evidence: dict) -> bool:
+    """No decision, lease, void or qualification effect has been taken on this evidence."""
+    return bool(evidence.get("status") in (EV_RECEIVED, EV_REVIEW) and not evidence.get("lease_until")
+                and not evidence.get("qualification_decision_at") and not evidence.get("voided_at"))
+
+
+def supersession_update(before: dict, incoming: dict, *, source_batch_id, now_utc: datetime,
+                        verdict: str, run: str | None = None) -> dict:
+    """The ``$set``/``$push`` document that moves evidence onto a newer attested observation of the same logical
+    record, keeping the replaced provenance in ``supersession_history`` (append-only). Identity fields (source_ref,
+    code_hash, account_key, recipient_resolution) are never touched."""
+    entry = {"at": now_utc, "verdict": verdict, "batch_id": source_batch_id,
+             "to_order": incoming.get("authoritative_order"), "from": supersession_snapshot(before)}
+    if run:
+        entry["run"] = run
+    return {
+        "$set": {
+            "redeemed_at": incoming["redeemed_at"], "redeemed_at_reason": None,
+            "redemption_successful": incoming["redemption_successful"],
+            "redemption_status_known": incoming.get("redemption_status_known", True),
+            "qualification_fields": incoming["qualification_fields"], "evidence_basis": incoming["evidence_basis"],
+            "authoritative_order": incoming["authoritative_order"],
+            "observation_fingerprint": incoming["observation_fingerprint"],
+            # Back to the validator: it, not this repair, decides. Same reset as requeue_evidence.
+            "status": EV_RECEIVED, "attempts": 0, "updated_at": now_utc,
+        },
+        "$unset": {"reason": ""},
+        "$push": {"supersession_history": entry},
+    }
+
+
+def _supersede_on_reobservation(db, before: dict, incoming: dict, *, observation_order: str, source_batch_id,
+                                now_utc: datetime) -> dict | None:
+    """Live form of the supersession rule (see :func:`reobservation_verdict`). ``None`` = not applicable, the
+    caller continues with the existing correction policy."""
+    verdict = reobservation_verdict(before, incoming)
+    if verdict is None:
+        return None
+    prior_order = before.get("authoritative_order")
+    if prior_order and observation_order <= prior_order:
+        return {"recorded": True, "new": False, "stale": observation_order < prior_order}
+    if before.get("removed_in_batch_ids") or before.get("source_conflict_at"):
+        # A removed observation stays removed and an existing hold is only lifted by the reconcile command, which
+        # re-derives it from every source observation.
+        return {"recorded": True, "new": False, "held": True}
+    if verdict == REOBS_CONFLICT:
+        _flag_conflicting_observation(db, before, now_utc=now_utc)
+        return {"recorded": True, "new": False, "conflict": True}
+    same = before.get("observation_fingerprint") == incoming["observation_fingerprint"]
+    if not _evidence_is_mutable(before):
+        if verdict == REOBS_IDENTICAL and same:
+            db[EVIDENCE_COLLECTION].update_one(
+                {"_id": before["_id"], "authoritative_order": prior_order,
+                 "observation_fingerprint": before.get("observation_fingerprint")},
+                {"$set": {"authoritative_order": observation_order}})
+            return {"recorded": True, "new": False}
+        return None if verdict == REOBS_IDENTICAL else {"recorded": True, "new": False}
+    update = (supersession_update(before, incoming, source_batch_id=source_batch_id, now_utc=now_utc, verdict=verdict)
+              if not same else {"$set": {"authoritative_order": observation_order}})
+    applied = db[EVIDENCE_COLLECTION].find_one_and_update(
+        {"_id": before["_id"], "authoritative_order": prior_order if prior_order else {"$exists": False},
+         "observation_fingerprint": before.get("observation_fingerprint"), "status": before.get("status"),
+         "lease_until": {"$exists": False}, "qualification_decision_at": {"$exists": False},
+         "source_conflict_at": {"$exists": False}, "voided_at": {"$exists": False}},
+        update, return_document=ReturnDocument.AFTER)
+    if applied is None:
+        # Lost a race to evaluation or another extractor: re-read, never guess.
+        current = db[EVIDENCE_COLLECTION].find_one({"_id": before["_id"]}) or before
+        if (current.get("authoritative_order") or "") >= observation_order:
+            return {"recorded": True, "new": False, "stale": True}
+        return None
+    return {"recorded": True, "new": False, "upgraded": verdict == REOBS_UPGRADE and not same}
+
+
+def fold_observation(by_ref: dict, doc: dict, *, removed: bool = False, source: str = SOURCE_DATABOT_UIM) -> None:
+    """In-memory counterpart of :func:`record_redemption_evidence`, applied to observations in commit order. Shared
+    by the Qualification Preview and the reconcile command so both reach the verdict live extraction reaches."""
+    ref = doc["source_ref"]
+    prior = by_ref.get(ref)
+    if removed:
+        # A later committed import dropped this row (correction policy -> review). Sticky: later re-adds keep it.
+        if prior is not None:
+            prior["_source_removed"] = True
+        return
+    if prior is None:
+        by_ref[ref] = doc
+        return
+    ordered = bool(source == SOURCE_DATABOT_UIM and doc.get("authoritative_order") and prior.get("authoritative_order")
+                   and doc["authoritative_order"] > prior["authoritative_order"])
+    verdict = reobservation_verdict(prior, doc) if ordered else None
+    if verdict in (REOBS_IDENTICAL, REOBS_UPGRADE):
+        if "_id" in prior:
+            doc["_id"] = prior["_id"]
+        for flag in ("_source_removed", "_conflicting_observation", "_upgraded_from"):
+            if prior.get(flag):
+                doc[flag] = prior[flag]
+        if verdict == REOBS_UPGRADE and not doc.get("_upgraded_from"):
+            doc["_upgraded_from"] = supersession_snapshot(prior)
+        by_ref[ref] = doc
+    elif verdict == REOBS_CONFLICT:
+        prior["_conflicting_observation"] = True
+    elif (ordered and _aware_utc(prior.get("redeemed_at")) == _aware_utc(doc.get("redeemed_at"))
+          and prior.get("redemption_successful") == doc.get("redemption_successful")):
+        # Same redemption's newest completed report replaces gate values (existing correction policy).
+        if "_id" in prior:
+            doc["_id"] = prior["_id"]
+        for flag in ("_source_removed", "_conflicting_observation", "_upgraded_from"):
+            if prior.get(flag):
+                doc[flag] = prior[flag]
+        by_ref[ref] = doc
+    elif prior["observation_fingerprint"] != doc["observation_fingerprint"]:
+        prior["_conflicting_observation"] = True
 
 
 def _flag_conflicting_observation(db, evidence: dict, *, now_utc: datetime,
@@ -1347,6 +1592,10 @@ def _parse_databot_row(row: dict, cfg: dict) -> dict | None:
             "account": row.get("account_basis"),
             "provenance": row.get("provenance"),
             "source_row_ref": row.get("_id"),
+            # The batch operator's declared complete GMT+8 voucher-redemption-date coverage contains this row's
+            # redemption day (see batch_attests_redemption). Provenance only: no verdict reads it.
+            "coverage_attested": batch_attests_redemption(row.get("_batch_coverage"), redeemed_at,
+                                                          cfg.get("source_timezone")),
         },
     }
 
@@ -1364,11 +1613,12 @@ def iter_committed_source_rows(db, config: dict | None):
     order (the order corrections were made in). Read-only."""
     spec = source_spec(config)
     key = spec["batch_key"]
-    batches = db[spec["batches"]].find(committed_batch_filter(config), {key: 1, spec["order"]: 1}).sort([(spec["order"], 1), (key, 1)])
+    batches = db[spec["batches"]].find(committed_batch_filter(config), {key: 1, spec["order"]: 1, "coverage": 1}).sort([(spec["order"], 1), (key, 1)])
     for batch in list(batches):
         for row in db[spec["rows"]].find({key: batch.get(key)}).sort("_id", 1):
             if source_name(config) == SOURCE_DATABOT_UIM:
                 row["_observation_order"] = databot_observation_order(batch, row)
+                row["_batch_coverage"] = batch.get("coverage")
             yield batch.get(key), row
 
 
@@ -1393,6 +1643,7 @@ def extract_marketing_batch(
     for row in cursor:
         if source_name(config) == SOURCE_DATABOT_UIM:
             row["_observation_order"] = databot_observation_order(batch, row)
+            row["_batch_coverage"] = batch.get("coverage")
         last_id = row.get("_id")
         summary["rows"] += 1
         obs = parse_source_row(row, config)

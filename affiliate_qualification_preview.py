@@ -211,30 +211,13 @@ def _build_evidences(observations, recipients, *, now_utc, stats, source=aq.SOUR
             stats[f"{recipient['status']}_code"] += 1
             continue
         doc = aq.build_evidence_doc(source=source, recipient=recipient, now_utc=now_utc, **obs)
-        prior = by_ref.get(doc["source_ref"])
-        if obs.get("observation") == aq.OBS_REMOVED:
-            # A later committed import dropped this row: correction policy
-            # (same as live record_redemption_evidence) -> review.
+        removed = obs.get("observation") == aq.OBS_REMOVED
+        if removed:
             stats["removed_observations"] += 1
-            if prior is not None:
-                prior["_source_removed"] = True
-            continue
-        if prior is None:
+        else:
             doc["_id"] = "shadow:" + doc["source_ref"]
-            by_ref[doc["source_ref"]] = doc
-        elif (source == aq.SOURCE_DATABOT_UIM and doc.get("authoritative_order")
-              and prior.get("authoritative_order") and doc["authoritative_order"] > prior["authoritative_order"]
-              and aq._aware_utc(prior.get("redeemed_at")) == aq._aware_utc(doc.get("redeemed_at"))
-              and prior.get("redemption_successful") == doc.get("redemption_successful")):
-            # Same redemption's newest completed report replaces gate values.
-            # Preserve tombstones/core conflicts from earlier observations.
-            doc["_id"] = prior["_id"]
-            for flag in ("_source_removed", "_conflicting_observation"):
-                if prior.get(flag):
-                    doc[flag] = True
-            by_ref[doc["source_ref"]] = doc
-        elif prior["observation_fingerprint"] != doc["observation_fingerprint"]:
-            prior["_conflicting_observation"] = True
+        # Same supersession / correction / removal rules live extraction applies (aq.fold_observation).
+        aq.fold_observation(by_ref, doc, removed=removed, source=source)
     stats["welcome_evidence_rows"] = len(by_ref)
     return list(by_ref.values())
 
@@ -524,6 +507,12 @@ def build_preview(db, *, month: str | None, now_utc: datetime, source_config: di
     stats, evidences, historical, at_launch = (replay["stats"], replay["evidences"], replay["historical"],
                                                replay["at_launch"])
     pending_by_invitee, real_q = replay["pending_by_invitee"], replay["real_q"]
+    if is_databot:
+        # ``unverified_completeness_synced_rows`` counts every historical synced row, including observations a newer
+        # attested batch superseded. This is the decision-relevant figure: effective evidence records whose
+        # seven-day completeness is still not verified after supersession.
+        payload["pending_maturity"]["unverified_completeness_effective_evidence"] = sum(
+            1 for e in evidences if (e.get("qualification_fields") or {}).get("seven_day_complete") is not True)
 
     def in_period(o):
         return o["redeemed_at"] is not None and window["start_utc"] <= o["redeemed_at"] < window["end_utc"]
