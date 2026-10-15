@@ -68,6 +68,7 @@ from decimal import Context, Decimal, InvalidOperation, Inexact
 from pymongo import ASCENDING
 from pymongo.errors import DuplicateKeyError
 
+import affiliate_forward_only as forward_only
 import affiliate_qualification as aq
 import affiliate_qualification_preview as aqp
 import uim_coverage
@@ -665,6 +666,8 @@ def build_report(db, *, start_date: str, end_date: str, now_utc: datetime, limit
         "effects_written": mode == MODE_LIVE,     # preview: nothing was or will be written by this report
         "rule_mode": rule["rule_mode"],
         "rule_version": aq.RULE_VERSION,
+        # history_policy, limitation, qualified/seeded/unresolved counts, cohort size, actual|preview mode.
+        "forward_only": forward_only.forward_only_summary(db, control, now_utc=now_utc),
         "cohort": {"basis": COHORT_BASIS, "timezone": COHORT_TIMEZONE, "start_date": start, "end_date": end},
         "status": "inactive",
         "snapshot": None,
@@ -715,6 +718,10 @@ def build_report(db, *, start_date: str, end_date: str, now_utc: datetime, limit
     report["source"] = {k: source.get(k) for k in ("status", "problems", "last_sync_success_at")}
     # Final coverage, latest observed redemption, sync time and snapshot time are four separate fields.
     report["uim_coverage"] = source.get("uim_coverage")
+    report["forward_only"]["source_coverage"] = source.get("uim_coverage")
+    report["forward_only"]["source_freshness"] = {
+        "status": source.get("status"), "last_sync_success_at": source.get("last_sync_success_at"),
+        "snapshot_generated_at": generated_at.isoformat(), "snapshot_age_seconds": age, "snapshot_stale": stale}
     final_end = (source.get("uim_coverage") or {}).get("final_coverage_end")
     report["uim_coverage_end"] = (f"{final_end}T23:59:59+08:00"          # deprecated alias: FINAL coverage end only
                                   if final_end and (source.get("uim_coverage") or {}).get("status") == "complete"

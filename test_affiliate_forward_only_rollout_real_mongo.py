@@ -10,7 +10,7 @@ import affiliate_qualification_preview as preview
 from scripts import affiliate_qualification_admin as admin
 from scripts import migrate_affiliate_account_dedupe as migration
 from test_affiliate_qualification_rollout_real_mongo import real_db
-from test_affiliate_forward_only_rollout import prepared_world, activate
+from test_affiliate_forward_only_rollout import prepared_world, activate, forward_inputs
 from test_affiliate_welcome_redemption_qualification import NOW, CUTOFF, _scheduler, run
 from test_affiliate_qualification_gates import databot_world
 from test_uim_redemption_sync import sync, urow
@@ -85,7 +85,8 @@ def test_real_forward_seed_manifest_detects_lost_registry_ownership(real_db):
     real_db.qualified_events.insert_one({"invitee_id": 999, "qualified_at": CUTOFF, "referrer_id": 900})
     w.user(999, linked=["000Known"])
     result = migration.run(real_db, apply=True, seed_from_linkage=True, now_utc=NOW,
-                           history_policy=aq.HISTORY_FORWARD, acknowledge_unknown_history=True)
+                           history_policy=aq.HISTORY_FORWARD, acknowledge_unknown_history=True,
+                           forward_only=forward_inputs(real_db, seed_from_linkage=True))
     assert result["seed_marker_written"]
     control = aq.get_control(real_db)
     assert migration.completion_readiness(real_db, control)["ok"]

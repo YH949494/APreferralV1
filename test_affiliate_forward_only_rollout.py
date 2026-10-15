@@ -40,6 +40,18 @@ def test_explicit_incomplete_never_rejects_a_partial_turnover():
         "status": aq.EV_REVIEW, "reason": "seven_day_data_incomplete"}
 
 
+def forward_inputs(db, *, seed_from_linkage=False, cutoff=NOW, **override):
+    """The operator-authorized inputs, copied from the reviewed dry run."""
+    plan = migration.build_plan(db, config=aq.get_control(db)["source_config"], seed_from_linkage=seed_from_linkage,
+                                now_utc=NOW, history_policy=aq.HISTORY_FORWARD,
+                                activation_cutoff=cutoff.isoformat())
+    inputs = {"activation_cutoff": cutoff.isoformat(), "operator": "ops", "reason": "forward-only launch",
+              "report_fingerprint": plan["report_fingerprint"], "unresolved_count": plan["unresolved_events"],
+              "qualified_history_count": plan["historical_events"], "seeded_count": plan["accounts_to_seed"],
+              "account_namespace": SOURCE_CONFIG["account_namespace"]}
+    return {**inputs, **override}
+
+
 def prepared_world(*, forward=False, db=None):
     w = World(mode=aq.MODE_DISABLED, cutoff=None, db=db)
     # Unknown history must never be retroactively changed or guessed.
@@ -48,8 +60,11 @@ def prepared_world(*, forward=False, db=None):
     w.upload([w.row("coverage-only", "coverage-account", NOW)])
     result = migration.run(w.db, apply=True, seed_from_linkage=False, now_utc=NOW,
                            history_policy=aq.HISTORY_FORWARD if forward else aq.HISTORY_STRICT,
-                           acknowledge_unknown_history=forward)
+                           acknowledge_unknown_history=forward,
+                           forward_only=forward_inputs(w.db) if forward else None)
     assert result["seed_marker_written"], result
+    if forward:
+        assert admin.main(["snapshot-launch-cohort", "--commit"], db_factory=lambda: w.db, now_fn=lambda: NOW) == 0
     return w
 
 
@@ -82,7 +97,8 @@ def test_forward_seeds_only_known_accounts_and_preserves_unknown_history():
     w.user(998, linked=["000Known"])
     w.upload([w.row("coverage", "coverage-only", NOW)])
     before = list(w.db.qualified_events.find())
-    first = migration.run(w.db, apply=True, seed_from_linkage=True, now_utc=NOW,
+    inputs = forward_inputs(w.db, seed_from_linkage=True)
+    first = migration.run(w.db, apply=True, seed_from_linkage=True, now_utc=NOW, forward_only=inputs,
                          history_policy=aq.HISTORY_FORWARD, acknowledge_unknown_history=True)
     assert first["seed_marker_written"] and first["plan"]["unresolved_events"] == 1
     assert w.db[aq.REGISTRY_COLLECTION].count_documents({}) == 1
@@ -91,7 +107,7 @@ def test_forward_seeds_only_known_accounts_and_preserves_unknown_history():
     control = aq.get_control(w.db)
     assert control["history_limitation"] == aq.HISTORY_LIMITATION
     assert migration.completion_readiness(w.db, control)["ok"]
-    second = migration.run(w.db, apply=True, seed_from_linkage=True, now_utc=NOW,
+    second = migration.run(w.db, apply=True, seed_from_linkage=True, now_utc=NOW, forward_only=inputs,
                           history_policy=aq.HISTORY_FORWARD, acknowledge_unknown_history=True)
     assert second["seed_result"]["seeded"] == 0 and second["seed_marker_written"]
     assert list(w.db.qualified_events.find()) == before

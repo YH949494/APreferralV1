@@ -31,7 +31,7 @@ ownership checks remain mandatory. Conflicting identity is never guessed.
 
 `strict_complete_history` remains the default migration policy. Unresolved
 identities or incomplete historical coverage block completion and activation.
-`known_history_plus_post_cutoff` requires an explicit policy flag and
+`forward_only_from_activation_cutoff` requires an explicit policy flag and
 `--acknowledge-unknown-history`, including CLI dry runs. It seeds only the
 deterministic accounts resolved by the existing planner. The existing optional
 `--seed-from-linkage` uses verified single-account linkage with conflict checks;
@@ -102,15 +102,70 @@ reservation → unique qualification → committed registry protocol and idempot
 XP/settlement/reward keys handle restart and duplicate workers. Rejected/held
 rows never fabricate `referral_revoked` events for nonexistent settlements.
 
-Writer tokens have no automatic expiry: a suspended worker must not wake and
-award after timeout takeover. A crashed writer blocks activation until an
-operator confirms that exact process is stopped. Review this recovery dry run;
-append `--commit` only after separate recovery authorization:
+The writer token is a **bounded lease** (10 minutes, renewed on every loop pass and
+immediately before each award by compare-and-set on token + unexpired lease). A crashed or
+killed writer (deploy, OOM, machine restart) never releases its token; a suspended one cannot
+renew after expiry, so it cannot award after recovery has cleared its token. States, from
+`status` / `preflight` (`legacy_writer`):
+
+| state | meaning | recovery |
+| --- | --- | --- |
+| `active` | lease unexpired: genuinely running | none; activation waits |
+| `expired_within_grace` | lease expired < 5 min ago | none yet |
+| `expired_recoverable` | expired + 5 min grace | automatic on the next legacy run, or `recover-legacy-writer --commit` |
+| `unleased_recent` / `unleased_stale` | token written by pre-lease code: liveness unprovable | `recover-legacy-writer --token T --acknowledge-writer-stopped --commit`, only once older than 1 hour |
+
+Before every award the writer passes a fence: one compare-and-set on its exact token and an unexpired lease (renewing it and invalidating the seed together), then an in-flight-award barrier on the control document: ONE compare-and-set that needs the exact token, an unexpired lease, legacy admission still open, no cutoff and no other award in flight, and that sets `legacy_award_inflight`. Activation's own CAS on the same document requires that marker to be absent, so the two are mutually exclusive on a single document: either the marker lands first (activation refuses, even with a stale preflight) or activation lands first (the award is refused). The marker is cleared when the award finishes (next loop pass / clean exit; the same barrier covers `backfill_referrals`). Recovery of an expired lease clears the token but never the marker, so a worker paused mid-award keeps activation off; a dead worker's marker is released by `recover-legacy-writer --release-awarding --acknowledge-writer-stopped --commit` (awards are idempotent per invitee). V2 and legacy share the `ref:<invitee>` award key, so a double payment is impossible even then. The one remaining exposure needs an operator to release the marker of a frozen process that later resumes; the operator acknowledgement is the control for that. Recovery is a compare-and-set on the exact token and the expiry predicate, appends an audit
+row (`legacy_writer_recoveries`) and never touches an active lease. Activation still requires
+the token to be absent, so old and V2 writers cannot overlap; it refuses (and `preflight`
+fails) until active legacy work has finished or a dead lease was recovered. The legacy
+`release-legacy-writer` command remains and now also refuses an active lease.
+
+## `forward_only_from_activation_cutoff` (confirmed business decision)
+
+* Existing qualified referrals are historical: never re-evaluated; `qualified_events`,
+  `referral_events`, `affiliate_ledger`, rewards and XP are untouched (counts verified before
+  and after the migration; any change refuses the completion marker).
+* Every active pending/manual referral at activation is evaluated under V2 regardless of join
+  date or UIM upload date, plus every future referral. Pre-activation UIM evidence is usable.
+  Once the launch hand-off (marking plus cohort top-up) has completed for the cutoff (`launch_handoff_completed_cutoff`), the population is closed: later marking and parking stamp only referrals created at/after the cutoff, so a pre-cutoff referral that is active again afterwards is held as `referral_not_active_at_rollout` instead of being pulled in. `official_channel_reopen_audit.py --commit` (a legacy-award repair) refuses once V2 is launched, so it cannot strand an invitee lock or create such rows. Rollout membership in decisions is read from the referral rows (stamped `qualification_rule_version=V2` when marked, parked or decided while active; referrals created at/after the cutoff are always in scope), never from the snapshot, so a stale snapshot can neither admit nor exclude anyone. `snapshot-launch-cohort` snapshots the invitee ids (one document per invitee in
+  `affiliate_v2_launch_cohort`, `_id = invitee_user_id`; already-qualified invitees excluded);
+  it is replayable and rebuilt (members that stopped being active before the cutoff are pruned; decided members of the launched cutoff are kept; `cancel-scheduled` clears it), and activation tops it up under the control barrier (repeated by the
+  scheduler after a crash). Preflight requires it `ready`.
+* Decision: successful own Welcome redemption, `coupon_new_player=1`, exact completed
+  `after_total_bet_amount >= 80` (Decimal), canonical Account ID passes duplicate enforcement.
+  Confirmed pass qualifies; confirmed rule failure rejects; missing/incomplete/contradictory/
+  uncovered/feed-error evidence stays pending. No extra seven-day timer in APReferral.
+* Duplicates: deterministic historical identities are seeded and blocked; among V2 candidates
+  the earliest redemption (then arrival, then id) owns an account, matching the preview.
+  Case, leading zeros and namespace are preserved.
+* Limitation, recorded in the marker and shown in status/preflight/Databot report: unresolved
+  historical identities are outside guaranteed duplicate coverage. This is **not** complete
+  pre-cutoff lifetime Account ID uniqueness, and does not relax `coupon_new_player=1`.
+
+Operator flow (nothing here is run by this change):
 
 ```sh
-python scripts/affiliate_qualification_admin.py release-legacy-writer \
-  --token '<token from status>' --acknowledge-writer-stopped
+python scripts/migrate_affiliate_account_dedupe.py --history-policy forward_only_from_activation_cutoff \
+  --acknowledge-unknown-history --seed-from-linkage \\
+  --activation-cutoff 2026-11-01T00:00:00+08:00             # dry run: prints report_fingerprint + counts
+python scripts/migrate_affiliate_account_dedupe.py --apply --history-policy forward_only_from_activation_cutoff \
+  --acknowledge-unknown-history --seed-from-linkage \
+  --activation-cutoff 2026-11-01T00:00:00+08:00 --operator "$OP" --reason "$REASON" \
+  --expect-report-fingerprint "$FP" --expect-unresolved 38661 --expect-qualified-history 39010 \
+  --expect-seeded 349 --account-namespace "$NAMESPACE"
+python scripts/affiliate_qualification_admin.py snapshot-launch-cohort --commit
+python scripts/affiliate_qualification_admin.py preflight --cutoff 2026-11-01T00:00:00+08:00
 ```
+
+The report fingerprint covers the normalized activation cutoff, so the dry run must be run with the same `--activation-cutoff` that `--apply` will use. Apply refuses unless every input is present and equals the reviewed dry run. Migration and legacy writers are mutually exclusive for the whole plan/seed/complete interval (the migration lease requires no legacy token; legacy admission requires no live migration lease). The versioned
+marker (`forward_only_marker_v1`: fingerprint, cutoff in UTC and Asia/Kuala_Lumpur, operator,
+reason, counts, namespace, limitation) is written atomically with `seed_completed_at`; a retry
+after an interrupted run re-seeds idempotently. `activate --cutoff` must equal the marker's
+cutoff. Preflight accepts forward-only mode only when the marker version and fingerprint match,
+seeds and indexes are complete, source coverage/ledger are healthy, the absence policy is
+deliberately disabled or fully configured, consistency passes, the cutoff matches, the cohort
+snapshot is ready and no unrecovered legacy writer exists.
 
 ## Later evidence and freshness
 
@@ -187,8 +242,8 @@ Forward-only migration dry run and activation preview:
 ```sh
 python scripts/affiliate_qualification_admin.py upgrade-rule
 python scripts/migrate_affiliate_account_dedupe.py \
-  --history-policy known_history_plus_post_cutoff \
-  --acknowledge-unknown-history --seed-from-linkage
+  --history-policy forward_only_from_activation_cutoff \
+  --acknowledge-unknown-history --seed-from-linkage   # see the operator flow below for --apply inputs
 python scripts/affiliate_qualification_admin.py activation-preview
 ```
 

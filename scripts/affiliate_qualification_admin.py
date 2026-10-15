@@ -12,6 +12,8 @@ preflight                   exit 0 only if activation is safe right now
 configure-source ...        persist the authoritative redemption source mapping
 configure-coverage-policy   attest WHAT the UIM coverage dates measure and the Welcome voucher's redemption
                             window - the only thing that lets a MISSING row reject (dry run by default)
+snapshot-launch-cohort      snapshot the ids of all active pending/manual referrals (idempotent; dry run by default)
+recover-legacy-writer       clear a dead legacy-writer lease (never an active one); also: release-legacy-writer
 activate --cutoff ISO       persist the launch cutoff (immutable) + mode=active
 pause --reason R            stop NEW qualifications (legacy stays disabled)
 resume                      mode=active again (re-runs preflight)
@@ -43,6 +45,7 @@ from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import affiliate_forward_only as fwd  # noqa: E402
 import affiliate_qualification as aq  # noqa: E402
 import uim_coverage  # noqa: E402
 
@@ -83,7 +86,24 @@ def _public_control(control: dict | None) -> dict | None:
     return result
 
 
-def preflight_report(db, *, now_utc: datetime) -> dict:
+def forward_only_preflight(db, control: dict, *, now_utc: datetime, cutoff: datetime | None) -> dict:
+    """Extra gates that apply only under forward_only_from_activation_cutoff."""
+    summary = fwd.forward_only_summary(db, control, now_utc=now_utc, live=True)
+    marker = control.get("forward_only_marker") or {}
+    configured = aq._aware_utc(marker.get("activation_cutoff_utc"))
+    blockers = []
+    if not summary["pending_manual_cohort"]["ready"]:
+        blockers.append("launch_cohort_snapshot_not_ready")
+    if cutoff is not None and configured is not None and cutoff != configured:
+        blockers.append("activation_cutoff_mismatch")
+    if configured is None:
+        blockers.append("activation_cutoff_not_configured")
+    return {**summary, "configured_activation_cutoff_utc": configured.isoformat() if configured else None,
+            "proposed_activation_cutoff_utc": cutoff.isoformat() if cutoff else None,
+            "blockers": blockers, "ok": not blockers}
+
+
+def preflight_report(db, *, now_utc: datetime, cutoff: datetime | None = None) -> dict:
     from scripts.migrate_affiliate_account_dedupe import completion_readiness
 
     control = aq.get_control(db) or {}
@@ -97,6 +117,10 @@ def preflight_report(db, *, now_utc: datetime) -> dict:
         "consistency": aq.consistency_report(db, now_utc=now_utc),
         "rule_revision_ready": control.get("rule_version") == aq.RULE_VERSION,
         "legacy_writer_in_flight": bool(control.get("legacy_writer_token")),
+        "legacy_writer": aq.legacy_writer_state(control, now_utc),
+        # Durable in-flight-award barrier on the control document (the same document activation's CAS
+        # reads). A paused/crashed worker leaves it behind: activation must not overtake it.
+        "legacy_award_inflight": bool(control.get("legacy_award_inflight")),
         "cancellation_repair_pending": bool(control.get("cancelled_cohort_cutoff")),
         "v1_qualified_events": db.qualified_events.count_documents({"rule_version": aq.LEGACY_RULE_VERSION}),
         "pending_maturity": aq.pending_maturity_report(db, config=control.get("source_config"), now_utc=now_utc),
@@ -104,8 +128,12 @@ def preflight_report(db, *, now_utc: datetime) -> dict:
         # coverage, and activation does not proceed on unverified/partial/gapped coverage.
         "coverage": uim_coverage.preflight_section(db, control, now_utc=now_utc),
     }
+    forward = fwd.is_forward_only(control)
+    if forward:
+        report["forward_only"] = forward_only_preflight(db, control, now_utc=now_utc, cutoff=cutoff)
     report["ok"] = bool(
-        report["coverage"]["ok"]
+        (not forward or report["forward_only"]["ok"])
+        and report["coverage"]["ok"]
         and report["indexes"]["ok"]
         and report["integration"]["ok"]
         and report["migration_seeded"]
@@ -114,6 +142,7 @@ def preflight_report(db, *, now_utc: datetime) -> dict:
         and report["consistency"]["ok"]
         and report["rule_revision_ready"]
         and not report["legacy_writer_in_flight"]
+        and not report["legacy_award_inflight"]
         and not report["cancellation_repair_pending"]
         and report["v1_qualified_events"] == 0
     )
@@ -141,6 +170,7 @@ def status_report(db, *, now_utc: datetime) -> dict:
         "v1_qualified_events": db.qualified_events.count_documents({"rule_version": aq.LEGACY_RULE_VERSION}),
         "v2_qualified_events": db.qualified_events.count_documents({"rule_version": aq.RULE_VERSION}),
         "history_limitation": control.get("history_limitation") if control else None,
+        "forward_only": fwd.forward_only_summary(db, control, now_utc=now_utc, live=True),
         "preflight": preflight_report(db, now_utc=now_utc),
     }
 
@@ -164,6 +194,16 @@ def main(argv=None, *, db_factory=None, read_only_db_factory=None, now_fn=_now) 
     release = sub.add_parser("release-legacy-writer", help="recover a crashed legacy barrier after stopping its process")
     release.add_argument("--token", required=True)
     release.add_argument("--acknowledge-writer-stopped", action="store_true")
+    recover = sub.add_parser("recover-legacy-writer", help="clear an EXPIRED legacy-writer lease (never an active one)")
+    recover.add_argument("--token")
+    recover.add_argument("--acknowledge-writer-stopped", action="store_true",
+                         help="required only for a pre-lease token whose liveness cannot be proven")
+    recover.add_argument("--release-awarding", action="store_true",
+                         help="also clear a dead worker's in-flight-award barrier (requires --acknowledge-writer-stopped; "
+                              "awards are idempotent per invitee, so a completed one is skipped on retry)")
+    sub.add_parser("snapshot-launch-cohort", help="idempotently snapshot active pending/manual referral invitees")
+    pf = sub.choices["preflight"]
+    pf.add_argument("--cutoff", help="proposed activation cutoff (ISO with offset); must match the forward-only marker")
 
     cfg = sub.add_parser("configure-source")
     cfg.add_argument("--code-column", required=True)
@@ -223,7 +263,7 @@ def main(argv=None, *, db_factory=None, read_only_db_factory=None, now_fn=_now) 
     vb = sub.add_parser("void-batch")
     vb.add_argument("--upload-batch-id", required=True)
     vb.add_argument("--reason", required=True)
-    for p in (cfg, dcfg, cpol, sync, act, upgrade, release, pause, sub.choices["resume"], sub.choices["cancel-scheduled"], rq, vb):
+    for p in (cfg, dcfg, cpol, sync, act, upgrade, release, recover, sub.choices["snapshot-launch-cohort"], pause, sub.choices["resume"], sub.choices["cancel-scheduled"], rq, vb):
         p.add_argument("--commit", action="store_true", help="write (default: dry run)")
         p.add_argument("--operator", default=os.environ.get("USER") or "unknown")
     args = parser.parse_args(argv)
@@ -245,7 +285,16 @@ def main(argv=None, *, db_factory=None, read_only_db_factory=None, now_fn=_now) 
 
     if args.cmd in ("status", "preflight"):
         db = (read_only_db_factory or _read_only_db)()
-        report = status_report(db, now_utc=now_utc) if args.cmd == "status" else preflight_report(db, now_utc=now_utc)
+        if args.cmd == "preflight" and args.cutoff:
+            try:
+                proposed = _parse_cutoff(args.cutoff)
+            except ValueError as exc:
+                print(f"refused: {exc}", file=sys.stderr)
+                return 2
+        else:
+            proposed = None
+        report = (status_report(db, now_utc=now_utc) if args.cmd == "status"
+                  else preflight_report(db, now_utc=now_utc, cutoff=proposed))
         print(json.dumps(report, indent=2, default=str))
         return 0 if args.cmd == "status" or report["ok"] else 1
 
@@ -254,22 +303,43 @@ def main(argv=None, *, db_factory=None, read_only_db_factory=None, now_fn=_now) 
     mode = control.get("mode") or aq.MODE_DISABLED
     cutoff = aq.launch_cutoff(control)
 
-    if args.cmd == "release-legacy-writer":
-        if not args.acknowledge_writer_stopped:
-            print("refused: requires --acknowledge-writer-stopped; never expire a live writer", file=sys.stderr)
-            return 2
-        if control.get("legacy_writer_token") != args.token:
-            print("refused: writer token changed or absent", file=sys.stderr)
-            return 2
+    if args.cmd in ("release-legacy-writer", "recover-legacy-writer"):
+        state = aq.legacy_writer_state(control, now_utc)
+        if args.cmd == "release-legacy-writer":
+            if not args.acknowledge_writer_stopped:
+                print("refused: requires --acknowledge-writer-stopped; never expire a live writer", file=sys.stderr)
+                return 2
+            if control.get("legacy_writer_token") != args.token:
+                print("refused: writer token changed or absent", file=sys.stderr)
+                return 2
+        awarding = 1 if control.get("legacy_award_inflight") else 0
         if not args.commit:
-            print(json.dumps({"dry_run": True, "would_release_stopped_writer": args.token}))
+            print(json.dumps({"dry_run": True, "writer": state, "award_inflight": control.get("legacy_award_inflight")}, default=str))
+            return 0 if state["in_flight"] or awarding else 2
+        if args.cmd == "recover-legacy-writer" and args.release_awarding:
+            if not args.acknowledge_writer_stopped or state["state"] == aq.WRITER_ACTIVE:
+                print("refused: --release-awarding needs --acknowledge-writer-stopped and no active lease", file=sys.stderr)
+                return 2
+            released = db[aq.CONTROL_COLLECTION].update_one(
+                {"_id": aq.CONTROL_ID, "legacy_award_inflight": control.get("legacy_award_inflight")},
+                {"$unset": {"legacy_award_inflight": ""},
+                 "$push": {"legacy_writer_recoveries": {"released_award_inflight": True, "operator": args.operator,
+                                                        "at": now_utc}}})
+            print(json.dumps({"awarding_released": released.modified_count}))
+            if not state["in_flight"]:
+                return 0
+        result = aq.recover_legacy_writer(db, now_utc=now_utc, operator=args.operator,
+                                          acknowledged_stopped=args.acknowledge_writer_stopped, token=args.token)
+        print(json.dumps({"released": result["recovered"], "writer": result}, default=str))
+        return 0 if result["recovered"] else 2
+
+    if args.cmd == "snapshot-launch-cohort":
+        if not args.commit:
+            print(json.dumps({"dry_run": True, "cohort": fwd.cohort_status(db, control, live=True)}, default=str))
             return 0
-        result = db[aq.CONTROL_COLLECTION].update_one(
-            {"_id": aq.CONTROL_ID, "legacy_writer_token": args.token},
-            {"$unset": {"legacy_writer_token": "", "legacy_writer_started_at": ""},
-             "$push": {"legacy_writer_recoveries": {"token": args.token, "operator": args.operator, "at": now_utc}}})
-        print(json.dumps({"released": bool(result.modified_count)}))
-        return 0 if result.modified_count else 2
+        print(json.dumps({"committed": True, "cohort": fwd.snapshot_launch_cohort(db, now_utc=now_utc, cutoff=cutoff)},
+                         default=str))
+        return 0
 
     if args.cmd == "upgrade-rule":
         if (control.get("mode") != aq.MODE_DISABLED or "launch_cutoff_utc" in control or control.get("legacy_writer_token")
@@ -433,7 +503,14 @@ def main(argv=None, *, db_factory=None, read_only_db_factory=None, now_fn=_now) 
         if args.cmd == "resume" and (cutoff is None or mode != aq.MODE_PAUSED):
             print("refused: resume only applies to a launched, paused rule", file=sys.stderr)
             return 2
-        report = preflight_report(db, now_utc=now_utc)
+        proposed = None
+        if args.cmd == "activate":
+            try:
+                proposed = _parse_cutoff(args.cutoff)
+            except ValueError as exc:
+                print(f"refused: {exc}", file=sys.stderr)
+                return 2
+        report = preflight_report(db, now_utc=now_utc, cutoff=proposed)
         if not report["ok"]:
             print(json.dumps({"refused": "preflight_failed", "preflight": report}, indent=2, default=str))
             return 2
@@ -443,7 +520,7 @@ def main(argv=None, *, db_factory=None, read_only_db_factory=None, now_fn=_now) 
         if mode != aq.MODE_DISABLED:
             print("refused: activation requires disabled mode", file=sys.stderr)
             return 2
-        if control.get("history_policy") == aq.HISTORY_FORWARD and not args.acknowledge_unknown_history:
+        if fwd.is_forward_only(control) and not args.acknowledge_unknown_history:
             print("refused: forward-only activation requires --acknowledge-unknown-history", file=sys.stderr)
             return 2
         try:
@@ -465,13 +542,18 @@ def main(argv=None, *, db_factory=None, read_only_db_factory=None, now_fn=_now) 
         if not args.commit:
             print(json.dumps({"dry_run": True, "would_update": update, "preflight": report}, default=str))
             return 0
-        result = db[aq.CONTROL_COLLECTION].update_one(
-            {"_id": aq.CONTROL_ID, "mode": aq.MODE_DISABLED, "rule_version": aq.RULE_VERSION,
+        cas = {"_id": aq.CONTROL_ID, "mode": aq.MODE_DISABLED, "rule_version": aq.RULE_VERSION,
              "launch_cutoff_utc": {"$exists": False}, "legacy_writer_token": {"$exists": False},
              "migration_lease_token": {"$exists": False}, "source_config": control.get("source_config"),
+             # same document, same atomic step: no legacy award may be in flight
+             "legacy_award_inflight": {"$exists": False},
              "cancelled_cohort_cutoff": {"$exists": False},
              "seed_summary": control.get("seed_summary"), "seed_completed_at": control.get("seed_completed_at"),
-             "history_policy": control.get("history_policy")}, update)
+             "forward_only_marker": control.get("forward_only_marker"),
+             "history_policy": control.get("history_policy")}
+        if fwd.is_forward_only(control):
+            cas["launch_cohort.state"] = fwd.STATE_READY  # snapshot not mid-rebuild at the instant of the CAS
+        result = db[aq.CONTROL_COLLECTION].update_one(cas, update)
         if not result.modified_count:
             print("refused: control changed or writer/migration in flight; rerun preflight", file=sys.stderr)
             return 2
@@ -505,10 +587,14 @@ def main(argv=None, *, db_factory=None, read_only_db_factory=None, now_fn=_now) 
                  "$and": [{"launch_cutoff_utc": {"$gt": now_fn()}}]},
                 {"$set": {"mode": aq.MODE_DISABLED, "updated_at": now_utc,
                           "cancelled_cohort_cutoff": cutoff},
-                 "$unset": {"launch_cutoff_utc": "", "legacy_admission_closed": ""}})
+                 "$unset": {"launch_cutoff_utc": "", "legacy_admission_closed": "",
+                            "launch_handoff_completed_cutoff": "", "launch_handoff_completed_at": ""}})
             if not result.modified_count:
                 return 2
             aq.restore_activation_cohort(db, cutoff=cutoff)
+            # The snapshot belongs to the cancelled cutoff; a later launch rebuilds it from scratch.
+            db[aq.COHORT_COLLECTION].delete_many({})
+            db[aq.CONTROL_COLLECTION].update_one({"_id": aq.CONTROL_ID}, {"$unset": {"launch_cohort": ""}})
             db[aq.CONTROL_COLLECTION].update_one(
                 {"_id": aq.CONTROL_ID, "legacy_writer_token": token, "cancelled_cohort_cutoff": cutoff},
                 {"$unset": {"cancelled_cohort_cutoff": ""}})

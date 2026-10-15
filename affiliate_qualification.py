@@ -49,6 +49,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import re
 import unicodedata
 import uuid
@@ -73,11 +74,16 @@ REGISTRY_COLLECTION = "affiliate_account_registry"
 CONTROL_ID = LEGACY_RULE_VERSION
 
 HISTORY_STRICT = "strict_complete_history"
-HISTORY_FORWARD = "known_history_plus_post_cutoff"
+HISTORY_FORWARD = "forward_only_from_activation_cutoff"
 HISTORY_LIMITATION = (
-    "Historical unknown Account IDs are not fully covered. Uniqueness is guaranteed "
-    "for deterministically seeded accounts and every qualification after cutoff."
+    "Forward-only from activation cutoff: Account ID uniqueness is enforced for the deterministically "
+    "seeded historical identities, every pending/manual referral evaluated under V2 and every future V2 "
+    "referral. Historical identities that could not be resolved are outside guaranteed duplicate coverage; "
+    "this is NOT complete pre-cutoff lifetime Account ID uniqueness. coupon_new_player=1 remains mandatory."
 )
+FORWARD_MARKER_VERSION = "forward_only_marker_v1"
+COHORT_COLLECTION = "affiliate_v2_launch_cohort"
+ABSENCE_REJECTION_REASON = "no_welcome_redemption_in_complete_coverage"  # == uim_coverage.ABSENCE_REASON
 ACTIVE_PENDING_STATUSES = ("pending", "pending_channel", "pending_manual", "manual",
                            "processing", "error", "awaiting_redemption")
 
@@ -224,54 +230,225 @@ def new_rule_active(control: dict | None, now_utc: datetime) -> bool:
     )
 
 
+# Legacy-writer barrier -----------------------------------------------------
+#
+# The token is a *bounded lease*, not a forever-lock. A crashed/killed writer
+# (deploy, OOM, machine restart) never reaches the ``finally`` that releases
+# it; with no expiry the barrier then blocks activation indefinitely. A live
+# writer renews the lease on every loop pass and immediately before each award
+# (``WriterLease.renew``), and the renewal is a compare-and-set on token AND an
+# unexpired lease, so a writer that was suspended past its lease can never
+# renew, and therefore never awards, after recovery has cleared its token.
+# Recovery additionally waits a grace period beyond expiry, so the old and V2
+# writers cannot overlap: activation still requires the token to be absent.
+LEGACY_WRITER_LEASE = timedelta(minutes=10)
+LEGACY_WRITER_RECOVERY_GRACE = timedelta(minutes=5)
+# Tokens written by pre-lease code carry no expiry, so liveness is unprovable;
+# they are recoverable only by an operator who confirms the process is stopped,
+# and only once they are older than any plausible settlement run.
+LEGACY_UNLEASED_MIN_AGE = timedelta(hours=1)
+
+WRITER_NONE = "none"
+WRITER_ACTIVE = "active"
+WRITER_EXPIRED_GRACE = "expired_within_grace"
+WRITER_EXPIRED_RECOVERABLE = "expired_recoverable"
+WRITER_UNLEASED_RECENT = "unleased_recent"
+WRITER_UNLEASED_STALE = "unleased_stale"
+_WRITER_FIELDS = ("legacy_writer_token", "legacy_writer_started_at", "legacy_writer_lease_until",
+                  "legacy_writer_heartbeat_at", "legacy_writer_owner")
+
+
+def legacy_writer_state(control: dict | None, now_utc: datetime) -> dict:
+    """Classify the writer barrier: genuinely active, stale lease, or unprovable."""
+    control = control or {}
+    if not control.get("legacy_writer_token"):
+        return {"state": WRITER_NONE, "in_flight": False, "recoverable": False}
+    now = _aware_utc(now_utc)
+    started = _aware_utc(control.get("legacy_writer_started_at"))
+    lease_until = _aware_utc(control.get("legacy_writer_lease_until"))
+    out = {"in_flight": True, "owner": control.get("legacy_writer_owner"),
+           "started_at": started.isoformat() if started else None,
+           "lease_until": lease_until.isoformat() if lease_until else None,
+           "heartbeat_at": (lambda h: h.isoformat() if h else None)(_aware_utc(control.get("legacy_writer_heartbeat_at"))),
+           "age_seconds": int((now - started).total_seconds()) if started else None}
+    if lease_until is None:
+        old_enough = started is None or now - started >= LEGACY_UNLEASED_MIN_AGE
+        out.update(state=WRITER_UNLEASED_STALE if old_enough else WRITER_UNLEASED_RECENT,
+                   recoverable=old_enough, requires_operator_ack=True)
+    elif now <= lease_until:
+        out.update(state=WRITER_ACTIVE, recoverable=False)
+    elif now - lease_until < LEGACY_WRITER_RECOVERY_GRACE:
+        out.update(state=WRITER_EXPIRED_GRACE, recoverable=False)
+    else:
+        out.update(state=WRITER_EXPIRED_RECOVERABLE, recoverable=True, requires_operator_ack=False)
+    return out
+
+
+class WriterLease:
+    """Handle on an admitted writer token. Truthy while admitted."""
+
+    def __init__(self, db, token: str, ttl: timedelta = LEGACY_WRITER_LEASE):
+        self.db, self.token, self.ttl, self.lost = db, token, ttl, False
+
+    def __bool__(self) -> bool:
+        return True
+
+    def renew(self, now_utc: datetime | None = None, also_unset: tuple = ()) -> bool:
+        """Extend the lease iff this token is still the owner and unexpired."""
+        now = _aware_utc(now_utc) if now_utc else datetime.now(timezone.utc)
+        update = {"$set": {"legacy_writer_lease_until": now + self.ttl, "legacy_writer_heartbeat_at": now}}
+        if also_unset:
+            update["$unset"] = {f: "" for f in also_unset}
+        res = self.db[CONTROL_COLLECTION].update_one(
+            {"_id": CONTROL_ID, "legacy_writer_token": self.token, "legacy_writer_lease_until": {"$gt": now}},
+            update)
+        # matched, not modified: a renewal within the same clock tick rewrites identical values.
+        if not res.matched_count:
+            self.lost = True
+            logger.error("[AFF_QUAL][WRITER_LEASE_LOST] a legacy writer lost its lease; it must stop writing")
+        return bool(res.matched_count)
+
+
+def _begin_award(self, now_utc: datetime | None = None) -> bool:
+    """Atomically open the in-flight-award barrier on the control document.
+
+    ONE compare-and-set that requires this exact token with an unexpired lease, legacy admission still
+    open, no cutoff, and no other award in flight; it renews the lease, invalidates the seed and sets
+    ``legacy_award_inflight``. Activation's own CAS on the same document requires that marker to be
+    absent, so the two are mutually exclusive on one document: either the marker lands first (activation
+    refuses) or activation lands first (this refuses). A worker paused after this point therefore holds
+    activation off instead of being overtaken; a dead worker's marker is released only by an operator.
+    """
+    now = _aware_utc(now_utc) if now_utc else datetime.now(timezone.utc)
+    res = self.db[CONTROL_COLLECTION].update_one(
+        {"_id": CONTROL_ID, "legacy_writer_token": self.token, "legacy_writer_lease_until": {"$gt": now},
+         "legacy_admission_closed": {"$ne": True}, "launch_cutoff_utc": {"$exists": False},
+         "legacy_award_inflight": {"$exists": False}},
+        {"$set": {"legacy_writer_lease_until": now + self.ttl, "legacy_writer_heartbeat_at": now,
+                  "legacy_award_inflight": {"token": self.token, "since": now}},
+         "$unset": {"seed_completed_at": ""}})
+    if not res.matched_count:
+        self.lost = True
+        logger.error("[AFF_QUAL][AWARD_FENCE_REFUSED] legacy award not admitted (lease, admission or in-flight barrier)")
+    return bool(res.matched_count)
+
+
+def _end_award(self) -> None:
+    self.db[CONTROL_COLLECTION].update_one({"_id": CONTROL_ID, "legacy_award_inflight.token": self.token},
+                                           {"$unset": {"legacy_award_inflight": ""}})
+
+
+WriterLease.begin_award = _begin_award
+WriterLease.end_award = _end_award
+
+
+def _lease_fields(token: str, now_utc: datetime) -> dict:
+    now = _aware_utc(now_utc)
+    return {"legacy_writer_token": token, "legacy_writer_started_at": now_utc,
+            "legacy_writer_lease_until": now + LEGACY_WRITER_LEASE, "legacy_writer_heartbeat_at": now,
+            "legacy_writer_owner": f"{os.environ.get('FLY_MACHINE_ID') or os.uname().nodename}:{os.getpid()}"}
+
+
+def recover_legacy_writer(db, *, now_utc: datetime, operator: str = "auto",
+                          acknowledged_stopped: bool = False, token: str | None = None) -> dict:
+    """Clear a dead writer's token. Never touches an active or in-grace lease.
+
+    Compare-and-set on the exact token and on the expiry predicate itself, so
+    a writer that renewed in the meantime is not released. Pre-lease tokens
+    additionally need ``acknowledged_stopped``.
+    """
+    col = db[CONTROL_COLLECTION]
+    control = col.find_one({"_id": CONTROL_ID}) or {}
+    info = legacy_writer_state(control, now_utc)
+    cur = control.get("legacy_writer_token")
+    if not info["in_flight"]:
+        return {"recovered": False, "reason": "no_writer", **info}
+    if token is not None and token != cur:
+        return {"recovered": False, "reason": "token_changed", **info}
+    if not info["recoverable"]:
+        return {"recovered": False, "reason": "writer_not_recoverable", **info}
+    now = _aware_utc(now_utc)
+    if info["state"] == WRITER_EXPIRED_RECOVERABLE:
+        guard = {"legacy_writer_lease_until": {"$lt": now - LEGACY_WRITER_RECOVERY_GRACE}}
+    else:
+        if not acknowledged_stopped:
+            return {"recovered": False, "reason": "requires_acknowledgement_writer_stopped", **info}
+        guard = {"legacy_writer_lease_until": {"$exists": False}}
+        if control.get("legacy_writer_started_at") is not None:
+            guard["legacy_writer_started_at"] = {"$lte": now - LEGACY_UNLEASED_MIN_AGE}
+    res = col.update_one(
+        {"_id": CONTROL_ID, "legacy_writer_token": cur, **guard},
+        {"$unset": {f: "" for f in _WRITER_FIELDS},
+         "$push": {"legacy_writer_recoveries": {"token": cur, "state": info["state"], "operator": operator,
+                                                "at": now_utc, "started_at": control.get("legacy_writer_started_at"),
+                                                "lease_until": control.get("legacy_writer_lease_until")}}})
+    if res.modified_count:
+        logger.warning("[AFF_QUAL][WRITER_RECOVERED] state=%s operator=%s", info["state"], operator)
+    return {"recovered": bool(res.modified_count), "reason": None if res.modified_count else "token_changed", **info}
+
+
+def _admit_writer(db, query: dict, *, now_utc: datetime):
+    """CAS the writer token; one auto-recovery attempt for an expired lease."""
+    col = db[CONTROL_COLLECTION]
+    for attempt in (0, 1):
+        token = uuid.uuid4().hex
+        locked = col.find_one_and_update(
+            {**query, "legacy_writer_token": {"$exists": False}}, {"$set": _lease_fields(token, now_utc)},
+            return_document=ReturnDocument.AFTER)
+        if locked is not None:
+            return token
+        if attempt == 0 and not recover_legacy_writer(db, now_utc=now_utc).get("recovered"):
+            return None
+    return None
+
+
+def _release_writer(db, token: str) -> None:
+    db[CONTROL_COLLECTION].update_one({"_id": CONTROL_ID, "legacy_award_inflight.token": token},
+                                      {"$unset": {"legacy_award_inflight": ""}})
+    db[CONTROL_COLLECTION].update_one({"_id": CONTROL_ID, "legacy_writer_token": token},
+                                      {"$unset": {f: "" for f in _WRITER_FIELDS}})
+
+
 @contextmanager
 def legacy_writer_guard(db, *, now_utc: datetime):
     """Serialize legacy settlement/backfill with the atomic activation CAS.
 
-    No expiring lease: a suspended worker must never wake after a timeout and
-    award across activation. A crash fails closed until an operator confirms
-    that exact writer is stopped and releases its token. The deployed switch
-    is also initialized here for installations without a control document.
+    Yields a :class:`WriterLease` (truthy) when admitted, else ``False``. The
+    lease is bounded (see above): a suspended worker cannot wake and award
+    after expiry, and a crashed one self-heals after expiry + grace, while a
+    genuinely active writer is never displaced. The deployed switch is also
+    initialized here for installations without a control document.
     """
     col = db[CONTROL_COLLECTION]
     col.update_one({"_id": CONTROL_ID}, {"$setOnInsert": {"mode": MODE_DISABLED}}, upsert=True)
-    token = uuid.uuid4().hex
-    locked = col.find_one_and_update(
-        {"_id": CONTROL_ID, "legacy_writer_token": {"$exists": False},
-         "legacy_admission_closed": {"$ne": True},
-         "$or": [{"launch_cutoff_utc": {"$exists": False}},
-                 {"launch_cutoff_utc": {"$gt": now_utc}}]},
-        {"$set": {"legacy_writer_token": token, "legacy_writer_started_at": now_utc}},
-        return_document=ReturnDocument.AFTER,
-    )
+    token = _admit_writer(
+        db, {"_id": CONTROL_ID, "legacy_admission_closed": {"$ne": True},
+             "$and": [{"$or": [{"launch_cutoff_utc": {"$exists": False}}, {"launch_cutoff_utc": {"$gt": now_utc}}]},
+                      # mutual exclusion with a running migration (its lease is held for the whole
+                      # plan/seed/complete interval, and an expired one no longer blocks)
+                      {"$or": [{"migration_lease_until": {"$exists": False}},
+                               {"migration_lease_until": {"$lt": now_utc}}]}]},
+        now_utc=now_utc)
     try:
-        yield locked is not None
+        yield WriterLease(db, token) if token else False
     finally:
-        if locked is not None:
-            col.update_one({"_id": CONTROL_ID, "legacy_writer_token": token},
-                           {"$unset": {"legacy_writer_token": "", "legacy_writer_started_at": ""}})
+        if token:
+            _release_writer(db, token)
 
 
 @contextmanager
 def cohort_writer_guard(db, *, cutoff: datetime, now_utc: datetime):
-    """Use the same non-expiring control barrier for marking/cancellation.
+    """Use the same bounded control barrier for marking/cancellation.
 
     Matching the current cutoff rejects a stale scheduler snapshot. Sharing
     the legacy token also makes existing stopped-writer recovery applicable.
     """
-    token = uuid.uuid4().hex
-    locked = db[CONTROL_COLLECTION].find_one_and_update(
-        {"_id": CONTROL_ID, "launch_cutoff_utc": cutoff,
-         "legacy_writer_token": {"$exists": False}},
-        {"$set": {"legacy_writer_token": token, "legacy_writer_started_at": now_utc}},
-        return_document=ReturnDocument.AFTER)
+    token = _admit_writer(db, {"_id": CONTROL_ID, "launch_cutoff_utc": cutoff}, now_utc=now_utc)
     try:
-        yield token if locked is not None else None
+        yield token
     finally:
-        if locked is not None:
-            db[CONTROL_COLLECTION].update_one(
-                {"_id": CONTROL_ID, "legacy_writer_token": token},
-                {"$unset": {"legacy_writer_token": "", "legacy_writer_started_at": ""}})
+        if token:
+            _release_writer(db, token)
 
 
 def mark_activation_cohort(db, *, control: dict, now_utc: datetime) -> int:
@@ -281,7 +458,21 @@ def mark_activation_cohort(db, *, control: dict, now_utc: datetime) -> int:
     with cohort_writer_guard(db, cutoff=cutoff, now_utc=now_utc) as token:
         if token is None:
             return 0
-        return _mark_activation_cohort(db, control=control, now_utc=now_utc)
+        marked = _mark_activation_cohort(db, control=control, now_utc=now_utc)
+        # Top up the launch-cohort snapshot under the same barrier. Replayable:
+        # the scheduler repeats this hand-off until it completes after a crash.
+        import affiliate_forward_only
+
+        affiliate_forward_only.snapshot_launch_cohort(db, now_utc=now_utc, cutoff=cutoff)
+        # Completion is recorded only by a pass performed at/after the cutoff (the final scan of the
+        # population); passes before it keep marking every active row, so a referral that becomes active
+        # after the last pre-cutoff pass is still caught by the first pass at the cutoff.
+        if (_aware_utc(now_utc) >= cutoff
+                and _aware_utc((control or {}).get("launch_handoff_completed_cutoff")) != cutoff):
+            db[CONTROL_COLLECTION].update_one(
+                {"_id": CONTROL_ID, "launch_cutoff_utc": cutoff},
+                {"$set": {"launch_handoff_completed_cutoff": cutoff, "launch_handoff_completed_at": now_utc}})
+        return marked
 
 
 def restore_activation_cohort(db, *, cutoff: datetime) -> None:
@@ -308,6 +499,17 @@ def repair_cancelled_cohort(db) -> None:
         {"$unset": {"cancelled_cohort_cutoff": ""}})
 
 
+def handoff_complete(control: dict | None, now_utc: datetime) -> bool:
+    """True once the launch hand-off (marking + cohort top-up) finished for THIS cutoff AND the cutoff has
+    arrived. From then on the population is closed: only referrals created at/after the cutoff are
+    stamped, so a pre-cutoff terminal referral reopened later (e.g. by official_channel_reopen_audit) is
+    not pulled in. Before the cutoff (scheduled activation) every active referral is still in scope: it
+    will be active at the cutoff."""
+    cutoff = launch_cutoff(control)
+    return (cutoff is not None and _aware_utc(now_utc) >= cutoff
+            and _aware_utc((control or {}).get("launch_handoff_completed_cutoff")) == cutoff)
+
+
 def _mark_activation_cohort(db, *, control: dict, now_utc: datetime) -> int:
     """Repeatable hand-off after the switch CAS; never rewrite awarded history.
 
@@ -318,9 +520,13 @@ def _mark_activation_cohort(db, *, control: dict, now_utc: datetime) -> int:
     if launch_cutoff(control) is None:
         return 0
     marked = 0
+    closed = handoff_complete(control, now_utc)
     for status in ACTIVE_PENDING_STATUSES:
+        flt = {"status": status, "qualification_rule_version": {"$ne": RULE_VERSION}}
+        if closed:
+            flt["created_at_utc"] = {"$gte": launch_cutoff(control)}
         result = db.pending_referrals.update_many(
-            {"status": status, "qualification_rule_version": {"$ne": RULE_VERSION}},
+            flt,
             {"$set": {"status": PENDING_AWAITING_REDEMPTION, "activation_prior_status": status,
                       "qualification_rule_version": RULE_VERSION,
                       "activation_cutoff_utc": launch_cutoff(control), "awaiting_redemption_since": now_utc},
@@ -330,15 +536,22 @@ def _mark_activation_cohort(db, *, control: dict, now_utc: datetime) -> int:
     return marked
 
 
-def invalidate_history_seed(db) -> None:
+def invalidate_history_seed(db, lease: "WriterLease | None" = None, now_utc: datetime | None = None) -> bool:
     """A legacy writer invalidates the seed BEFORE it can change history.
 
     Activation's CAS includes seed_completed_at, so a worker that finishes
     between preflight and the CAS cannot leave a stale coverage marker usable.
-    This call runs inside legacy_writer_guard, never after activation.
+    This call runs inside legacy_writer_guard, never after activation. Given
+    the writer's lease it is also the fence immediately before an award: it
+    returns False (and invalidates nothing) when the lease is lost.
     """
+    if lease is not None:
+        # ONE compare-and-set on this lease's exact token and an unexpired lease: renews it and
+        # invalidates the seed together, and its match result (not a prior renewal) is the verdict.
+        return lease.begin_award(now_utc)
     db[CONTROL_COLLECTION].update_one({"_id": CONTROL_ID, "legacy_writer_token": {"$exists": True}},
                                      {"$unset": {"seed_completed_at": ""}})
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -1278,7 +1491,8 @@ class DbLookup:
         return list(
             self.db.pending_referrals.find(
                 {"invitee_user_id": int(invitee_id)},
-                {"inviter_user_id": 1, "status": 1, "revoked_reason": 1, "created_at_utc": 1, "destination_type": 1},
+                {"inviter_user_id": 1, "status": 1, "revoked_reason": 1, "created_at_utc": 1, "destination_type": 1,
+                 "qualification_reason": 1, "qualification_rule_version": 1},
             ).sort("created_at_utc", 1)
         )
 
@@ -1404,8 +1618,15 @@ def _finalize(db, evidence: dict, status: str, reason: str | None, *, now_utc: d
     # referral_revoked event is manufactured for a never-qualified invitee.
     invitee = fields.get("invitee_id") or (evidence.get("recipient_resolution") or {}).get("user_id")
     if invitee and status in (EV_REVIEW, EV_REJECTED, EV_DUPLICATE_ACCOUNT):
+        flt = {"invitee_user_id": invitee, "status": {"$in": list(ACTIVE_PENDING_STATUSES)}}
+        control = get_control(db)
+        if handoff_complete(control, now_utc):
+            # The population is closed: a verdict never enrols a pre-cutoff referral that was not already a
+            # member (e.g. a historical row reopened after launch); it only updates members/future referrals.
+            flt["$or"] = [{"qualification_rule_version": RULE_VERSION},
+                          {"created_at_utc": {"$gte": launch_cutoff(control)}}]
         db.pending_referrals.update_many(
-            {"invitee_user_id": invitee, "status": {"$in": list(ACTIVE_PENDING_STATUSES)}},
+            flt,
             {"$set": {"status": PENDING_AWAITING_REDEMPTION if status == EV_REVIEW else "rejected",
                       "qualification_rule_version": RULE_VERSION, "qualification_outcome": status,
                       "qualification_reason": reason, "qualification_checked_at": now_utc}},
@@ -1560,8 +1781,22 @@ def assess_evidence(evidence: dict, *, control: dict, now_utc: datetime, lookup)
     # another active row exists, attribution still stays with the ORIGINAL
     # inviter below; never redirect an old attribution to a later inviter.
     pending_rows = lookup.pending_referrals(invitee_id)
-    if (not existing_q and launch_cutoff(control) is not None and pending_rows
-            and not any(r.get("status") in ACTIVE_PENDING_STATUSES for r in pending_rows)):
+    # Rollout membership is read from the referral rows themselves, never from the cohort snapshot (which
+    # may be stale during the activation window). A row carries qualification_rule_version=V2 only if it
+    # was active when activation marked it, was parked, or was decided under V2 while active, so a later V2
+    # status change (e.g. a rule rejection followed by a supported requeue) cannot erase membership;
+    # referrals created at/after the cutoff are future referrals and always in scope. An absence-based
+    # rejection is the one decision deliberately never reopened automatically.
+    cutoff_at = launch_cutoff(control)
+    is_member = any(r.get("qualification_rule_version") == RULE_VERSION
+                    or (cutoff_at is not None and (_aware_utc(r.get("created_at_utc")) or cutoff_at - timedelta(days=1)) >= cutoff_at)
+                    for r in pending_rows)
+    in_cohort = is_member and not any(r.get("qualification_reason") == ABSENCE_REJECTION_REASON for r in pending_rows)
+    # While the hand-off is still running an active row is in scope (it will be stamped); once it is
+    # complete, being active is no longer enough: a reopened pre-cutoff referral is not a member.
+    active_in_scope = (not handoff_complete(control, now_utc)
+                       and any(r.get("status") in ACTIVE_PENDING_STATUSES for r in pending_rows))
+    if (not existing_q and not in_cohort and not active_in_scope and cutoff_at is not None and pending_rows):
         return verdict(EV_REVIEW, "referral_not_active_at_rollout", invitee_id=invitee_id)
 
     attribution = resolve_attribution(lookup, invitee_id=invitee_id, redeemed_at=redeemed_at)
@@ -1597,6 +1832,12 @@ def evaluate_evidence(db, evidence: dict, *, control: dict, now_utc: datetime) -
     # Workers can hold an earlier snapshot while another extractor observes a
     # correction. Re-read the canonical row before making any award decision.
     evidence = db[EVIDENCE_COLLECTION].find_one({"_id": evidence["_id"]}) or evidence
+    # Membership depends on the hand-off completion marker, which a concurrent marking pass may record
+    # while a long batch is running: read it fresh for every decision instead of trusting the caller's snapshot.
+    fresh = get_control(db) or {}
+    control = {**control, **{k: fresh[k] for k in ("launch_handoff_completed_cutoff",) if k in fresh}}
+    if "launch_handoff_completed_cutoff" not in fresh:
+        control.pop("launch_handoff_completed_cutoff", None)
     if evidence.get("source_row_ids") and _code_from_source_rows(db, evidence, control.get("source_config")) is None:
         return _finalize(db, evidence, EV_REVIEW, "source_row_unavailable", now_utc=now_utc)
     a = assess_evidence(evidence, control=control, now_utc=now_utc, lookup=DbLookup(db))
@@ -1783,7 +2024,10 @@ def process_pending_evidence(db, *, now_utc: datetime, control: dict | None = No
                 "$or": [{"lease_until": {"$exists": False}}, {"lease_until": {"$lt": now_utc}}],
             },
             {"$set": {"lease_until": now_utc + EVIDENCE_LEASE}, "$inc": {"attempts": 1}},
-            sort=[("created_at", 1)],
+            # Earliest redemption first (then arrival, then id): when several V2
+            # candidates share one account, the same deterministic order the
+            # preview simulates decides who owns it, not the sync arrival order.
+            sort=[("redeemed_at", 1), ("created_at", 1), ("_id", 1)],
             return_document=ReturnDocument.AFTER,
         )
         if not evidence:
@@ -1859,14 +2103,20 @@ def park_pending_referral(db, *, pending_id, invitee_user_id, inviter_user_id, n
     checks waits for verified redemption instead of being awarded. Join
     tracking is untouched; the invitee lock becomes non-blocking exactly as
     a legacy revocation would leave it."""
+    control = get_control(db)
+    row = db.pending_referrals.find_one({"_id": pending_id}, {"created_at_utc": 1}) or {}
+    created = _aware_utc(row.get("created_at_utc"))
+    cutoff = launch_cutoff(control)
+    # After the hand-off only post-cutoff referrals join the V2 population; a reopened historical row is
+    # parked (not awarded) but not stamped as a rollout member.
+    stamp = not handoff_complete(control, now_utc) or (created is not None and cutoff is not None and created >= cutoff)
+    fields = {"status": PENDING_AWAITING_REDEMPTION, "awaiting_redemption_since": now_utc}
+    if stamp:
+        fields["qualification_rule_version"] = RULE_VERSION
     db.pending_referrals.update_one(
         {"_id": pending_id},
         {
-            "$set": {
-                "status": PENDING_AWAITING_REDEMPTION,
-                "awaiting_redemption_since": now_utc,
-                "qualification_rule_version": RULE_VERSION,
-            },
+            "$set": fields,
             "$unset": {"processing_by": "", "processing_at_utc": "", "processing_at": ""},
         },
     )
