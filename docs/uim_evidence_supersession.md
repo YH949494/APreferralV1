@@ -83,9 +83,11 @@ guard it trips), `excluded_any_guard`, `evidence_total` and `evidence_by_source_
 under a different source/rule_version). Registry / qualified-event ownership is reported per document as
 `skipped_has_effects`.
 **Mismatch refusal.** On the first page, zero candidates while the preview still reports more repairable legacy reasons
-(`redeemed_at_timezone_unverified`, `conflicting_source_observations`, `seven_day_data_incomplete`) than guard-protected
-evidence can account for returns `ok=false`, `error=candidate_selection_preview_mismatch` (CLI exit 1) with
-`preview_repairable_legacy_reasons` - never a silent no-op.
+(`redeemed_at_timezone_unverified`, `conflicting_source_observations`, `seven_day_data_incomplete`) returns
+`ok=false`, `error=candidate_selection_preview_mismatch` (CLI exit 1) when any pending source record has no in-scope
+evidence document. The check is by `source_ref` (a guard-protected document explains only its own record, never
+another's), bounded by `--max-scan-rows`, and reports `source_records_without_evidence` plus masked samples - never a
+silent no-op. A repair also unsets `lease_until`, so the evaluator (which selects an absent or expired lease) picks it up.
 
 Interpreting the preview afterwards: `unverified_completeness_synced_rows` is a raw count of every historical synced
 row (including superseded ones) and is informational; the decision-relevant figure is

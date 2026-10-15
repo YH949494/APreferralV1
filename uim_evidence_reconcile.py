@@ -101,6 +101,24 @@ def _guard_diagnostics(db, now_utc: datetime) -> dict:
     }
 
 
+def _refs_without_scoped_evidence(db, config: dict, now_utc: datetime, max_scan_rows: int):
+    """Identity-level correlation: source records whose folded observation is one the preview reports as
+    review-pending (final not attested, or observations disagree) but that have NO in-scope evidence document at all.
+    A guard-protected document explains only its own source_ref. ``(None, n)`` = scan cap exceeded."""
+    folded, scanned = _replay(db, config, None, now_utc=now_utc, max_scan_rows=max_scan_rows)
+    if folded is None:
+        return None, scanned
+    pending = {ref: f for ref, f in folded.items()
+               if not f.get("_source_removed") and (f.get("_conflicting_observation") or not aq.observation_attested(f))}
+    have: set[str] = set()
+    refs = list(pending)
+    for i in range(0, len(refs), 1000):
+        have.update(d["source_ref"] for d in db[aq.EVIDENCE_COLLECTION].find(
+            {**_scope_filter(), "source_ref": {"$in": refs[i:i + 1000]}}, {"source_ref": 1}))
+    missing = [pending[r] for r in refs if r not in have]
+    return missing, scanned
+
+
 def _preview_repairable_legacy(db, config: dict, now_utc: datetime) -> dict:
     """The read-only Qualification Preview's count of review reasons this command exists to repair."""
     from affiliate_qualification_preview import build_preview
@@ -132,8 +150,9 @@ def _has_effects(db, evidence_id) -> bool:
                 or db[aq.REGISTRY_COLLECTION].find_one({"evidence_id": evidence_id}, {"_id": 1}))
 
 
-def _replay(db, config: dict, wanted: set[str], *, now_utc: datetime, max_scan_rows: int) -> tuple[dict | None, int]:
-    """source_ref -> folded final observation, for the wanted refs only. ``(None, n)`` = scan cap exceeded."""
+def _replay(db, config: dict, wanted: set[str] | None, *, now_utc: datetime, max_scan_rows: int) -> tuple[dict | None, int]:
+    """source_ref -> folded final observation, for the wanted refs only (every ref when ``wanted`` is None).
+    ``(None, n)`` = scan cap exceeded."""
     folded: dict[str, dict] = {}
     scanned = 0
     for _batch_id, row in aq.iter_committed_source_rows(db, config):
@@ -147,7 +166,7 @@ def _replay(db, config: dict, wanted: set[str], *, now_utc: datetime, max_scan_r
         if not obs["code"]:
             continue
         doc = aq.build_evidence_doc(source=aq.SOURCE_DATABOT_UIM, recipient={}, now_utc=now_utc, **obs)
-        if doc["source_ref"] not in wanted:
+        if wanted is not None and doc["source_ref"] not in wanted:
             continue
         aq.fold_observation(folded, doc, removed=obs.get("observation") == aq.OBS_REMOVED)
     return folded, scanned
@@ -175,14 +194,23 @@ def reconcile(db, *, config: dict | None, now_utc: datetime, commit: bool = Fals
             # An empty first page while the preview still reports repairable legacy reasons is a mismatch, never
             # "nothing to do": the candidate selection and the preview disagree about the same evidence.
             expected = _preview_repairable_legacy(db, config, now_utc)
-            # Records a guard deliberately protects (decided, leased, voided, ...) explain preview reasons for
-            # themselves; only the surplus is a contradiction.
-            if sum(expected.values()) > out["candidate_guards"]["excluded_any_guard"]:
+            if expected:
+                # A guard-protected document explains only the preview reason of its OWN source record, so correlate
+                # by source_ref, not by count: any pending source record without in-scope evidence is a mismatch.
+                missing, scanned = _refs_without_scoped_evidence(db, config, now_utc, int(max_scan_rows))
+                out["scanned_source_rows"] = scanned
                 out["preview_repairable_legacy_reasons"] = expected
-                return {**out, "ok": False, "error": "candidate_selection_preview_mismatch",
-                        "detail": "no candidate evidence, but the preview reports more repairable legacy reasons "
-                                  "than guard-protected evidence accounts for; see candidate_guards "
-                                  "(excluded_by_guard, evidence_by_source_rule_status)"}
+                if missing is None:
+                    return {**out, "ok": False, "error": "scan_exceeds_max_scan_rows"}
+                if missing:
+                    out["source_records_without_evidence"] = len(missing)
+                    out["samples"] = {"source_records_without_evidence": [
+                        {"code": f.get("code_masked"), "account": f.get("account_key_masked")}
+                        for f in missing[:SAMPLE_SIZE]]}
+                    return {**out, "ok": False, "error": "candidate_selection_preview_mismatch",
+                            "detail": "no candidate evidence, the preview reports repairable legacy reasons, and "
+                                      "source records with no in-scope evidence exist; see candidate_guards "
+                                      "(excluded_by_guard, evidence_by_source_rule_status)"}
         return out
     folded, scanned = _replay(db, config, {c["source_ref"] for c in candidates}, now_utc=now_utc,
                               max_scan_rows=int(max_scan_rows))
@@ -239,6 +267,9 @@ def reconcile(db, *, config: dict | None, now_utc: datetime, commit: bool = Fals
                 entry["cleared_conflict_reason"] = ev.get("source_conflict_reason")
                 entry["cleared_conflict_at"] = ev.get("source_conflict_at")
             update["$set"]["evidence_basis"] = {**(final.get("evidence_basis") or {}), "reconciled_run": run_id}
+            # An absent lease is what the evaluator selects on; a null or expired one would leave the repaired
+            # (status=received) evidence permanently unevaluated.
+            update["$unset"]["lease_until"] = ""
             applied = db[aq.EVIDENCE_COLLECTION].update_one(
                 {**_unguarded(now_utc), "_id": ev["_id"], "status": ev.get("status"),
                  "observation_fingerprint": ev.get("observation_fingerprint"),

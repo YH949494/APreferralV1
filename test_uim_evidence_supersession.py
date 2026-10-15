@@ -605,3 +605,44 @@ def test_nothing_to_repair_is_still_ok_and_a_resumed_empty_page_is_not_a_mismatc
     rec.reconcile(w.db, config=DATABOT_CONFIG, now_utc=NOW, commit=True)
     again = rec.reconcile(w.db, config=DATABOT_CONFIG, now_utc=NOW, commit=True, after_id=evidence(w)[0]["_id"])
     assert again["ok"] is True and again["candidates"] == 0
+
+
+def test_repair_clears_null_lease_so_the_evaluator_picks_the_evidence_up():
+    """The evaluator selects ``lease_until`` absent or < now; a surviving null would strand the repaired evidence."""
+    w, ev = _prod_shape_world()
+    w.db[aq.EVIDENCE_COLLECTION].update_one({"_id": ev["_id"]}, {"$set": {"lease_until": None}})
+    assert rec.reconcile(w.db, config=DATABOT_CONFIG, now_utc=NOW, commit=True)["actions"] == {"repaired": 1}
+    [fixed] = evidence(w)
+    assert fixed["status"] == aq.EV_RECEIVED and "lease_until" not in fixed
+    claimed = w.db[aq.EVIDENCE_COLLECTION].find_one(
+        {"status": aq.EV_RECEIVED, "rule_version": aq.RULE_VERSION,
+         "$or": [{"lease_until": {"$exists": False}}, {"lease_until": {"$lt": NOW}}]})
+    assert claimed and claimed["_id"] == ev["_id"]
+
+
+def test_unrelated_protected_evidence_cannot_mask_a_record_that_has_no_evidence():
+    """Correlation is by source_ref, not by counts: one voided in-scope document must not excuse a different
+    pending source record whose evidence is missing."""
+    w = world(2, active=True)
+    feed = FakeFeed()
+    feed.add_batch([legacy(code="WELC11", account="a0"), legacy(code="WELC12", account="a1")])
+    sync(w, feed)
+    extract(w)
+    docs = {d["recipient_resolution"]["user_id"]: d for d in evidence(w)}
+    w.db[aq.EVIDENCE_COLLECTION].update_one({"_id": docs[11]["_id"]}, {"$set": {"voided_at": NOW}})
+    w.db[aq.EVIDENCE_COLLECTION].delete_one({"_id": docs[12]["_id"]})
+    out = rec.reconcile(w.db, config=DATABOT_CONFIG, now_utc=NOW)
+    assert out["candidates"] == 0 and out["candidate_guards"]["excluded_any_guard"] == 1
+    assert out["ok"] is False and out["error"] == "candidate_selection_preview_mismatch"
+    assert out["source_records_without_evidence"] == 1 and len(out["samples"]["source_records_without_evidence"]) == 1
+
+
+def test_protected_evidence_for_the_same_record_still_explains_its_preview_reason():
+    w = world(1, active=True)
+    feed = FakeFeed()
+    feed.add_batch([legacy()])
+    sync(w, feed)
+    extract(w)
+    w.db[aq.EVIDENCE_COLLECTION].update_many({}, {"$set": {"voided_at": NOW}})
+    out = rec.reconcile(w.db, config=DATABOT_CONFIG, now_utc=NOW)
+    assert out["ok"] is True and out["candidates"] == 0 and out["candidate_guards"]["excluded_by_guard"]["voided"] == 1
