@@ -676,3 +676,30 @@ def test_cohort_rebuild_upserts_invitees_marked_for_the_cutoff_even_if_already_d
     w.db[aq.COHORT_COLLECTION].delete_many({})                         # e.g. never created before V2 decided it
     fwd.snapshot_launch_cohort(w.db, now_utc=NOW, cutoff=aq.launch_cutoff(aq.get_control(w.db)))
     assert w.db[aq.COHORT_COLLECTION].find_one({"_id": 301})
+
+
+def test_migration_is_blocked_by_a_retained_award_barrier_at_acquisition_and_completion(monkeypatch):
+    w = World(mode=aq.MODE_DISABLED, cutoff=None)
+    w.db.qualified_events.insert_one({"invitee_id": 999, "referrer_id": 900, "qualified_at": CUTOFF})
+    w.upload([w.row("coverage", "coverage-account", NOW)])
+    kwargs = dict(apply=True, seed_from_linkage=False, now_utc=NOW, history_policy=aq.HISTORY_FORWARD,
+                  acknowledge_unknown_history=True, forward_only=forward_inputs(w.db))
+    barrier = {"legacy_award_inflight": {"token": "paused-worker", "since": NOW}}
+    w.db[aq.CONTROL_COLLECTION].update_one({}, {"$set": barrier})        # token recovered, barrier retained
+    out = migration.run(w.db, **kwargs)
+    assert out["apply_refused"] == ["migration_lease_unavailable_or_control_changed"] and not out["seed_marker_written"]
+    w.db[aq.CONTROL_COLLECTION].update_one({}, {"$unset": {"legacy_award_inflight": ""}})
+    real, calls = migration.build_plan, []
+
+    def barrier_lands_before_completion(*a, **k):                        # a worker opens an award mid-migration
+        plan = real(*a, **k)
+        calls.append(1)
+        if len(calls) == 2:                                              # the final re-plan, lease already held
+            w.db[aq.CONTROL_COLLECTION].update_one({}, {"$set": barrier})
+        return plan
+
+    monkeypatch.setattr(migration, "build_plan", barrier_lands_before_completion)
+    out = migration.run(w.db, **kwargs)
+    assert len(calls) == 2 and out["apply_refused"] == ["completion_verification_failed"]
+    assert not out["seed_marker_written"] and not aq.get_control(w.db).get("seed_completed_at")
+    assert "forward_only_marker" not in aq.get_control(w.db)
