@@ -732,3 +732,29 @@ def test_a_stale_snapshot_document_cannot_make_a_terminal_pre_cutoff_invitee_eli
     w.db[aq.COHORT_COLLECTION].update_one({"_id": 101}, {"$setOnInsert": {"snapshotted_at": NOW}}, upsert=True)
     assert (ev(w, 101)["status"], ev(w, 101)["reason"]) == (aq.EV_REVIEW, "referral_not_active_at_rollout")
     assert w.db.qualified_events.count_documents({"invitee_id": 101}) == 0
+
+
+def test_a_pre_cutoff_referral_reopened_after_launch_is_not_pulled_into_v2(monkeypatch):
+    w = forward_world()
+    add(w, 101, "acct-101", status="revoked")                          # terminal before the launch
+    add(w, 102, "acct-102", status="pending")                          # active at the launch
+    go(w, monkeypatch)
+    control = aq.get_control(w.db)
+    assert aq.handoff_complete(control)
+    assert ev(w, 102)["status"] == aq.EV_QUALIFIED
+    assert ev(w, 101)["reason"] == "referral_not_active_at_rollout"
+    # official_channel_reopen_audit --commit later returns the historical row to pending ...
+    w.db.pending_referrals.update_one({"invitee_user_id": 101}, {"$set": {"status": "pending"},
+                                                                  "$unset": {"qualification_rule_version": ""}})
+    # ... and the scheduler keeps repeating the hand-off: it must not stamp the reopened row
+    assert aq.mark_activation_cohort(w.db, control=aq.get_control(w.db), now_utc=NOW) == 0
+    assert w.db.pending_referrals.find_one({"invitee_user_id": 101}).get("qualification_rule_version") is None
+    e = ev(w, 101)
+    assert aq.requeue_evidence(w.db, evidence_id=e["_id"], now_utc=NOW)
+    run(w, monkeypatch, now=NOW + timedelta(minutes=1))
+    assert (ev(w, 101)["status"], ev(w, 101)["reason"]) == (aq.EV_REVIEW, "referral_not_active_at_rollout")
+    assert w.db.qualified_events.count_documents({"invitee_id": 101}) == 0
+    # a referral created after the cutoff is still stamped by later passes
+    later = NOW + timedelta(minutes=2)
+    w.join(900, 301, at=later, status="pending")
+    assert aq.mark_activation_cohort(w.db, control=aq.get_control(w.db), now_utc=NOW + timedelta(minutes=3)) == 1

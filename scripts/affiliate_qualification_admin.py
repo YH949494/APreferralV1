@@ -587,7 +587,8 @@ def main(argv=None, *, db_factory=None, read_only_db_factory=None, now_fn=_now) 
                  "$and": [{"launch_cutoff_utc": {"$gt": now_fn()}}]},
                 {"$set": {"mode": aq.MODE_DISABLED, "updated_at": now_utc,
                           "cancelled_cohort_cutoff": cutoff},
-                 "$unset": {"launch_cutoff_utc": "", "legacy_admission_closed": ""}})
+                 "$unset": {"launch_cutoff_utc": "", "legacy_admission_closed": "",
+                            "launch_handoff_completed_cutoff": "", "launch_handoff_completed_at": ""}})
             if not result.modified_count:
                 return 2
             aq.restore_activation_cohort(db, cutoff=cutoff)
