@@ -843,3 +843,34 @@ def test_evidence_processing_waits_for_the_launch_handoff_marker(monkeypatch):
     w.db[aq.CONTROL_COLLECTION].update_one({}, {"$unset": {"legacy_writer_token": "", "legacy_writer_lease_until": ""}})
     out = run(w, monkeypatch)                                        # the hand-off completes, then decisions run
     assert "skipped" not in out and ev(w, 102)["status"] == aq.EV_QUALIFIED
+
+
+def test_reopen_audit_is_serialized_with_activation_by_the_writer_barrier(monkeypatch):
+    import official_channel_reopen_audit as audit
+    import referral_invitee_lock
+
+    w = forward_world()
+    pid = w.db.pending_referrals.insert_one({
+        "invitee_user_id": 401, "inviter_user_id": 900, "status": "revoked", "destination_type": "official_channel",
+        "revoked_reason": "insufficient_engagement", "created_at_utc": OLD_JOIN}).inserted_id
+    row = {"pending_id": str(pid), "invitee_user_id": 401, "inviter_user_id": 900, "chat_id": -100}
+    seen = {}
+    real_claim = referral_invitee_lock.claim
+
+    def claim_then_try_to_activate(*a, **k):                 # activation lands exactly between check and write
+        seen["activate"] = activate(w)
+        seen["cutoff_after_attempt"] = aq.launch_cutoff(aq.get_control(w.db))
+        return real_claim(*a, **k)
+
+    monkeypatch.setattr(referral_invitee_lock, "claim", claim_then_try_to_activate)
+    result = audit._reopen(w.db, [row], NOW)
+    assert result["reopened_count"] == 1
+    assert seen["activate"] == 2 and seen["cutoff_after_attempt"] is None      # activation refused while it runs
+    assert "legacy_writer_token" not in aq.get_control(w.db)                    # barrier released afterwards
+    monkeypatch.undo()
+    # a writer already holding the barrier makes the audit refuse without writing
+    w.db.pending_referrals.update_one({"_id": pid}, {"$set": {"status": "revoked"}})
+    with aq.legacy_writer_guard(w.db, now_utc=NOW) as other:
+        assert other
+        assert audit._reopen(w.db, [row], NOW)["refused"] == "legacy_writer_busy"
+    assert w.db.pending_referrals.find_one({"_id": pid})["status"] == "revoked"

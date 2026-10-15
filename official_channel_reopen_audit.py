@@ -207,18 +207,32 @@ def build_report(db, now_ts: datetime | None = None) -> dict:
 
 def _reopen(db, eligible_rows: list[dict], now_ts: datetime) -> dict:
     import affiliate_qualification
-    import referral_invitee_lock
-    from bson import ObjectId
 
     # This repair exists so the LEGACY settlement can award reopened rows. Once the V2 rule is launched the
     # legacy award never runs again, so reopening a pre-launch referral would only leave an active row (and a
-    # blocking invitee lock) outside the V2 population. Refuse; nothing is written.
+    # blocking invitee lock) outside the V2 population. Refuse; nothing is written. The check is serialized
+    # with activation by the legacy-writer barrier (activation's CAS needs the token absent, and admission
+    # needs no cutoff), so a launch can neither slip in between the check and the writes nor overlap them.
     if affiliate_qualification.launch_cutoff(affiliate_qualification.get_control(db)) is not None:
         return {"reopened_count": 0, "lock_blocked_pending_ids": [], "refused": "v2_launched"}
+    with affiliate_qualification.legacy_writer_guard(db, now_utc=now_ts) as lease:
+        if not lease:
+            launched = affiliate_qualification.launch_cutoff(affiliate_qualification.get_control(db)) is not None
+            return {"reopened_count": 0, "lock_blocked_pending_ids": [],
+                    "refused": "v2_launched" if launched else "legacy_writer_busy"}
+        return _reopen_rows(db, eligible_rows, now_ts, lease)
+
+
+def _reopen_rows(db, eligible_rows: list[dict], now_ts: datetime, lease) -> dict:
+    import referral_invitee_lock
+    from bson import ObjectId
 
     reopened = 0
     lock_blocked_pending_ids = []
     for row in eligible_rows:
+        if not lease.renew():  # keep the barrier valid for the whole run; stop if it was lost
+            return {"reopened_count": reopened, "lock_blocked_pending_ids": lock_blocked_pending_ids,
+                    "refused": "writer_lease_lost"}
         # Reacquire the invitee-scoped lock atomically right before mutating
         # the row: if the invitee has since started a newer active referral
         # (any destination), that referral now owns the lock and this
