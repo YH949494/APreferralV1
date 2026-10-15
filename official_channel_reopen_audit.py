@@ -230,65 +230,99 @@ def _reopen_rows(db, eligible_rows: list[dict], now_ts: datetime, lease) -> dict
     reopened = 0
     lock_blocked_pending_ids = []
     for row in eligible_rows:
-        if not lease.renew():  # keep the barrier valid for the whole run; stop if it was lost
+        # Durable, non-recoverable in-flight marker around each cross-collection write (the same barrier the
+        # legacy award uses): activation's CAS refuses while it is set, and lease recovery never clears it,
+        # so a process paused mid-write holds activation off instead of being overtaken by it.
+        if not lease.begin_award():
             return {"reopened_count": reopened, "lock_blocked_pending_ids": lock_blocked_pending_ids,
-                    "refused": "writer_lease_lost"}
-        # Reacquire the invitee-scoped lock atomically right before mutating
-        # the row: if the invitee has since started a newer active referral
-        # (any destination), that referral now owns the lock and this
-        # historical row must NOT be reopened alongside it — settlement
-        # processes oldest created_at_utc first, so reopening unconditionally
-        # would let the stale inviter win the award over the legitimate one.
-        claimed = referral_invitee_lock.claim(
-            db,
-            invitee_user_id=row["invitee_user_id"],
-            inviter_user_id=row["inviter_user_id"],
-            chat_id=row.get("chat_id"),
-            destination_type="official_channel",
-            now_utc_ts=now_ts,
-        )
-        if claimed is not True:
-            lock_blocked_pending_ids.append(row["pending_id"])
-            continue
-
-        result = db.pending_referrals.update_one(
-            {"_id": ObjectId(row["pending_id"]), "status": "revoked"},
-            {
-                "$set": {
-                    "status": "pending",
-                    "reopened_reason": "policy_change_remove_checkin_requirement",
-                    "original_status": "revoked",
-                    "original_reason": "insufficient_engagement",
-                    "reopened_at": now_ts,
-                },
-                "$unset": {
-                    "next_retry_at_utc": "",
-                    # Clear the live revocation fields, not just leave them
-                    # stale — build_public_referral_status() in
-                    # referral_rules.py prioritizes revoked_reason over even
-                    # a qualified/awarded status, so a reopened-then-settled
-                    # referral would otherwise still show as "Not eligible"
-                    # to the inviter. History is preserved in original_*.
-                    "revoked_reason": "",
-                    "qualification_failure_reason": "",
-                    "revoked_at": "",
-                },
-            },
-        )
-        if getattr(result, "modified_count", 0):
+                    "refused": "writer_lease_lost_or_award_in_flight"}
+        try:
+            outcome = _reopen_one(db, row, now_ts, ObjectId, referral_invitee_lock)
+        finally:
+            lease.end_award()
+        if outcome == "reopened":
             reopened += 1
-        else:
-            # Row changed underneath us between eligibility evaluation and
-            # this update (e.g. no longer "revoked") — release the lock we
-            # just claimed so it doesn't strand a phantom claim.
-            referral_invitee_lock.release(
-                db,
-                invitee_user_id=row["invitee_user_id"],
-                status="revoked",
-                now_utc_ts=now_ts,
-                expected_inviter_user_id=row["inviter_user_id"],
-            )
+        elif outcome == "lock_blocked":
+            lock_blocked_pending_ids.append(row["pending_id"])
     return {"reopened_count": reopened, "lock_blocked_pending_ids": lock_blocked_pending_ids}
+
+
+def _reopen_one(db, row, now_ts, ObjectId, referral_invitee_lock) -> str:
+    # Reacquire the invitee-scoped lock atomically right before mutating
+    # the row: if the invitee has since started a newer active referral
+    # (any destination), that referral now owns the lock and this
+    # historical row must NOT be reopened alongside it — settlement
+    # processes oldest created_at_utc first, so reopening unconditionally
+    # would let the stale inviter win the award over the legitimate one.
+    claimed = referral_invitee_lock.claim(
+        db,
+        invitee_user_id=row["invitee_user_id"],
+        inviter_user_id=row["inviter_user_id"],
+        chat_id=row.get("chat_id"),
+        destination_type="official_channel",
+        now_utc_ts=now_ts,
+    )
+    if claimed is not True:
+        return "lock_blocked"
+
+    result = db.pending_referrals.update_one(
+        {"_id": ObjectId(row["pending_id"]), "status": "revoked"},
+        {
+            "$set": {
+                "status": "pending",
+                "reopened_reason": "policy_change_remove_checkin_requirement",
+                "original_status": "revoked",
+                "original_reason": "insufficient_engagement",
+                "reopened_at": now_ts,
+            },
+            "$unset": {
+                "next_retry_at_utc": "",
+                # Clear the live revocation fields, not just leave them
+                # stale — build_public_referral_status() in
+                # referral_rules.py prioritizes revoked_reason over even
+                # a qualified/awarded status, so a reopened-then-settled
+                # referral would otherwise still show as "Not eligible"
+                # to the inviter. History is preserved in original_*.
+                "revoked_reason": "",
+                "qualification_failure_reason": "",
+                "revoked_at": "",
+            },
+        },
+    )
+    if getattr(result, "modified_count", 0):
+        return "reopened"
+    # Row changed underneath us between eligibility evaluation and
+    # this update (e.g. no longer "revoked") — release the lock we
+    # just claimed so it doesn't strand a phantom claim.
+    referral_invitee_lock.release(
+        db,
+        invitee_user_id=row["invitee_user_id"],
+        status="revoked",
+        now_utc_ts=now_ts,
+        expected_inviter_user_id=row["inviter_user_id"],
+    )
+    return "stale"
+
+
+REFUSAL_MESSAGES = {
+    "v2_launched": "the V2 qualification rule is launched; reopening pre-launch referrals is disabled",
+    "legacy_writer_busy": "another legacy writer holds the barrier; nothing was reopened - retry later",
+    "writer_lease_lost_or_award_in_flight": "the writer barrier was lost or an award is in flight; the repair is "
+                                           "PARTIAL - rerun the audit to finish it",
+}
+
+
+def _commit(db, report: dict, now_ts: datetime) -> int:
+    """Reopen the eligible rows and report the ACTUAL outcome; non-zero when the repair was refused/partial."""
+    result = _reopen(db, report["eligible_rows"], now_ts)
+    report["reopened_count"] = result["reopened_count"]
+    report["lock_blocked_pending_ids"] = result["lock_blocked_pending_ids"]
+    refused = result.get("refused")
+    if not refused:
+        return 0
+    report["refused"] = refused
+    print(f"refused ({refused}): {REFUSAL_MESSAGES.get(refused, refused)}", file=sys.stderr)
+    return 2
 
 
 def main() -> int:
@@ -313,14 +347,9 @@ def main() -> int:
     report["reopened_count"] = 0
     report["lock_blocked_pending_ids"] = []
 
+    exit_code = 0
     if args.commit and report["eligible_rows"]:
-        reopen_result = _reopen(db, report["eligible_rows"], now_ts)
-        report["reopened_count"] = reopen_result["reopened_count"]
-        report["lock_blocked_pending_ids"] = reopen_result["lock_blocked_pending_ids"]
-        if reopen_result.get("refused"):
-            report["refused"] = reopen_result["refused"]
-            print("refused: the V2 qualification rule is launched; reopening pre-launch referrals is disabled",
-                  file=sys.stderr)
+        exit_code = _commit(db, report, now_ts)
 
     if args.json:
         print(json.dumps(report, default=str, indent=2))
@@ -339,7 +368,7 @@ def main() -> int:
         for row in report["eligible_rows"][:20]:
             print(f"  eligible pending_id={row['pending_id']} invitee={row['invitee_user_id']}")
 
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":

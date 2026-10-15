@@ -874,3 +874,59 @@ def test_reopen_audit_is_serialized_with_activation_by_the_writer_barrier(monkey
         assert other
         assert audit._reopen(w.db, [row], NOW)["refused"] == "legacy_writer_busy"
     assert w.db.pending_referrals.find_one({"_id": pid})["status"] == "revoked"
+
+
+def test_reopen_write_holds_a_durable_marker_that_lease_recovery_cannot_clear(monkeypatch):
+    import official_channel_reopen_audit as audit
+    import referral_invitee_lock
+
+    w = forward_world()
+    pid = w.db.pending_referrals.insert_one({
+        "invitee_user_id": 401, "inviter_user_id": 900, "status": "revoked", "destination_type": "official_channel",
+        "revoked_reason": "insufficient_engagement", "created_at_utc": OLD_JOIN}).inserted_id
+    row = {"pending_id": str(pid), "invitee_user_id": 401, "inviter_user_id": 900, "chat_id": -100}
+    seen = {}
+    real_claim = referral_invitee_lock.claim
+
+    def frozen_between_claim_and_update(*a, **k):
+        seen["marker_during_write"] = bool(aq.get_control(w.db).get("legacy_award_inflight"))
+        # The process "freezes" past lease + grace: recovery clears the TOKEN, activation must still be refused
+        later = NOW + aq.LEGACY_WRITER_LEASE + aq.LEGACY_WRITER_RECOVERY_GRACE + timedelta(minutes=1)
+        seen["recovered"] = aq.recover_legacy_writer(w.db, now_utc=later)["recovered"]
+        seen["marker_after_recovery"] = bool(aq.get_control(w.db).get("legacy_award_inflight"))
+        seen["activate"] = activate(w)
+        return real_claim(*a, **k)
+
+    monkeypatch.setattr(referral_invitee_lock, "claim", frozen_between_claim_and_update)
+    result = audit._reopen(w.db, [row], NOW)
+    assert seen["marker_during_write"] and seen["marker_after_recovery"] and seen["activate"] == 2
+    assert result["reopened_count"] == 1
+    assert "legacy_award_inflight" not in aq.get_control(w.db)           # released once the write finished
+
+
+def test_reopen_commit_reports_the_actual_refusal_and_exits_nonzero(monkeypatch, capsys):
+    import official_channel_reopen_audit as audit
+
+    w = forward_world()
+    pid = w.db.pending_referrals.insert_one({
+        "invitee_user_id": 401, "inviter_user_id": 900, "status": "revoked", "destination_type": "official_channel",
+        "revoked_reason": "insufficient_engagement", "created_at_utc": OLD_JOIN}).inserted_id
+    row = {"pending_id": str(pid), "invitee_user_id": 401, "inviter_user_id": 900, "chat_id": -100}
+    report = {"eligible_rows": [row]}
+    with aq.legacy_writer_guard(w.db, now_utc=NOW) as other:                   # another legacy writer is active
+        assert other
+        assert audit._commit(w.db, report, NOW) == 2
+    err = capsys.readouterr().err
+    assert report["refused"] == "legacy_writer_busy" and "legacy writer holds the barrier" in err
+    assert "launched" not in err
+    assert w.db.pending_referrals.find_one({"_id": pid})["status"] == "revoked"
+    assert activate(w) == 0                                                      # then V2 launches
+    report = {"eligible_rows": [row]}
+    assert audit._commit(w.db, report, NOW) == 2 and report["refused"] == "v2_launched"
+    assert "launched" in capsys.readouterr().err
+    w2 = forward_world()                                                        # a clean pre-launch run exits 0
+    pid2 = w2.db.pending_referrals.insert_one({
+        "invitee_user_id": 402, "inviter_user_id": 900, "status": "revoked", "destination_type": "official_channel",
+        "revoked_reason": "insufficient_engagement", "created_at_utc": OLD_JOIN}).inserted_id
+    ok = {"eligible_rows": [{"pending_id": str(pid2), "invitee_user_id": 402, "inviter_user_id": 900, "chat_id": -100}]}
+    assert audit._commit(w2.db, ok, NOW) == 0 and ok["reopened_count"] == 1
