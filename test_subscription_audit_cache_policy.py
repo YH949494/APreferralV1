@@ -493,3 +493,20 @@ def test_repeat_audit_is_idempotent():
         r = scheduler.run_invitee_subscription_audit(now_utc_ts=_NOW + timedelta(minutes=1), db_ref=db_ref)
     assert r["skipped_recent"] == 1
     assert db_ref.subscription_cache.find_one({"_id": "sub:6"}) == before
+
+
+def test_row_inserted_concurrently_without_timestamp_is_backfilled():
+    db_ref = _fresh_db()
+    db_ref.pending_referrals.insert_one({"invitee_user_id": 8, "created_at_utc": _NOW - timedelta(hours=1)})
+    orig_get = scheduler.requests.get
+
+    def racing_get(*a, **k):
+        # Another writer (e.g. vouchers.py nonmember path) inserts the row mid-audit.
+        db_ref.subscription_cache.insert_one({"_id": "sub:8", "user_id": 8, "subscribed": False})
+        return _Resp(200, _member_payload())
+
+    with mock.patch.object(scheduler.requests, "get", racing_get):
+        scheduler.run_invitee_subscription_audit(now_utc_ts=_NOW, db_ref=db_ref)
+    doc = db_ref.subscription_cache.find_one({"_id": "sub:8"})
+    assert doc["subscribed"] is True
+    assert _aware(doc["first_subscribed_at_utc"]) == _NOW

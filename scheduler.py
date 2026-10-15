@@ -2485,15 +2485,16 @@ def run_invitee_subscription_audit(now_utc_ts=None, db_ref=None) -> dict:
             }
         }
         needs_first_ts = subscribed and not _coerce_utc(cache_doc.get("first_subscribed_at_utc"))
-        if needs_first_ts and not cache_doc:
-            # No cache doc yet: assign on insert only. Must never share a path
+        if needs_first_ts:
+            # Assign on insert only. Must never share a path
             # with $set (MongoDB WriteError code 40).
             update_doc["$setOnInsert"] = {"first_subscribed_at_utc": now_utc_ts}
 
-        db_ref.subscription_cache.update_one({"_id": cache_id}, update_doc, upsert=True)
-        if needs_first_ts and cache_doc:
-            # Existing doc lacking the timestamp: guarded, atomic backfill that
-            # can never overwrite a value written concurrently.
+        write_res = db_ref.subscription_cache.update_one({"_id": cache_id}, update_doc, upsert=True)
+        if needs_first_ts and write_res.upserted_id is None:
+            # The row already existed (at read time, or inserted concurrently so
+            # $setOnInsert was a no-op): guarded, atomic backfill that can never
+            # overwrite a value written concurrently.
             db_ref.subscription_cache.update_one(
                 {"_id": cache_id, "first_subscribed_at_utc": {"$in": [None]}},
                 {"$set": {"first_subscribed_at_utc": now_utc_ts}},
