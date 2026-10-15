@@ -646,3 +646,20 @@ def test_protected_evidence_for_the_same_record_still_explains_its_preview_reaso
     w.db[aq.EVIDENCE_COLLECTION].update_many({}, {"$set": {"voided_at": NOW}})
     out = rec.reconcile(w.db, config=DATABOT_CONFIG, now_utc=NOW)
     assert out["ok"] is True and out["candidates"] == 0 and out["candidate_guards"]["excluded_by_guard"]["voided"] == 1
+
+
+def test_unrelated_unattested_record_without_evidence_is_not_a_preview_mismatch():
+    """Only records whose preview reason is a repairable one are correlated; a record rejected for an unrelated reason
+    (here: missing qualification fields) with no evidence must not turn a fully explained state into a refusal."""
+    w = world(2, active=True)
+    feed = FakeFeed()
+    feed.add_batch([legacy(code="WELC11", account="a0"), row(code="WELC12", account="a1", amount="", flag="")])
+    sync(w, feed)
+    extract(w)
+    docs = {d["recipient_resolution"]["user_id"]: d for d in evidence(w)}
+    reasons_ = reasons(preview(w.db, month="202610"))
+    assert reasons_.get("redeemed_at_timezone_unverified") and set(reasons_) - {"redeemed_at_timezone_unverified"}
+    w.db[aq.EVIDENCE_COLLECTION].update_one({"_id": docs[11]["_id"]}, {"$set": {"voided_at": NOW}})
+    w.db[aq.EVIDENCE_COLLECTION].delete_one({"_id": docs[12]["_id"]})
+    out = rec.reconcile(w.db, config=DATABOT_CONFIG, now_utc=NOW)
+    assert out["ok"] is True and out["candidates"] == 0

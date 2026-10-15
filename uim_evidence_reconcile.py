@@ -108,8 +108,22 @@ def _refs_without_scoped_evidence(db, config: dict, now_utc: datetime, max_scan_
     folded, scanned = _replay(db, config, None, now_utc=now_utc, max_scan_rows=max_scan_rows)
     if folded is None:
         return None, scanned
-    pending = {ref: f for ref, f in folded.items()
-               if not f.get("_source_removed") and (f.get("_conflicting_observation") or not aq.observation_attested(f))}
+    control = {**(aq.get_control(db) or {}), "source_config": config}
+    lookup = aq.DbLookup(db)
+
+    def preview_reason(f: dict) -> str | None:
+        if f.get("_source_removed"):
+            return None
+        if f.get("_conflicting_observation"):
+            return "conflicting_source_observations"
+        try:
+            return aq.assess_evidence(f, control=control, now_utc=now_utc, lookup=lookup).get("reason")
+        except Exception:
+            return PREVIEW_REPAIRABLE_REASONS[0]      # cannot tell: stay conservative, treat as relevant
+
+    # Only records whose preview outcome is itself one of the repairable reasons: an unrelated review reason
+    # (missing fields, unsupported transport, ...) is not what this command repairs nor what the preview mismatch is about.
+    pending = {ref: f for ref, f in folded.items() if preview_reason(f) in PREVIEW_REPAIRABLE_REASONS}
     have: set[str] = set()
     refs = list(pending)
     for i in range(0, len(refs), 1000):
