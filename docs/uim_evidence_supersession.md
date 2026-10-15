@@ -74,6 +74,19 @@ Dry-run `actions`: `would_repair`, `conflict_kept_for_review`, `removed_stays_re
 `not_attested_remains_pending` (+ `not_attested_reasons`), `no_committed_source_observation`, `skipped_has_effects`;
 `evidence_not_repairable_state` counts evidence in other states (left alone).
 
+**Candidate selection and diagnostics.** A guard field that is absent *or stored as `null`* counts as "not set"
+(`$exists: False` does not match `null`; that silently excluded `pending_review` evidence in production and the dry run
+returned `ok=true, candidates=0`). A lease protects only while `lease_until > now`. The report carries
+`candidate_guards`: `scope_documents` (unattested v2 UIM evidence), `excluded_by_guard`
+(`status_not_repairable`, `voided`, `active_lease`, `qualification_decision_recorded`; one document counts under every
+guard it trips), `excluded_any_guard`, `evidence_total` and `evidence_by_source_rule_status` (shows evidence stored
+under a different source/rule_version). Registry / qualified-event ownership is reported per document as
+`skipped_has_effects`.
+**Mismatch refusal.** On the first page, zero candidates while the preview still reports more repairable legacy reasons
+(`redeemed_at_timezone_unverified`, `conflicting_source_observations`, `seven_day_data_incomplete`) than guard-protected
+evidence can account for returns `ok=false`, `error=candidate_selection_preview_mismatch` (CLI exit 1) with
+`preview_repairable_legacy_reasons` - never a silent no-op.
+
 Interpreting the preview afterwards: `unverified_completeness_synced_rows` is a raw count of every historical synced
 row (including superseded ones) and is informational; the decision-relevant figure is
 `pending_maturity.unverified_completeness_effective_evidence`.

@@ -479,3 +479,129 @@ def test_audit_entry_is_enough_to_restore_the_replaced_evidence():
 def verdicts_for(w, ev):
     control = {**aq.get_control(w.db), "source_config": DATABOT_CONFIG}
     return aq.assess_evidence(ev, control=control, now_utc=NOW, lookup=aq.DbLookup(w.db))
+
+
+# Production shape: pending_review, redeemed_at=None ------------------------------------------------------------
+
+def _prod_shape_world():
+    """One logical record: old unverified observation evaluated into pending_review, then a newer attested final batch."""
+    w = world(active=True)
+    feed = FakeFeed()
+    feed.add_batch([legacy()])
+    sync(w, feed)
+    extract(w)
+    [old] = evidence(w)
+    aq._finalize(w.db, old, aq.EV_REVIEW, "redeemed_at_timezone_unverified", now_utc=NOW)
+    feed.add_batch([row()], coverage=final_cov())
+    sync(w, feed)
+    [ev] = evidence(w)
+    assert ev["status"] == aq.EV_REVIEW and ev["redeemed_at"] is None and "source_conflict_at" not in ev
+    return w, ev
+
+
+def test_pending_review_unverified_evidence_is_selected_and_upgraded():
+    w, ev = _prod_shape_world()
+    dry = rec.reconcile(w.db, config=DATABOT_CONFIG, now_utc=NOW)
+    assert dry["ok"] and dry["dry_run"] and dry["candidates"] == 1 and dry["actions"] == {"would_repair": 1}
+    assert evidence(w)[0] == ev                                               # dry run wrote nothing
+    done = rec.reconcile(w.db, config=DATABOT_CONFIG, now_utc=NOW, commit=True)
+    assert done["actions"] == {"repaired": 1}
+    [fixed] = evidence(w)
+    assert fixed["_id"] == ev["_id"] and fixed["source_ref"] == ev["source_ref"]
+    assert fixed["status"] == aq.EV_RECEIVED and fixed["redeemed_at"] == datetime(2026, 10, 3, 4, 0)
+    assert fixed["redeemed_at_reason"] is None and fixed["evidence_basis"]["coverage_attested"] is True
+    assert fixed["supersession_history"][0]["from"]["redeemed_at_reason"] == "redeemed_at_timezone_unverified"
+    control = {**aq.get_control(w.db), "source_config": DATABOT_CONFIG}
+    assert aq.assess_evidence(fixed, control=control, now_utc=NOW, lookup=aq.DbLookup(w.db))["status"] != aq.EV_REVIEW
+
+
+@pytest.mark.parametrize("stored", [
+    pytest.param({}, id="guard-fields-absent"),
+    pytest.param({"lease_until": None, "voided_at": None, "qualification_decision_at": None}, id="guard-fields-null"),
+    pytest.param({"lease_until": NOW - timedelta(minutes=5)}, id="expired-lease"),
+])
+def test_pending_review_selected_whatever_unset_guard_fields_look_like(stored):
+    """Production reported candidates=0 for exactly this record: null/expired guard fields are 'not set'."""
+    w, ev = _prod_shape_world()
+    w.db[aq.EVIDENCE_COLLECTION].update_one({"_id": ev["_id"]}, {"$set": stored})
+    dry = rec.reconcile(w.db, config=DATABOT_CONFIG, now_utc=NOW)
+    assert dry["ok"] and dry["candidates"] == 1 and dry["actions"] == {"would_repair": 1}
+    assert dry["candidate_guards"]["excluded_by_guard"] == {
+        "status_not_repairable": 0, "voided": 0, "active_lease": 0, "qualification_decision_recorded": 0}
+    assert rec.reconcile(w.db, config=DATABOT_CONFIG, now_utc=NOW, commit=True)["actions"] == {"repaired": 1}
+    [fixed] = evidence(w)
+    assert fixed["status"] == aq.EV_RECEIVED and fixed["redeemed_at"] == datetime(2026, 10, 3, 4, 0)
+
+
+@pytest.mark.parametrize("protect, guard, expect_status", [
+    ({"status": aq.EV_QUALIFIED}, "status_not_repairable", aq.EV_QUALIFIED),
+    ({"status": aq.EV_REJECTED}, "status_not_repairable", aq.EV_REJECTED),
+    ({"status": aq.EV_VOIDED, "voided_at": NOW}, "status_not_repairable", aq.EV_VOIDED),
+    ({"voided_at": NOW}, "voided", aq.EV_REVIEW),
+    ({"lease_until": NOW + timedelta(minutes=5)}, "active_lease", aq.EV_REVIEW),
+    ({"qualification_decision_at": NOW}, "qualification_decision_recorded", aq.EV_REVIEW),
+])
+def test_final_or_in_flight_evidence_stays_protected_and_is_counted_per_guard(protect, guard, expect_status):
+    w, ev = _prod_shape_world()
+    w.db[aq.EVIDENCE_COLLECTION].update_one({"_id": ev["_id"]}, {"$set": protect})
+    before = evidence(w)
+    out = rec.reconcile(w.db, config=DATABOT_CONFIG, now_utc=NOW, commit=True)
+    assert out["candidates"] == 0 and out["candidate_guards"]["excluded_by_guard"][guard] == 1
+    assert out["candidate_guards"]["scope_documents"] == 1
+    # the preview folds the attested observation, reports no legacy reason, so the exclusion is legitimate (ok)
+    assert out["ok"] is True and out["actions"] == {}
+    assert evidence(w) == before and evidence(w)[0]["status"] == expect_status
+    assert w.db[rec.RUN_COLLECTION].count_documents({}) == 0
+
+
+def test_registry_or_qualified_event_ownership_still_protects_pending_review_evidence():
+    w, ev = _prod_shape_world()
+    w.db[aq.REGISTRY_COLLECTION].insert_one({"evidence_id": ev["_id"], "state": aq.REG_RESERVED})
+    before = evidence(w)
+    out = rec.reconcile(w.db, config=DATABOT_CONFIG, now_utc=NOW, commit=True)
+    assert out["actions"] == {"skipped_has_effects": 1} and evidence(w) == before
+    w.db[aq.REGISTRY_COLLECTION].delete_many({})
+    w.db.qualified_events.insert_one({"invitee_id": 11, "evidence_id": ev["_id"]})
+    assert rec.reconcile(w.db, config=DATABOT_CONFIG, now_utc=NOW, commit=True)["actions"] == {"skipped_has_effects": 1}
+    assert evidence(w) == before
+
+
+def test_zero_candidates_with_preview_legacy_reasons_is_refused_not_ok(capsys):
+    """Preview sees an unverified record but the evidence collection holds nothing for it (or it sits outside the
+    source/rule_version scope): ok=true/candidates=0 would hide the contradiction."""
+    w = world(active=True)
+    feed = FakeFeed()
+    feed.add_batch([legacy()])
+    sync(w, feed)                                                               # no extract: no evidence documents
+    assert reasons(preview(w.db, month="202610")) == {"redeemed_at_timezone_unverified": 1}
+    out = rec.reconcile(w.db, config=DATABOT_CONFIG, now_utc=NOW)
+    assert out["ok"] is False and out["error"] == "candidate_selection_preview_mismatch"
+    assert out["candidates"] == 0 and out["preview_repairable_legacy_reasons"] == {"redeemed_at_timezone_unverified": 1}
+    assert out["candidate_guards"]["evidence_total"] == 0 and out["dry_run"] is True
+    rc = admin_cli.main(["reconcile-uim-evidence"], db_factory=lambda: w.db, read_only_db_factory=lambda: w.db,
+                        now_fn=lambda: NOW)
+    assert rc == 1 and json.loads(capsys.readouterr().out)["error"] == "candidate_selection_preview_mismatch"
+
+
+def test_evidence_outside_source_scope_is_visible_in_diagnostics_and_refused():
+    w = world(active=True)
+    feed = FakeFeed()
+    feed.add_batch([legacy()])
+    sync(w, feed)
+    extract(w)
+    w.db[aq.EVIDENCE_COLLECTION].update_many({}, {"$set": {"rule_version": "welcome_redemption_v1"}})
+    out = rec.reconcile(w.db, config=DATABOT_CONFIG, now_utc=NOW)
+    assert out["ok"] is False and out["error"] == "candidate_selection_preview_mismatch"
+    assert out["candidate_guards"]["scope_documents"] == 0 and out["candidate_guards"]["evidence_total"] == 1
+    assert out["candidate_guards"]["evidence_by_source_rule_status"] == [
+        {"source": "databot_uim", "rule_version": "welcome_redemption_v1", "status": aq.EV_RECEIVED, "n": 1}]
+
+
+def test_nothing_to_repair_is_still_ok_and_a_resumed_empty_page_is_not_a_mismatch():
+    w = world(active=True)
+    out = rec.reconcile(w.db, config=DATABOT_CONFIG, now_utc=NOW)
+    assert out["ok"] is True and out["candidates"] == 0
+    w, ev = _prod_shape_world()
+    rec.reconcile(w.db, config=DATABOT_CONFIG, now_utc=NOW, commit=True)
+    again = rec.reconcile(w.db, config=DATABOT_CONFIG, now_utc=NOW, commit=True, after_id=evidence(w)[0]["_id"])
+    assert again["ok"] is True and again["candidates"] == 0
