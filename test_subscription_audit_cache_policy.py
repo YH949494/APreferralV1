@@ -419,3 +419,94 @@ def test_runtime_limit_exits_cleanly_before_any_telegram_call():
     mocked_get.assert_not_called()
     assert result["checked"] == 0
     assert result["stop_reason"] == "runtime_limit"
+
+
+# --- first_subscribed_at_utc: no $set/$setOnInsert conflict (WriteError 40) ---
+
+_NOW = datetime(2026, 1, 8, 4, 30, tzinfo=timezone.utc)
+
+
+def _run(db_ref, uid, resp=None, exc=None):
+    db_ref.pending_referrals.insert_one({"invitee_user_id": uid, "created_at_utc": _NOW - timedelta(hours=1)})
+    kw = {"side_effect": exc} if exc else {"return_value": resp}
+    with mock.patch.object(scheduler.requests, "get", **kw):
+        return scheduler.run_invitee_subscription_audit(now_utc_ts=_NOW, db_ref=db_ref)
+
+
+def test_new_subscribed_user_sets_first_ts_without_conflict():
+    db_ref = _fresh_db()
+    calls = []
+    orig = mongomock.collection.Collection.update_one
+
+    def spy(self, f, u, *a, **k):
+        calls.append(u)
+        return orig(self, f, u, *a, **k)
+
+    with mock.patch.object(mongomock.collection.Collection, "update_one", spy):
+        res = _run(db_ref, 1, _Resp(200, _member_payload()))
+    assert res["subscribed_true"] == 1 and res["errors"] == 0
+    for u in calls:
+        assert not (set(u.get("$set", {})) & set(u.get("$setOnInsert", {})))
+    doc = db_ref.subscription_cache.find_one({"_id": "sub:1"})
+    assert _aware(doc["first_subscribed_at_utc"]) == _NOW
+
+
+def test_existing_timestamp_never_overwritten():
+    db_ref = _fresh_db()
+    first = _NOW - timedelta(days=30)
+    db_ref.subscription_cache.insert_one({
+        "_id": "sub:2", "user_id": 2, "subscribed": True,
+        "checked_at": _NOW - timedelta(days=8), "first_subscribed_at_utc": first,
+    })
+    _run(db_ref, 2, _Resp(200, _member_payload()))
+    assert _aware(db_ref.subscription_cache.find_one({"_id": "sub:2"})["first_subscribed_at_utc"]) == first
+
+
+def test_existing_doc_missing_timestamp_is_backfilled_once():
+    db_ref = _fresh_db()
+    db_ref.subscription_cache.insert_one({
+        "_id": "sub:3", "user_id": 3, "subscribed": True, "checked_at": _NOW - timedelta(days=8),
+    })
+    _run(db_ref, 3, _Resp(200, _member_payload()))
+    doc = db_ref.subscription_cache.find_one({"_id": "sub:3"})
+    assert _aware(doc["first_subscribed_at_utc"]) == _NOW
+    later = _NOW + timedelta(days=9)
+    db_ref.subscription_cache.update_one({"_id": "sub:3"}, {"$set": {"checked_at": _NOW - timedelta(days=8)}})
+    with mock.patch.object(scheduler.requests, "get", return_value=_Resp(200, _member_payload())):
+        scheduler.run_invitee_subscription_audit(now_utc_ts=later, db_ref=db_ref)
+    assert _aware(db_ref.subscription_cache.find_one({"_id": "sub:3"})["first_subscribed_at_utc"]) == _NOW
+
+
+def test_unsubscribed_gets_no_first_ts_and_tg_failure_writes_none():
+    db_ref = _fresh_db()
+    _run(db_ref, 4, _Resp(200, _member_payload("left")))
+    assert "first_subscribed_at_utc" not in db_ref.subscription_cache.find_one({"_id": "sub:4"})
+    _run(db_ref, 5, exc=scheduler.RequestException("boom"))
+    assert "first_subscribed_at_utc" not in db_ref.subscription_cache.find_one({"_id": "sub:5"})
+
+
+def test_repeat_audit_is_idempotent():
+    db_ref = _fresh_db()
+    _run(db_ref, 6, _Resp(200, _member_payload()))
+    before = db_ref.subscription_cache.find_one({"_id": "sub:6"})
+    with mock.patch.object(scheduler.requests, "get", return_value=_Resp(200, _member_payload())):
+        r = scheduler.run_invitee_subscription_audit(now_utc_ts=_NOW + timedelta(minutes=1), db_ref=db_ref)
+    assert r["skipped_recent"] == 1
+    assert db_ref.subscription_cache.find_one({"_id": "sub:6"}) == before
+
+
+def test_row_inserted_concurrently_without_timestamp_is_backfilled():
+    db_ref = _fresh_db()
+    db_ref.pending_referrals.insert_one({"invitee_user_id": 8, "created_at_utc": _NOW - timedelta(hours=1)})
+    orig_get = scheduler.requests.get
+
+    def racing_get(*a, **k):
+        # Another writer (e.g. vouchers.py nonmember path) inserts the row mid-audit.
+        db_ref.subscription_cache.insert_one({"_id": "sub:8", "user_id": 8, "subscribed": False})
+        return _Resp(200, _member_payload())
+
+    with mock.patch.object(scheduler.requests, "get", racing_get):
+        scheduler.run_invitee_subscription_audit(now_utc_ts=_NOW, db_ref=db_ref)
+    doc = db_ref.subscription_cache.find_one({"_id": "sub:8"})
+    assert doc["subscribed"] is True
+    assert _aware(doc["first_subscribed_at_utc"]) == _NOW

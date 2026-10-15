@@ -2484,12 +2484,21 @@ def run_invitee_subscription_audit(now_utc_ts=None, db_ref=None) -> dict:
                 "expireAt": ttl_expire_at if subscribed else neg_ttl_expire_at,
             }
         }
-        if subscribed:
+        needs_first_ts = subscribed and not _coerce_utc(cache_doc.get("first_subscribed_at_utc"))
+        if needs_first_ts:
+            # Assign on insert only. Must never share a path
+            # with $set (MongoDB WriteError code 40).
             update_doc["$setOnInsert"] = {"first_subscribed_at_utc": now_utc_ts}
-            if not _coerce_utc(cache_doc.get("first_subscribed_at_utc")):
-                update_doc["$set"]["first_subscribed_at_utc"] = now_utc_ts
 
-        db_ref.subscription_cache.update_one({"_id": cache_id}, update_doc, upsert=True)
+        write_res = db_ref.subscription_cache.update_one({"_id": cache_id}, update_doc, upsert=True)
+        if needs_first_ts and write_res.upserted_id is None:
+            # The row already existed (at read time, or inserted concurrently so
+            # $setOnInsert was a no-op): guarded, atomic backfill that can never
+            # overwrite a value written concurrently.
+            db_ref.subscription_cache.update_one(
+                {"_id": cache_id, "first_subscribed_at_utc": {"$in": [None]}},
+                {"$set": {"first_subscribed_at_utc": now_utc_ts}},
+            )
         time.sleep(max(TG_REQUEST_SLEEP_MS, 0) / 1000.0)
 
     duration_ms = int((time.monotonic() - started) * 1000)
