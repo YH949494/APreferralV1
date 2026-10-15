@@ -106,9 +106,22 @@ coverage/policy fingerprint changed (plus a 6-hour safety re-scan), and is idemp
 parking). A correction that later *adds* a row for an already-rejected invitee goes to review
 (`referral_not_active_at_rollout`); decided history is never reopened or paid automatically.
 
+**Why the redemption-window value is required (and must not be invented).** A missing row says "not redeemed on
+any covered day", not "will never redeem". It only becomes "never redeemed" once the voucher can no longer be
+redeemed, i.e. once `issuance + validity` has passed and every day up to there is covered. Validity is a property of
+the gaming platform's voucher, not of any table APReferral or Databot holds, so only the data owner can state it.
+Too small a value rejects people who could still redeem; too large a value merely delays the rejection.
+
 **Without an attested policy the system makes no absence-based decision at all**; positive rows are unaffected.
 This is the activation blocker in §8: the code cannot know the Welcome voucher's redemption window or prove which
 filter the export used (Databot doc §2).
+
+**Launching with absence rejection OFF is safe.** A missing row stays pending exactly as it does today; qualify /
+reject / duplicate decisions come only from rows, and coverage never changes a row verdict. An *unconfigured* policy
+blocks `preflight` (so it cannot be forgotten); `configure-coverage-policy --disable --reason … --commit` records the
+deliberate decision (`absence_rejection_mode: explicitly_disabled`) and removes only the policy/attestation/ledger
+prerequisites of that one feature. Complete coverage, no gaps affecting the cohort and every other preflight gate
+still apply.
 
 ## 6. Admin
 

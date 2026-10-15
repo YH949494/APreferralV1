@@ -677,9 +677,16 @@ def preflight_section(db, control: dict | None, *, now_utc: datetime) -> dict:
         blockers.append(f"coverage_{cov['status']}")
     elif cov["status"] == REPORT_PARTIAL:
         blockers.append("coverage_partial_batches")
-    for item in absence_blockers(control, cov):
-        if item not in blockers:
-            blockers.append(item)
+    # An operator may DELIBERATELY switch absence-based rejection off (`configure-coverage-policy --disable`): a
+    # missing row then simply stays pending, which is always safe, so the policy/attestation/ledger prerequisites
+    # of that one feature stop being activation blockers. Unconfigured is NOT the same as disabled - it still
+    # blocks - and every coverage-status and cohort-gap gate above/below still applies.
+    cfg = (config.get("absence_rejection") if isinstance(config.get("absence_rejection"), dict) else {})
+    explicitly_off = cfg.get("enabled") is False and bool(cfg.get("disabled_by"))
+    if not explicitly_off:
+        for item in absence_blockers(control, cov):
+            if item not in blockers:
+                blockers.append(item)
     gaps_in_cohort = []
     first_join = next(iter(db.pending_referrals.find(
         {"status": {"$in": list(aq.ACTIVE_PENDING_STATUSES)}}, {"created_at_utc": 1}).sort("created_at_utc", 1).limit(1)), None)
@@ -696,6 +703,8 @@ def preflight_section(db, control: dict | None, *, now_utc: datetime) -> dict:
     return {
         "applicable": True, "ok": not blockers, "blockers": blockers, **summary,
         "gaps_affecting_cohort": gaps_in_cohort,
+        "absence_rejection_mode": ("explicitly_disabled" if explicitly_off
+                                   else "attested" if policy is not None else "not_configured"),
         "absence_policy": {"configured": policy is not None, "problems": policy_problems,
                            "basis": (policy or {}).get("coverage_basis"),
                            "welcome_redemption_window_days": (policy or {}).get("welcome_redemption_window_days"),

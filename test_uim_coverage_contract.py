@@ -821,3 +821,23 @@ def test_reconciled_applied_equivalent_batch_that_we_do_not_ingest_disables_abse
     assert body["uim_coverage"]["absence_rejection"]["active"] is False
     assert "coverage_ledger_mismatch" in body["uim_coverage"]["absence_rejection"]["blockers"]
     assert admin.preflight_report(w.db, now_utc=NOW)["coverage"]["ok"] is False      # visible to the activation gate
+
+
+def test_explicitly_disabled_absence_rejection_is_a_safe_launch_mode_but_unconfigured_still_blocks():
+    w, _ = brief_world(days=None)
+    pre = admin.preflight_report(w.db, now_utc=NOW)["coverage"]
+    assert pre["ok"] is False and pre["absence_rejection_mode"] == "not_configured"
+    assert "absence_policy_not_configured" in pre["blockers"]
+    code, out, _ = _cli(w, "configure-coverage-policy", "--disable", "--reason", "owner window unknown today",
+                        "--operator", "yh", "--commit")
+    assert code == 0
+    pre = admin.preflight_report(w.db, now_utc=NOW)["coverage"]
+    assert pre["ok"] is True and pre["absence_rejection_mode"] == "explicitly_disabled" and pre["blockers"] == []
+    # Still no absence decision anywhere, and rows keep their verdicts.
+    assert totals(states(w)) == [1, 6, 0, 0]
+    # Every other coverage gate still applies while disabled: inferred-only coverage blocks.
+    bad, _ = brief_world(coverage=coverage_block("2026-09-28", "2026-10-02", status="inferred_unverified",
+                                                 source="observed_rows", basis="unverified"), days=None)
+    _cli(bad, "configure-coverage-policy", "--disable", "--reason", "r", "--operator", "yh", "--commit")
+    blocked = admin.preflight_report(bad.db, now_utc=NOW)["coverage"]
+    assert blocked["ok"] is False and blocked["blockers"][0] == "coverage_inferred_unverified"
