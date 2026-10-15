@@ -31,6 +31,7 @@ import re
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 
+import affiliate_forward_only as forward_only
 import affiliate_qualification as aq
 
 logger = logging.getLogger(__name__)
@@ -423,6 +424,7 @@ def build_preview(db, *, month: str | None, now_utc: datetime, source_config: di
         "qualification_gate_version": aq.QUALIFICATION_GATE_VERSION,
         "history_policy": control.get("history_policy", aq.HISTORY_STRICT),
         "history_limitation": control.get("history_limitation"),
+        "forward_only": forward_only.forward_only_summary(db, control, now_utc=now_utc, live=True),
         "pending_maturity": aq.pending_maturity_report(db, config=config, now_utc=now_utc),
         "generated_at": now_utc.isoformat(),
         "control": {

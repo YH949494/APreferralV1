@@ -4005,12 +4005,12 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
         with affiliate_qualification.legacy_writer_guard(db, now_utc=now_utc()) as admitted:
             if admitted:
                 affiliate_qualification.repair_cancelled_cohort(db)
-                _settle_pending_referrals(batch_limit)
+                _settle_pending_referrals(batch_limit, lease=admitted)
     except Exception:
         logger.exception("[SCHED][REFERRAL] skipped reason=legacy_barrier_unavailable")
 
 
-def _settle_pending_referrals(batch_limit: int = 200) -> None:
+def _settle_pending_referrals(batch_limit: int = 200, lease=None) -> None:
     now_utc_ts = now_utc()
     cutoff = now_utc_ts - timedelta(hours=_referral_hold_hours())
     try:
@@ -4033,6 +4033,11 @@ def _settle_pending_referrals(batch_limit: int = 200) -> None:
     parked = 0
     
     while scanned < batch_limit:
+        # Heartbeat + fence: a writer that lost its lease (suspended past
+        # expiry, then recovered) must claim no further rows.
+        if lease is not None and not lease.renew(now_utc()):
+            logger.error("[SCHED][REFERRAL] stopped reason=legacy_writer_lease_lost")
+            break
         pending = db.pending_referrals.find_one_and_update(
             {
                 "status": {"$in": ["pending", "pending_channel"]},
@@ -4484,7 +4489,9 @@ def _settle_pending_referrals(batch_limit: int = 200) -> None:
                 )
 
             step = "award"
-            affiliate_qualification.invalidate_history_seed(db)
+            if not affiliate_qualification.invalidate_history_seed(db, lease, now_utc()):
+                _release_for_retry(pending_id, now_utc_ts, 60, "legacy_writer_lease_lost")
+                break
             # Award key is invitee-scoped (not group_id/chat_id-scoped) so the
             # same invitee cannot be awarded twice across a group-origin and a
             # channel-origin referral (P0-4: cross-destination duplicate XP).

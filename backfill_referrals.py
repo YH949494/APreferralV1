@@ -53,10 +53,10 @@ def backfill(db, dry_run: bool = True):
     with qualification.legacy_writer_guard(db, now_utc=datetime.now(timezone.utc)) as admitted:
         if not admitted:
             raise RuntimeError("legacy referral XP backfill disabled by activation or another writer")
-        return _backfill(db, dry_run=False)
+        return _backfill(db, dry_run=False, lease=admitted)
 
 
-def _backfill(db, dry_run: bool = True):
+def _backfill(db, dry_run: bool = True, lease=None):
     if not dry_run:
         _require_legacy_awards_allowed(db)
     referrals = list(
@@ -81,7 +81,8 @@ def _backfill(db, dry_run: bool = True):
         if dry_run:
             continue
         _require_legacy_awards_allowed(db)
-        qualification.invalidate_history_seed(db)
+        if not qualification.invalidate_history_seed(db, lease):
+            raise RuntimeError("legacy writer lease lost; stopping before any further award")
         grant_referral_rewards(db, db.users, referrer_id, referred_user_id)
 
     missing_bonus = {}
@@ -97,7 +98,8 @@ def _backfill(db, dry_run: bool = True):
         current = current_bonus_count(db.xp_events, uid)
         for idx in range(current + 1, current + to_award + 1):
             _require_legacy_awards_allowed(db)
-            qualification.invalidate_history_seed(db)
+            if not qualification.invalidate_history_seed(db, lease):
+                raise RuntimeError("legacy writer lease lost; stopping before any further award")
             grant_xp(
                 db,
                 uid,
