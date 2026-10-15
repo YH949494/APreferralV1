@@ -57,10 +57,14 @@ def _fold_all(db, config: dict, now_utc: datetime, max_scan_rows: int):
         if not obs["code"]:
             continue
         doc = aq.build_evidence_doc(source=aq.SOURCE_DATABOT_UIM, recipient={}, now_utc=now_utc, **obs)
-        codes[doc["source_ref"]] = obs["code"]
-        if obs.get("observation") != aq.OBS_REMOVED:
-            raw[doc["source_ref"]] = {k: row.get(k) for k in RAW_FIELDS}
-        aq.fold_observation(folded, doc, removed=obs.get("observation") == aq.OBS_REMOVED)
+        ref = doc["source_ref"]
+        codes[ref] = obs["code"]
+        removed = obs.get("observation") == aq.OBS_REMOVED
+        aq.fold_observation(folded, doc, removed=removed)
+        # Keep the raw fields of the row the folded observation actually came from: a conflicting later row leaves
+        # the earlier document in place, so its raw fields must stay beside that document's parsed instants.
+        if not removed and folded.get(ref) is doc:
+            raw[ref] = {k: row.get(k) for k in RAW_FIELDS}
     return folded, codes, raw, scanned
 
 
@@ -81,6 +85,14 @@ def _issuance_times(db, code: str, uid: int) -> list[tuple[datetime, str]]:
     for claim in db.new_joiner_claims.find({"code": code}, {"uid": 1, "claimed_at": 1}):
         add(claim.get("claimed_at"), "new_joiner_claims.claimed_at")
     return times
+
+
+def _by_source(times: list[tuple[datetime, str]]) -> dict[str, list[str]]:
+    """Every issuance time per source (a voucher can have several claim rows), earliest first."""
+    grouped: dict[str, list[str]] = {}
+    for when, source in sorted(times):
+        grouped.setdefault(source, []).append(when.isoformat())
+    return grouped
 
 
 def diagnose(db, *, config: dict | None, now_utc: datetime, max_scan_rows: int = DEFAULT_MAX_SCAN_ROWS,
@@ -142,11 +154,12 @@ def diagnose(db, *, config: dict | None, now_utc: datetime, max_scan_rows: int =
     out["cleared_by_total_clock_offset_hours"] = {str(t): int(offset_clears[t]) for t in (8, 16, 24)}
     # Spread the samples over the gap range (smallest, middle, largest ...) instead of the first N found.
     candidates.sort(key=lambda c: c[0])
-    step = max(1, len(candidates) // SAMPLE_SIZE)
-    for hours, ref, f, redeemed, times, dominant in candidates[::step][:SAMPLE_SIZE]:
+    picks = min(SAMPLE_SIZE, len(candidates))
+    spread = [0] if picks == 1 else sorted({round(i * (len(candidates) - 1) / (picks - 1)) for i in range(picks)})
+    for hours, ref, f, redeemed, times, dominant in (candidates[i] for i in spread):
         sample = {"code": f.get("code_masked"), "account": f.get("account_key_masked"), "gap_hours": round(hours, 2),
                   "earliest_issuance_sources": dominant, "redeemed_at_parsed_utc": redeemed.isoformat(),
-                  "issuance_times_utc": {s: t.isoformat() for t, s in times}, "source_row": raw.get(ref)}
+                  "issuance_times_utc": _by_source(times), "source_row": raw.get(ref)}
         if len(samples) < int(reveal_samples):
             sample["code_REVEALED"] = codes[ref]          # opt-in, for looking one record up at the source
         samples.append(sample)
