@@ -403,9 +403,6 @@ def _replay(db, *, control: dict, config: dict | None, cutoff, integration: dict
     historical = _simulate(evidences, control=hist_control, now_utc=now_utc, lookup=lookup(None), credited={})
     launch_cutoff_assumed = cutoff or now_utc
     launch_control = {**control, "source_config": config, "launch_cutoff_utc": launch_cutoff_assumed}
-    if is_databot:
-        launch_control["source_coverage_end_utc"] = aq.parse_redeemed_at(
-            (integration.get("sync") or {}).get("coverage_end"), "Asia/Kuala_Lumpur")
     at_launch = _simulate(evidences, control=launch_control, now_utc=now_utc, lookup=lookup(real_q),
                           credited=dict(registry))
     return {"stats": stats, "evidences": evidences, "historical": historical, "at_launch": at_launch,

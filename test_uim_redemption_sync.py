@@ -69,21 +69,65 @@ def urow(code, account, wall, *, basis="naive_wallclock", observation="upsert", 
     }
 
 
+def coverage_block(start, end, *, status="complete", basis="voucher_redemption_date", source="operator_declared",
+                   revision=1, latest_observed=None, undeclared_legacy=False):
+    """A batch ``coverage`` block exactly as Databot's ``uim_coverage.public_view`` serialises it: inclusive GMT+8
+    dates plus the half-open UTC bounds (start 00:00 GMT+8, end+1 day 00:00 GMT+8, exclusive)."""
+    out = {"revision": revision, "status": status, "source": source, "basis": basis, "timezone": "Asia/Kuala_Lumpur",
+           "start_date": start, "end_date": end, "start_utc": None, "end_utc_exclusive": None,
+           "latest_observed_redemption_at": latest_observed, "observed_start_date": None, "observed_end_date": None,
+           "declared_at": NOW.isoformat(), "fingerprint": f"fp-{start}-{end}-{status}-{revision}",
+           "undeclared_legacy": undeclared_legacy}
+    if start and end:
+        day = lambda t: datetime.strptime(t, "%Y-%m-%d")                         # noqa: E731
+        out["start_utc"] = (KL.localize(day(start)).astimezone(timezone.utc)).isoformat()
+        out["end_utc_exclusive"] = KL.localize(day(end) + timedelta(days=1)).astimezone(timezone.utc).isoformat()
+    return out
+
+
 class FakeFeed:
     def __init__(self):
         self.batches: list[dict] = []
+        self.coverage_unavailable = False
         self.calls = 0
         self.fail_after: int | None = None
         self.lock = threading.Lock()
 
-    def add_batch(self, rows, *, status="committed", committed_at=None):
+    def add_batch(self, rows, *, status="committed", committed_at=None, coverage=None):
         batch_id = f"b{len(self.batches) + 1}-{uuid.uuid4().hex[:6]}"
         stamped = []
         for i, row in enumerate(rows):
             stamped.append({**row, "ref": f"{batch_id}:log:{i:06d}"} if row is not None else None)
-        self.batches.append({"batch_id": batch_id, "status": status, "rows": stamped,
+        self.batches.append({"batch_id": batch_id, "status": status, "rows": stamped, "coverage": coverage,
                              "committed_at": committed_at or NOW - timedelta(days=1) + timedelta(minutes=len(self.batches))})
         return batch_id
+
+    def set_coverage(self, batch_id, coverage):
+        """Databot's audited correction: the batch's coverage changes, its rows never do."""
+        self.batch(batch_id)["coverage"] = coverage
+
+    def ledger(self):
+        """databot.uim_coverage.v1 as Databot computes it: committed + complete batches only, merged per basis."""
+        by_basis: dict[str, list] = {}
+        for b in self.batches:
+            c = b.get("coverage")
+            if b["status"] == "committed" and c and c["status"] == "complete":
+                by_basis.setdefault(c["basis"], []).append((c["start_date"], c["end_date"], b["batch_id"], c["revision"]))
+        bases = {}
+        for basis, items in by_basis.items():
+            merged = []
+            for start, end, bid, rev in sorted(items):
+                if merged and datetime.strptime(start, "%Y-%m-%d") <= datetime.strptime(merged[-1]["end_date"], "%Y-%m-%d") + timedelta(days=1):
+                    merged[-1]["end_date"] = max(merged[-1]["end_date"], end)
+                else:
+                    merged.append({"start_date": start, "end_date": end})
+            for m in merged:
+                m.update(start_utc=coverage_block(m["start_date"], m["end_date"])["start_utc"],
+                         end_utc_exclusive=coverage_block(m["start_date"], m["end_date"])["end_utc_exclusive"])
+            bases[basis] = {"intervals": merged, "gaps": []}
+        return {"contract": "databot.uim_coverage.v1", "generated_at": NOW.isoformat(), "timezone": "Asia/Kuala_Lumpur",
+                "bases": bases, "partial_batch_ids": [], "inferred_batch_ids": [],
+                "latest_observed_redemption_at": None, "ledger_fingerprint": "x"}
 
     def batch(self, batch_id):
         return next(b for b in self.batches if b["batch_id"] == batch_id)
@@ -96,7 +140,12 @@ class FakeFeed:
                 raise usync.FeedUnavailable(f"feed_http_503 path={path}")
         meta = lambda b: {"batch_id": b["batch_id"], "status": b["status"],  # noqa: E731
                           "committed_at": b["committed_at"].isoformat(), "file_type": "csv",
-                          "rolled_back_at": NOW.isoformat() if b["status"] == "rolled_back" else None}
+                          "rolled_back_at": NOW.isoformat() if b["status"] == "rolled_back" else None,
+                          "coverage": b.get("coverage")}
+        if path == "/coverage":
+            if self.coverage_unavailable:
+                raise usync.FeedUnavailable("feed_http_404 path=/coverage")
+            return self.ledger()
         if path == "/batches":
             start = int(params.get("after") or 0)
             limit = int(params.get("limit") or 200)
@@ -166,8 +215,12 @@ def test_five_invited_one_redemption_previews_one_and_live_is_untouched(monkeypa
     src = out["source"]
     assert src["name"] == aq.SOURCE_DATABOT_UIM and not src["blocked"]
     assert src["success_basis"]["attested"] is True and src["sync"]["last_success_at"] == NOW.isoformat()
-    # Source coverage spans every received row (incl. non-Welcome), as GMT+8 wall clock.
-    assert (src["sync"]["coverage_start"], src["sync"]["coverage_end"]) == ("2026-10-05T14:00:00", "2026-10-05T15:00:00")
+    # The rows span 14:00-15:00 (incl. non-Welcome), as GMT+8 wall clock. That is what was OBSERVED, not coverage:
+    # no final report was declared, so there is no final coverage and the status is inferred / unverified.
+    assert (src["sync"]["observed_start"], src["sync"]["observed_end"]) == ("2026-10-05T14:00:00", "2026-10-05T15:00:00")
+    assert "coverage_end" not in src["sync"] and "coverage_start" not in src["sync"]
+    assert src["sync"]["final_coverage"]["status"] == "inferred_unverified"
+    assert src["sync"]["final_coverage"]["final_coverage_end"] is None
     # The rule is disabled: the live pipeline does nothing with the synced evidence.
     assert run(w, monkeypatch) == {"active": False}
     nothing_live_written(w.db)

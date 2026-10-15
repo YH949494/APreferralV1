@@ -398,7 +398,11 @@ def test_partial_uim_sync_is_reported_not_hidden(monkeypatch):
     assert body["source"]["status"] == rep.SOURCE_PARTIAL and body["status"] == rep.SOURCE_PARTIAL
     assert "uim_batches_partially_synced" in body["source"]["problems"]
     assert by_affiliate(body)["1"]["seven_day_turnover_status"] == rep.TURNOVER_PARTIAL
-    assert body["uim_coverage_end"].endswith("+08:00")
+    # Nothing was declared complete upstream: the latest row is reported as such and is NOT presented as coverage.
+    assert body["uim_coverage_end"] is None
+    cov = body["uim_coverage"]
+    assert cov["status"] == "inferred_unverified" and cov["final_coverage_end"] is None
+    assert cov["latest_observed_redemption_at"].endswith("+08:00")
 
 
 def feed_batches():

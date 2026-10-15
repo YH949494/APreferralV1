@@ -11296,9 +11296,16 @@
     if (sync) {
       notes.push("Last successful sync: <strong>" + (sync.last_success_at ? esc(dt(sync.last_success_at)) : "never") + "</strong>" +
         (sync.last_error ? " · last error: " + esc(sync.last_error) : "") + ".");
-      notes.push("Coverage (redeem time, " + esc(sync.coverage_timezone || "GMT+8") + "): " +
-        (sync.coverage_start ? esc(sync.coverage_start.replace("T", " ")) + " → " + esc(sync.coverage_end.replace("T", " ")) : "—") +
-        " · latest UIM batch committed " + (sync.latest_batch_committed_at ? esc(dt(sync.latest_batch_committed_at)) : "—") + ".");
+      // Two different facts, shown on separate lines: what the rows contain vs what a FINAL report covered.
+      notes.push("Redemptions observed in rows (" + esc(sync.observed_timezone || "GMT+8") + "): " +
+        (sync.observed_start ? esc(sync.observed_start.replace("T", " ")) + " → " + esc(sync.observed_end.replace("T", " ")) : "—") +
+        " — this is NOT coverage · latest UIM batch committed " + (sync.latest_batch_committed_at ? esc(dt(sync.latest_batch_committed_at)) : "—") + ".");
+      var fc = sync.final_coverage || {};
+      var fcLabel = fc.status === "complete" || fc.status === "coverage_gap" || fc.status === "partial"
+        ? (fc.final_coverage_start ? esc(fc.final_coverage_start) + " → " + esc(fc.final_coverage_end) + " (GMT+8, " + esc((fc.basis || "").replace(/_/g, " ")) + ")" : "—")
+        : "not declared (" + esc((fc.status || "none").replace(/_/g, " ")) + ")";
+      notes.push("Final UIM coverage: <strong>" + fcLabel + "</strong>" +
+        ((fc.gaps || []).length ? " · gaps: " + fc.gaps.map(function (g) { return esc(g.start_date) + " → " + esc(g.end_date); }).join(", ") : "") + ".");
     }
     if (sb.basis === "source_contract_successful_only") {
       notes.push(sb.attested ? "Success basis: UIM export attested successful-only by " + esc(sb.attested_by) + " (" + esc(sb.reference) + ")."

@@ -261,9 +261,10 @@ def _source_coverage(db, config, latest, *, now_utc):
         import uim_redemption_sync as sync
         health = sync.sync_health(db, now_utc=now_utc)
         problems.extend(health["problems"])
-        # The sync metadata is explicitly GMT+8 wall clock. This is a coverage
-        # bound, NOT permission to reinterpret legacy redemption timestamps.
-        end = aq.parse_redeemed_at(health.get("coverage_end"), "Asia/Kuala_Lumpur")
+        # The sync metadata is explicitly GMT+8 wall clock. This is the latest redemption OBSERVED in the rows
+        # (deliberately the stricter bound for history proof - declared final coverage is not used here), NOT
+        # permission to reinterpret legacy redemption timestamps.
+        end = aq.parse_redeemed_at(health.get("observed_end"), "Asia/Kuala_Lumpur")
     elif not aq.validate_source_config(config):
         for _, row in aq.iter_committed_source_rows(db, config):
             obs = aq.parse_source_row(row, config)
