@@ -734,30 +734,44 @@ def test_a_stale_snapshot_document_cannot_make_a_terminal_pre_cutoff_invitee_eli
     assert w.db.qualified_events.count_documents({"invitee_id": 101}) == 0
 
 
-def test_a_pre_cutoff_referral_reopened_after_launch_is_not_pulled_into_v2(monkeypatch):
+def test_a_pre_cutoff_referral_cannot_be_reopened_after_launch(monkeypatch):
+    import official_channel_reopen_audit as audit
+
     w = forward_world()
     add(w, 101, "acct-101", status="revoked")                          # terminal before the launch
     add(w, 102, "acct-102", status="pending")                          # active at the launch
     go(w, monkeypatch)
-    control = aq.get_control(w.db)
-    assert aq.handoff_complete(control, NOW)
+    assert aq.handoff_complete(aq.get_control(w.db), NOW)
     assert ev(w, 102)["status"] == aq.EV_QUALIFIED
     assert ev(w, 101)["reason"] == "referral_not_active_at_rollout"
-    # official_channel_reopen_audit --commit later returns the historical row to pending ...
+    before = list(w.db.pending_referrals.find({"invitee_user_id": 101}))
+    locks = list(w.db.referral_invitee_locks.find())
+    eligible = [{"pending_id": str(before[0]["_id"]), "invitee_user_id": 101, "inviter_user_id": 900}]
+    result = audit._reopen(w.db, eligible, NOW + timedelta(minutes=1))     # official_channel_reopen_audit --commit
+    assert result == {"reopened_count": 0, "lock_blocked_pending_ids": [], "refused": "v2_launched"}
+    assert list(w.db.pending_referrals.find({"invitee_user_id": 101})) == before     # no row, no lock written
+    assert list(w.db.referral_invitee_locks.find()) == locks
+    # Even a row that is reopened by some other means is never pulled in by later passes
     w.db.pending_referrals.update_one({"invitee_user_id": 101}, {"$set": {"status": "pending"},
                                                                   "$unset": {"qualification_rule_version": ""}})
-    # ... and the scheduler keeps repeating the hand-off: it must not stamp the reopened row
     assert aq.mark_activation_cohort(w.db, control=aq.get_control(w.db), now_utc=NOW) == 0
     assert w.db.pending_referrals.find_one({"invitee_user_id": 101}).get("qualification_rule_version") is None
-    e = ev(w, 101)
-    assert aq.requeue_evidence(w.db, evidence_id=e["_id"], now_utc=NOW)
-    run(w, monkeypatch, now=NOW + timedelta(minutes=1))
-    assert (ev(w, 101)["status"], ev(w, 101)["reason"]) == (aq.EV_REVIEW, "referral_not_active_at_rollout")
-    assert w.db.qualified_events.count_documents({"invitee_id": 101}) == 0
-    # a referral created after the cutoff is still stamped by later passes
     later = NOW + timedelta(minutes=2)
     w.join(900, 301, at=later, status="pending")
     assert aq.mark_activation_cohort(w.db, control=aq.get_control(w.db), now_utc=NOW + timedelta(minutes=3)) == 1
+
+
+def test_reopen_audit_still_works_before_the_launch():
+    import official_channel_reopen_audit as audit
+
+    w = forward_world()
+    pid = w.db.pending_referrals.insert_one({
+        "invitee_user_id": 401, "inviter_user_id": 900, "status": "revoked", "destination_type": "official_channel",
+        "revoked_reason": "insufficient_engagement", "created_at_utc": OLD_JOIN}).inserted_id
+    result = audit._reopen(w.db, [{"pending_id": str(pid), "invitee_user_id": 401, "inviter_user_id": 900,
+                                   "chat_id": -100}], NOW)
+    assert result["reopened_count"] == 1 and "refused" not in result
+    assert w.db.pending_referrals.find_one({"_id": pid})["status"] == "pending"
 
 
 def test_handoff_is_recorded_complete_only_by_a_pass_at_or_after_the_cutoff(monkeypatch):

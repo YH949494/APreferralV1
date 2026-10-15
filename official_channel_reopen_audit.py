@@ -206,8 +206,15 @@ def build_report(db, now_ts: datetime | None = None) -> dict:
 
 
 def _reopen(db, eligible_rows: list[dict], now_ts: datetime) -> dict:
+    import affiliate_qualification
     import referral_invitee_lock
     from bson import ObjectId
+
+    # This repair exists so the LEGACY settlement can award reopened rows. Once the V2 rule is launched the
+    # legacy award never runs again, so reopening a pre-launch referral would only leave an active row (and a
+    # blocking invitee lock) outside the V2 population. Refuse; nothing is written.
+    if affiliate_qualification.launch_cutoff(affiliate_qualification.get_control(db)) is not None:
+        return {"reopened_count": 0, "lock_blocked_pending_ids": [], "refused": "v2_launched"}
 
     reopened = 0
     lock_blocked_pending_ids = []
@@ -296,6 +303,10 @@ def main() -> int:
         reopen_result = _reopen(db, report["eligible_rows"], now_ts)
         report["reopened_count"] = reopen_result["reopened_count"]
         report["lock_blocked_pending_ids"] = reopen_result["lock_blocked_pending_ids"]
+        if reopen_result.get("refused"):
+            report["refused"] = reopen_result["refused"]
+            print("refused: the V2 qualification rule is launched; reopening pre-launch referrals is disabled",
+                  file=sys.stderr)
 
     if args.json:
         print(json.dumps(report, default=str, indent=2))
