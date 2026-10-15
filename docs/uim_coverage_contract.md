@@ -1,7 +1,7 @@
 # UIM coverage contract (APReferral side)
 
 Companion (Databot side): `docs/uim_coverage_contract.md` in
-[YH949494/Databot](https://github.com/YH949494/Databot) — PR {{DATABOT_PR}}. This PR: {{APREF_PR}}.
+[YH949494/Databot](https://github.com/YH949494/Databot) — PR [#482](https://github.com/YH949494/Databot/pull/482). This PR: [#541](https://github.com/YH949494/APreferralV1/pull/541).
 
 Status: **implemented; nothing deployed, activated or written to production.** `welcome_redemption_v2` stays
 disabled; the reporting snapshot stays `report_mode=preview`, `rule_active=false`, `effects_written=false`.
