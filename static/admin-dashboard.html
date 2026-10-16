@@ -1042,8 +1042,12 @@
           <button class="btn primary" id="ab-create-btn">Create Batch</button>
         </div>
 
-        <div class="section-title" style="margin-top:24px;">Legacy Undated Codes (pre-batch uploads)</div>
-        <div id="ab-legacy-summary" style="margin-bottom:16px;"></div>
+        <!-- Deprecated: legacy undated inventory is superseded by V2 scheduled batches.
+             Kept in the DOM (hidden) so renderAffiliateBatches() still has its target. -->
+        <div id="ab-legacy-section" hidden style="display:none;">
+          <div class="section-title" style="margin-top:24px;">Legacy Undated Codes (pre-batch uploads)</div>
+          <div id="ab-legacy-summary" style="margin-bottom:16px;"></div>
+        </div>
 
         <div class="section-title">Scheduled &amp; Active Batches</div>
         <div class="controls" style="margin-bottom:12px;">
