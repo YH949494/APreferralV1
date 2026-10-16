@@ -446,7 +446,7 @@ def _acquire_admin_xp_cooldown_lock(uid: int, amount: int, *, cooldown_seconds: 
     except DuplicateKeyError:
         return False
     
-def update_user_xp(username, amount, unique_key: str | None = None):
+def update_user_xp(username, amount, unique_key: str | None = None, enforce_cooldown: bool = False):
     # Match username case-insensitively
     user = users_collection.find_one({
         "username": { "$regex": f"^{username}$", "$options": "i" }
@@ -456,7 +456,11 @@ def update_user_xp(username, amount, unique_key: str | None = None):
         return False, "User not found."
 
     cooldown_seconds = int(os.getenv("ADMIN_XP_COOLDOWN_SECONDS", "60"))
-    if unique_key is None and cooldown_seconds > 0:
+    # A caller-supplied key normally replaces the cooldown (the legacy panel's
+    # contract). enforce_cooldown keeps the cooldown for keyed callers that want
+    # both: exactly-once per key AND the fat-finger guard (admin dashboard).
+    use_cooldown = (unique_key is None or enforce_cooldown) and cooldown_seconds > 0
+    if use_cooldown:
         amount_int = int(amount)
         ok = _acquire_admin_xp_cooldown_lock(
             user["user_id"],
@@ -480,7 +484,7 @@ def update_user_xp(username, amount, unique_key: str | None = None):
     granted = grant_xp(db, user["user_id"], "admin_adjust", key, amount)
     if not granted:
         logger.info("[ADMIN_XP][DUPLICATE] uid=%s key=%s", user["user_id"], key)        
-        if unique_key is None and cooldown_seconds > 0:
+        if use_cooldown:
             admin_xp_cooldowns.delete_one({"_id": lock_id})  
         return False, "Duplicate admin XP grant ignored."
 

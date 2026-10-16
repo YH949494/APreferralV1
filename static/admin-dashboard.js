@@ -4750,11 +4750,34 @@
   // `code`/`reason`). `done` is the past participle for the action ("created" /
   // "added"). Server rejections happen before anything is kept, so they can say
   // so; a dropped connection cannot (see DROP_UNKNOWN_OUTCOME_MESSAGE).
-  var DROP_UNKNOWN_OUTCOME_MESSAGE = "The connection dropped, so we can't tell whether this was saved. Check Existing Drops before trying again.";
+  var DROP_UNKNOWN_OUTCOME_MESSAGE = "The connection dropped, so we can't tell whether this was saved. Check Existing Drops, or press the button again with the same details: a repeat of the same request is ignored by the server, never applied twice.";
+  // Stable request ids for write operations the server de-duplicates
+  // (admin_idempotency.py). One id per submission *intent*: a retry of the same
+  // payload (e.g. after a timeout whose outcome is unknown) reuses it, so the server
+  // answers with the first result instead of writing twice; changing the payload or
+  // succeeding starts a new one.
+  var ADMIN_REQUEST_KEYS = {};
+  function newAdminRequestId() {
+    try {
+      if (window.crypto && typeof window.crypto.randomUUID === "function") return "adm-" + window.crypto.randomUUID();
+    } catch (_) { /* fall through */ }
+    return "adm-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 12) + Math.random().toString(36).slice(2, 12);
+  }
+  function adminRequestKey(scope, payload) {
+    var sig = JSON.stringify(payload);
+    var cur = ADMIN_REQUEST_KEYS[scope];
+    if (!cur || cur.sig !== sig) { cur = ADMIN_REQUEST_KEYS[scope] = { sig: sig, key: newAdminRequestId() }; }
+    return cur.key;
+  }
+  function adminRequestKeyDone(scope) { delete ADMIN_REQUEST_KEYS[scope]; }
+
   function dropWriteErrorMessage(d, done) {
     d = d || {};
     var code = d.code, reason = d.reason;
     var nothing = "Nothing was " + (done || "saved") + ".";
+    if (code === "request_in_progress") return "This request is still being processed. Wait a few seconds, then check Existing Drops before sending it again.";
+    if (code === "idempotency_key_reused") return "This request was already used with different details. Reload the page and submit again.";
+    if (code === "bad_idempotency_key") return "The request id was rejected. Reload the page and try again.";
     if (code === "duplicate_code") {
       var sample = (d.duplicateCodes || []).slice(0, 3).join(", ");
       var n = d.duplicates;
@@ -4994,11 +5017,12 @@
       fetch("/v2/miniapp/admin/drops", {
         method: "POST",
         credentials: "same-origin",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "Idempotency-Key": adminRequestKey("create_drop", payload) },
         body: JSON.stringify(payload),
       }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
         .then(function (res) {
           if (!res.ok || res.d.status !== "ok") { var cerr = new Error(dropWriteErrorMessage(res.d, "created")); cerr.fromServer = true; throw cerr; }
+          adminRequestKeyDone("create_drop");
           resultEl.textContent = "Created drop: " + res.d.dropId;
           toast("✅ Voucher drop created: " + res.d.dropId, "success");
           loadDrops(true);
@@ -5018,14 +5042,16 @@
 
       addBtn.disabled = true;
       resultEl.textContent = "Adding…";
+      var addScope = "add_codes:" + dropId;
       fetch("/v2/miniapp/admin/drops/" + encodeURIComponent(dropId) + "/codes", {
         method: "POST",
         credentials: "same-origin",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "Idempotency-Key": adminRequestKey(addScope, payload) },
         body: JSON.stringify(payload),
       }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
         .then(function (res) {
           if (!res.ok || res.d.status !== "ok") { var aerr = new Error(dropWriteErrorMessage(res.d, "added")); aerr.fromServer = true; throw aerr; }
+          adminRequestKeyDone(addScope);
           resultEl.textContent = "Added " + res.d.inserted + " code(s).";
           toast("✅ Added " + res.d.inserted + " code(s)", "success");
           loadDrops(true);
@@ -12523,14 +12549,16 @@
       if (!username || !amount) { resultEl.textContent = "Username and a non-zero XP amount are required."; return; }
       btn.disabled = true;
       resultEl.textContent = "Submitting…";
+      var xpPayload = { user_id: username, xp: amount };
       fetch("/api/add_xp", {
         method: "POST",
         credentials: "same-origin",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ user_id: username, xp: amount }),
+        headers: { "Content-Type": "application/json", "Idempotency-Key": adminRequestKey("xp_adjust", xpPayload) },
+        body: JSON.stringify(xpPayload),
       }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
         .then(function (res) {
           if (!res.ok || !res.d.success) throw new Error(res.d.message || "unknown");
+          adminRequestKeyDone("xp_adjust");
           resultEl.textContent = res.d.message || "XP updated.";
           toast("✅ " + (res.d.message || "XP updated"), "success");
           $("#xp-amount").value = "";
