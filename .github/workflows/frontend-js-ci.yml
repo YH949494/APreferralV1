@@ -1,0 +1,59 @@
+name: Frontend JS CI
+
+# Runs every frontend JavaScript test file (test_*.js, *.test.js) on each PR.
+# The Mini App / Creator Share / admin pages have no build step; their tests
+# extract inline <script> source from static/*.html and run it in a node:vm
+# sandbox, so nothing beyond Node itself is needed for those.
+#
+# test_settings_categorization.test.js also checks Python <-> JS settings
+# parity by importing settings_service, so the runtime Python dependencies
+# are installed too (no Mongo server, no secrets: the import does not connect).
+#
+# ci/run_js_tests.js runs each file in its own process with a timeout and a
+# heap cap, and fails on any failing/cancelled/timed-out file or a file that
+# ran zero tests. There is no known-failure allowlist. Nothing here deploys.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: frontend-js-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  js-tests:
+    name: JavaScript test suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install Python runtime dependencies (settings parity test)
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run all JavaScript tests
+        run: node ci/run_js_tests.js
+
+      - name: Run all JavaScript tests again in a shuffled file order
+        # A different order on every run catches tests that only pass after
+        # (or before) another file; the seed is printed for reproduction.
+        run: node ci/run_js_tests.js --shuffle

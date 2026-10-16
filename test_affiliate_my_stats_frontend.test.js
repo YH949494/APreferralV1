@@ -37,9 +37,15 @@ function loadRenderers() {
 }
 
 // Build the myCard markup exactly as loadAffiliateLeaderboard does, from the
-// real source between the progress comment and the campaign banner.
+// real source between the progress comment and the first render branch.
+// (The end marker used to be the campaign banner, removed in 7d22973 when
+// manual campaign participants moved into the regular leaderboard rows and
+// My Stats became genuine-only.)
+const MY_CARD_START = "// Tier progress comes entirely from the backend";
+const MY_CARD_END = "if (!rows.length) {\n          target.innerHTML = `${isAdmin ? renderAffiliateHistoryControls(weeks)";
+
 function renderMyCard(my) {
-  const src = slice("// Tier progress comes entirely from the backend", "const campaignBanner = campaignActive");
+  const src = slice(MY_CARD_START, MY_CARD_END);
   const ctx = loadRenderers();
   ctx.my = my;
   ctx.monthLabel = "2026-09";
@@ -91,9 +97,40 @@ test("a negative remaining value from any source is never shown", () => {
 });
 
 test("frontend does not restate tier thresholds", () => {
-  const src = slice("// Tier progress comes entirely from the backend", "const campaignBanner = campaignActive");
+  const src = slice(MY_CARD_START, MY_CARD_END);
   for (const needle of ["THRESHOLD", ">= 25", ">= 50", ">= 150", ">= 250", "- my.qualified_month"]) {
     assert.ok(!src.includes(needle), `threshold logic leaked into frontend: ${needle}`);
+  }
+});
+
+test("missing or legacy my_stats fields render safe placeholders, never NaN/undefined", () => {
+  // Legacy payloads predate next_tier/qualified_left/next_reward_value.
+  const card = renderMyCard({ qualified_month: 4 });
+  assert.equal(rowValue(card, "Qualified"), "4");
+  assert.equal(rowValue(card, "Joins"), "0");
+  assert.equal(rowValue(card, "Left to Next Tier"), "—");
+  assert.equal(rowValue(card, "Next Tier"), "—");
+  assert.equal(rowValue(card, "Reward"), "—");
+  assert.doesNotMatch(card, /NaN|undefined|null/);
+
+  const nonNumeric = renderMyCard({ qualified_month: null, joins_month: null, qualified_left: "abc", next_reward_value: "n/a" });
+  assert.equal(rowValue(nonNumeric, "Qualified"), "0");
+  assert.equal(rowValue(nonNumeric, "Joins"), "0");
+  assert.equal(rowValue(nonNumeric, "Left to Next Tier"), "0");
+  assert.equal(rowValue(nonNumeric, "Reward"), "$0");
+  assert.doesNotMatch(nonNumeric, /NaN|undefined/);
+});
+
+test("no my_stats (logged out) renders the login prompt instead of a zeroed card", () => {
+  const card = renderMyCard(undefined);
+  assert.match(card, /login_affiliate_stats/);
+  assert.doesNotMatch(card, /My Stats/);
+});
+
+test("My Stats stays genuine-only: it never reads campaign/manual display data", () => {
+  const src = slice(MY_CARD_START, MY_CARD_END);
+  for (const needle of ["campaign", "manual", "display_override", "rows["]) {
+    assert.ok(!src.toLowerCase().includes(needle.toLowerCase()), `My Stats must not read ${needle} data`);
   }
 });
 

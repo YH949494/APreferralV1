@@ -375,6 +375,16 @@ function drop(overrides) {
   );
 }
 
+function checkOnlyCallCount(fetchLog) {
+  return fetchLog.filter((c) => {
+    try {
+      return !!JSON.parse((c.init && c.init.body) || "{}").check_only;
+    } catch {
+      return false;
+    }
+  }).length;
+}
+
 // ---------------------------------------------------------------------
 // 1. No active voucher -> original Live Drop layout untouched
 // ---------------------------------------------------------------------
@@ -406,7 +416,7 @@ test("primary already claimed, no other active voucher -> falls back to the orig
 // ---------------------------------------------------------------------
 
 test("one active unclaimed voucher -> single compact reward row, no 'more' link, no duplicated title", async () => {
-  const { sandbox, byId } = buildSandbox();
+  const { sandbox, byId, fetchLog } = buildSandbox();
   run(sandbox);
   sandbox.renderCampaignDrops(drop({ dropId: "d1", name: "$5 Voucher" }), [], null);
 
@@ -419,21 +429,38 @@ test("one active unclaimed voucher -> single compact reward row, no 'more' link,
   const claimBtn = findByClass(rows[0], "ap-reward-compact-claim");
   assert.ok(claimBtn);
   assert.equal(claimBtn.dataset.dropid, "d1");
-  assert.equal(claimBtn.disabled, true, "Claim now starts disabled until channel verification passes");
+  // Card render never live-probes channel membership (b2b1e45): a cache
+  // miss is "unknown", not "not subscribed", so Claim now is enabled and the
+  // real /vouchers/claim request stays the sole authoritative gate.
+  assert.equal(claimBtn.disabled, false, "Claim now is enabled on render; the claim request is the authoritative channel gate");
 
   assert.equal(findByClass(byId["campaign-voucher-list"], "ap-reward-compact-more"), null);
   assert.equal(byId["ap-hero-subtitle"].style.display, "none", "campaign description must not be repeated");
   assert.equal(byId["campaign-voucher-message"].style.display, "none", "'tap below to claim' must not be repeated");
   assert.equal(findByClass(byId["campaign-voucher-list"], "campaign-card"), null, "no nested full campaign card");
 
-  // Default fetch mock reports the drop's channel check_only probe as
-  // subscribed; once that promise chain settles, Claim now unlocks and the
-  // status row shows "Joined Official Channel".
   for (let i = 0; i < 10; i++) await Promise.resolve();
   const channelRow = findByClass(rows[0], "ap-reward-compact-channel");
+  assert.equal(channelRow.style.display, "none", "no channel status row without a positive cached flag");
+  assert.equal(claimBtn.disabled, false);
+  assert.equal(checkOnlyCallCount(fetchLog), 0, "render must not fire a check_only channel probe");
+});
+
+test("a cached positive subscription (drop.channelSubscribed) shows '✓ Joined Official Channel' with Claim now enabled", async () => {
+  const { sandbox, byId, fetchLog } = buildSandbox();
+  run(sandbox);
+  sandbox.renderCampaignDrops(drop({ dropId: "d1", channelSubscribed: true }), [], null);
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+
+  const row = findByClass(byId["campaign-voucher-list"], "ap-reward-compact");
+  const channelRow = findByClass(row, "ap-reward-compact-channel");
+  const claimBtn = findByClass(row, "ap-reward-compact-claim");
   assert.equal(channelRow.dataset.joined, "true");
+  assert.equal(channelRow.dataset.channelState, "subscribed");
+  assert.equal(channelRow.style.display, "flex");
   assert.match(channelRow.textContent, /Joined Official Channel/);
-  assert.equal(claimBtn.disabled, false, "Claim now unlocks once the channel check confirms subscription");
+  assert.equal(claimBtn.disabled, false);
+  assert.equal(checkOnlyCallCount(fetchLog), 0, "the cached flag is read from /vouchers/visible, never probed");
 });
 
 test("two active unclaimed vouchers -> compact row plus '1 more reward in My Rewards'", () => {
@@ -510,90 +537,109 @@ test("a claimable personalised-type voucher gets the compact row too, not just p
   assert.equal(claimBtn.disabled, false);
 });
 
-test("an unsubscribed user sees the 'Join Official Channel' row and Claim now stays disabled", async () => {
-  const { sandbox, byId } = buildSandbox({
+// Channel membership: the claim request is the authoritative gate. These
+// replace the pre-b2b1e45 tests that pinned a per-render check_only probe
+// (and a disabled-until-verified Claim now) which was removed on purpose:
+// that probe hit Telegram getChatMember on every card render and blocked
+// subscribed users on any latency/429/error.
+
+function captureIntervals(sandbox) {
+  // renderClaimError starts 1s countdown intervals (rejoin buffer: up to an
+  // hour). Track them so each test clears what it started and never leaves
+  // a live handle keeping the runner open.
+  const ids = [];
+  const realSetInterval = sandbox.setInterval;
+  sandbox.setInterval = (fn, ms) => {
+    const id = realSetInterval(fn, ms);
+    ids.push(id);
+    return id;
+  };
+  return () => ids.forEach((id) => clearInterval(id));
+}
+
+test("an unsubscribed user's Claim is rejected server-side (403 not_subscribed) and surfaces the Join Official Channel CTA", async () => {
+  const claimBodies = [];
+  const { sandbox, byId, fetchLog } = buildSandboxWithClickCapture({
     fetchImpl: async (url, init) => {
       if (String(url).includes("/vouchers/visible")) {
-        return { ok: true, status: 200, json: async () => ({ status: "ok", drops: [] }) };
+        // Cache says "not subscribed" (or unknown): the flag is not true.
+        return { ok: true, status: 200, json: async () => ({ status: "ok", drops: [drop({ dropId: "d1", channelSubscribed: false })] }) };
       }
-      // check_only channel-gate probe: simulate "not subscribed".
-      return {
-        ok: false,
-        status: 403,
-        json: async () => ({ code: "not_subscribed", message: "Subscribe to unlock" }),
-      };
+      claimBodies.push(JSON.parse((init && init.body) || "{}"));
+      return { ok: false, status: 403, json: async () => ({ code: "not_subscribed", message: "Subscribe to unlock" }) };
     },
   });
   run(sandbox);
-  sandbox.renderCampaignDrops(drop({ dropId: "d1", name: "$5 Voucher", type: "pooled" }), [], null);
+  const onClick = findClaimListener(sandbox);
+  const opened = [];
+  sandbox.tg.openTelegramLink = (url) => opened.push(url);
 
-  // The gate check is async (fire-and-forget from renderCompactVoucherRow);
-  // let its promise chain (v2Fetch -> res.json() -> .then()) settle.
-  for (let i = 0; i < 10; i++) await Promise.resolve();
-
+  await sandbox.loadVouchers();
   const row = findByClass(byId["campaign-voucher-list"], "ap-reward-compact");
   const claimBtn = findByClass(row, "ap-reward-compact-claim");
   const channelRow = findByClass(row, "ap-reward-compact-channel");
-  const channelSub = findByClass(row, "ap-reward-compact-channel-sub");
+  assert.equal(channelRow.style.display, "none", "a cache miss/false never renders a guessed 'not joined' state");
+  assert.notEqual(channelRow.dataset.joined, "true", "an unconfirmed user is never shown as joined");
+  assert.equal(checkOnlyCallCount(fetchLog), 0);
 
-  assert.equal(claimBtn.disabled, true, "Claim now must stay disabled until the channel check passes");
-  assert.equal(channelRow.dataset.joined, "false");
-  assert.match(channelRow.textContent, /Join Official Channel/);
-  assert.equal(channelSub.style.display, "block");
-  assert.match(channelSub.textContent, /Required to claim/);
+  await onClick({ target: claimBtn });
 
-  // Clicking the row must open the existing Official Channel link, reusing
-  // the same tg.openTelegramLink helper the rest of the app uses.
-  const opened = [];
-  sandbox.tg.openTelegramLink = (url) => opened.push(url);
-  channelRow.onclick();
-  assert.deepEqual(opened, ["https://t.me/advantplayofficial"]);
+  assert.equal(claimBodies.length, 1, "exactly one real claim request");
+  assert.ok(!claimBodies[0].check_only, "the gate is the real claim, not a probe");
+  const errorCard = findByClass(byId["claim-error"], "claim-error-card");
+  assert.ok(errorCard, "the server rejection must be rendered, not swallowed");
+  assert.equal(findByClass(errorCard, "claim-error-title").textContent, "subscribe_required");
+  const cta = findAllByClass(errorCard, "btn-ghost")[0];
+  assert.ok(cta, "a Join Official Channel CTA is offered");
+  assert.equal(cta.textContent, "join_official_channel_btn");
+  cta.click();
+  assert.deepEqual(opened, ["https://t.me/advantplayofficial"], "CTA opens the Official Channel via tg.openTelegramLink");
+
+  const rowAfter = findByClass(byId["campaign-voucher-list"], "ap-reward-compact");
+  assert.equal(findByClass(rowAfter, "ap-reward-compact-claim").dataset.dropid, "d1", "voucher stays in the slot for a retry after joining");
+  assert.equal(sandbox.__claimInFlight, false, "in-flight lock released");
 });
 
-test("returning to the Mini App (visibilitychange) re-runs the same channel check to refresh state", async () => {
+test("returning to the Mini App (visibilitychange) re-reads /vouchers/visible and picks up the refreshed cached subscription", async () => {
   let subscribed = false;
+  let visibleCalls = 0;
   const { sandbox, byId, fetchLog } = buildSandbox({
-    fetchImpl: async (url, init) => {
+    fetchImpl: async (url) => {
       if (String(url).includes("/vouchers/visible")) {
-        return { ok: true, status: 200, json: async () => ({ status: "ok", drops: [] }) };
+        visibleCalls += 1;
+        return { ok: true, status: 200, json: async () => ({ status: "ok", drops: [drop({ dropId: "d1", channelSubscribed: subscribed })] }) };
       }
-      return subscribed
-        ? { ok: true, status: 200, json: async () => ({ status: "ok" }) }
-        : { ok: false, status: 403, json: async () => ({ code: "not_subscribed" }) };
+      return { ok: true, status: 200, json: async () => ({ status: "ok" }) };
     },
   });
   run(sandbox);
-  sandbox.renderCampaignDrops(drop({ dropId: "d1", name: "$5 Voucher", type: "pooled" }), [], null);
-  for (let i = 0; i < 10; i++) await Promise.resolve();
+  await sandbox.loadVouchers();
+  let channelRow = findByClass(findByClass(byId["campaign-voucher-list"], "ap-reward-compact"), "ap-reward-compact-channel");
+  assert.equal(channelRow.style.display, "none");
+  assert.equal(visibleCalls, 1);
 
-  const row = findByClass(byId["campaign-voucher-list"], "ap-reward-compact");
-  const claimBtn = findByClass(row, "ap-reward-compact-claim");
-  assert.equal(claimBtn.disabled, true);
-  const checksSoFar = fetchLog.length;
-
-  // User joins the channel elsewhere and returns to the Mini App.
+  // User joins the channel elsewhere; the audit/claim path refreshes the cache.
   subscribed = true;
   const listeners = sandbox.document._listeners.visibilitychange || [];
   assert.ok(listeners.length > 0, "a visibilitychange listener must be registered");
   listeners.forEach((fn) => fn());
-  for (let i = 0; i < 10; i++) await Promise.resolve();
+  for (let i = 0; i < 40; i++) await Promise.resolve();
 
-  assert.ok(fetchLog.length > checksSoFar, "returning to the app must re-run the channel check");
-  assert.equal(claimBtn.disabled, false, "Claim now unlocks once the refreshed check confirms subscription");
+  assert.equal(visibleCalls, 2, "returning to the app re-reads /vouchers/visible exactly once");
+  channelRow = findByClass(findByClass(byId["campaign-voucher-list"], "ap-reward-compact"), "ap-reward-compact-channel");
+  assert.equal(channelRow.dataset.joined, "true");
+  assert.match(channelRow.textContent, /Joined Official Channel/);
+  assert.equal(checkOnlyCallCount(fetchLog), 0, "refresh is cache-only: no live Telegram probe");
 });
 
-test("a rejoin-buffer probe response is treated as subscribed, not 'not subscribed'", async () => {
-  // check_only can 403 with code=rejoin_buffer_active for an *already
-  // subscribed* user serving an anti-abuse cooldown — that's a claim-
-  // eligibility gate, not a channel-membership gate, and has its own
-  // countdown UI (claimErrorToUi/renderClaimError) surfaced by the real
-  // claim attempt. The compact row must not mislabel this as "not joined"
-  // or leave Claim now permanently disabled (which would make that real
-  // claim attempt unreachable).
-  const { sandbox, byId } = buildSandbox({
+test("a rejoin-buffer claim rejection keeps the user labelled as a subscriber and shows the cooldown, not 'Join Official Channel'", async () => {
+  // rejoin_buffer_active is a claim-eligibility cooldown for a user who IS
+  // subscribed; it has its own countdown UI and must never be presented as
+  // "not joined" (test_rejoin_buffer_claim_ui.test.js covers the countdown).
+  const { sandbox, byId } = buildSandboxWithClickCapture({
     fetchImpl: async (url) => {
       if (String(url).includes("/vouchers/visible")) {
-        return { ok: true, status: 200, json: async () => ({ status: "ok", drops: [] }) };
+        return { ok: true, status: 200, json: async () => ({ status: "ok", drops: [drop({ dropId: "d1", channelSubscribed: true })] }) };
       }
       return {
         ok: false,
@@ -607,17 +653,27 @@ test("a rejoin-buffer probe response is treated as subscribed, not 'not subscrib
       };
     },
   });
-  run(sandbox);
-  sandbox.renderCampaignDrops(drop({ dropId: "d1", name: "$5 Voucher", type: "pooled" }), [], null);
-  for (let i = 0; i < 10; i++) await Promise.resolve();
+  const clearIntervals = captureIntervals(sandbox);
+  try {
+    run(sandbox);
+    const onClick = findClaimListener(sandbox);
+    await sandbox.loadVouchers();
+    const row = findByClass(byId["campaign-voucher-list"], "ap-reward-compact");
+    const claimBtn = findByClass(row, "ap-reward-compact-claim");
+    const channelRow = findByClass(row, "ap-reward-compact-channel");
+    assert.equal(claimBtn.disabled, false, "Claim now must be reachable so the rejoin-buffer countdown can surface");
 
-  const row = findByClass(byId["campaign-voucher-list"], "ap-reward-compact");
-  const claimBtn = findByClass(row, "ap-reward-compact-claim");
-  const channelRow = findByClass(row, "ap-reward-compact-channel");
+    await onClick({ target: claimBtn });
 
-  assert.equal(channelRow.dataset.joined, "true", "the user is subscribed; only the rejoin cooldown blocks claiming");
-  assert.match(channelRow.textContent, /Joined Official Channel/);
-  assert.equal(claimBtn.disabled, false, "Claim now must stay reachable so the rejoin-buffer countdown can surface");
+    assert.equal(channelRow.dataset.joined, "true", "the user is subscribed; only the rejoin cooldown blocks claiming");
+    const errorCard = findByClass(byId["claim-error"], "claim-error-card");
+    assert.ok(errorCard);
+    assert.equal(findByClass(errorCard, "claim-error-title").textContent, "Please stay subscribed");
+    assert.doesNotMatch(allText(errorCard).join(" "), /Join Official Channel|join_official_channel_btn/);
+    assert.match(findByClass(errorCard, "claim-error-countdown").textContent, /Try again in/);
+  } finally {
+    clearIntervals();
+  }
 });
 
 // ---------------------------------------------------------------------
@@ -706,11 +762,10 @@ function buildSandboxWithClickCapture(opts) {
   return ctx;
 }
 
-// Routes a v2Fetch mock by endpoint + intent, since createCampaignCard's
-// channel-gate check reuses the same /vouchers/claim URL with
-// `check_only: true` for every non-primary drop it renders (existing,
-// unchanged behaviour) — a naive call-order queue would misattribute that
-// probe as the test's real claim response.
+// Routes a v2Fetch mock by endpoint + intent. Card render no longer sends a
+// `check_only: true` channel probe to /vouchers/claim (b2b1e45), but the
+// routing stays so a reintroduced probe could never be misattributed as the
+// test's real claim response by a naive call-order queue.
 function routedFetch({ visibleResponses, claimResponses }) {
   let visibleCall = 0;
   let claimCall = 0;
