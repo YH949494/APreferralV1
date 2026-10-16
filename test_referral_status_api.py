@@ -157,6 +157,53 @@ def test_pending_referral_shape_and_time_fields():
     assert item["display_label"] == "@abc"
 
 
+def test_remaining_hold_uses_48h_production_default_when_unconfigured():
+    """With no referral_config.qualify_hold_hours setting, the hold falls back
+    to REFERRAL_HOLD_HOURS (48h default in main.py)."""
+    env = _load_symbols()
+    _inject_unified_stubs(env)
+    env["get_app_setting"] = lambda group, key: None
+    assert env["REFERRAL_HOLD_HOURS"] == 48
+    now = datetime(2026, 5, 14, 12, 0, tzinfo=timezone.utc)
+    env.update(
+        {
+            "pending_referrals_collection": _Collection([
+                {"inviter_user_id": 1, "invitee_user_id": 10, "status": "pending",
+                 "created_at_utc": now - timedelta(hours=3, minutes=10)}
+            ]),
+            "qualified_events_collection": _Collection([]),
+            "referral_events_collection": _Collection([]),
+        }
+    )
+    out = env["_build_referral_status_payload"](1, now)
+    assert out["hold_hours"] == 48
+    assert out["referrals"][0]["remaining_hold_hours"] == 45
+
+
+def test_remaining_hold_falls_back_to_default_when_setting_read_fails():
+    env = _load_symbols()
+    _inject_unified_stubs(env)
+
+    def _boom(group, key):
+        raise RuntimeError("settings unavailable")
+
+    env["get_app_setting"] = _boom
+    now = datetime(2026, 5, 14, 12, 0, tzinfo=timezone.utc)
+    env.update(
+        {
+            "pending_referrals_collection": _Collection([
+                {"inviter_user_id": 1, "invitee_user_id": 10, "status": "pending",
+                 "created_at_utc": now - timedelta(hours=3, minutes=10)}
+            ]),
+            "qualified_events_collection": _Collection([]),
+            "referral_events_collection": _Collection([]),
+        }
+    )
+    out = env["_build_referral_status_payload"](1, now)
+    assert out["hold_hours"] == 48
+    assert out["referrals"][0]["remaining_hold_hours"] == 45
+
+
 def test_invitee_display_label_fallbacks_and_masking():
     env = _load_symbols()
     _inject_unified_stubs(env)
