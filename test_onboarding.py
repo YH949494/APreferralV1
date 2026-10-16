@@ -208,6 +208,9 @@ class OnboardingTests(unittest.TestCase):
         with (
             patch.object(vouchers, "verify_telegram_init_data", return_value=(True, parsed, None)),
             patch.object(vouchers, "user_visible_drops", return_value=([], None)),
+            # api_visible also appends affiliate bundle cards from the db;
+            # this test is only about the E0 onboarding side effect.
+            patch.object(vouchers, "affiliate_bundle_visible_cards", return_value=[]),
             patch.object(vouchers, "users_collection", self.users),
             patch.object(onboarding, "now_utc", return_value=fixed_now),
         ):
@@ -462,31 +465,16 @@ class OnboardingTests(unittest.TestCase):
                 self.effective_chat = FakeChat(chat_id)
                 self.effective_user = FakeUser(999)
 
-        class FakeCollection:
-            def list_indexes(self):
-                return []
-
-            def create_index(self, *args, **kwargs):  # noqa: ARG002
-                return None
-
-            def aggregate(self, *args, **kwargs):  # noqa: ARG002
-                return []
-
-            def delete_many(self, *args, **kwargs):  # noqa: ARG002
-                return None
-
-        class FakeDB:
-            def __getitem__(self, name):  # noqa: ARG002
-                return FakeCollection()
-
-            def __getattr__(self, name):  # noqa: ARG002
-                return FakeCollection()
-
         with patch.dict(os.environ, {"BOT_TOKEN": "123:ABC", "MONGO_URL": "mongodb://localhost/test"}):
             import database
 
+            # mongomock: a fresh `import main` runs its full import-time index
+            # setup (index_information, create_index, ...). Whether that import
+            # happens here depends on test order, so it must work either way.
+            import mongomock
+
             with patch.object(database, "init_db", return_value=None), patch.object(
-                database, "get_db", return_value=FakeDB()
+                database, "get_db", return_value=mongomock.MongoClient()["onboarding_e3"]
             ):
                 main = importlib.import_module("main")
 

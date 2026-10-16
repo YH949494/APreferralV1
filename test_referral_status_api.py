@@ -3,6 +3,7 @@ import os
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from referral_rules import build_public_referral_status
+from referral_ledger import with_not_invalidated
 
 
 def _load_symbols():
@@ -14,6 +15,7 @@ def _load_symbols():
         "_map_referral_status",
         "build_public_referral_user_label",
         "_build_referral_status_payload",
+        "_referral_hold_hours",
         "api_referral_status",
     }
     body = []
@@ -27,11 +29,20 @@ def _load_symbols():
             body.append(node)
     isolated = ast.Module(body=body, type_ignores=[])
     ast.fix_missing_locations(isolated)
-    env = {"os": os}
+    # Names referenced in signatures (``now_utc: datetime``) are evaluated when
+    # the ``def`` executes, so they must be present before exec, not after.
+    env = {
+        "os": os,
+        "datetime": datetime,
+        "timezone": timezone,
+        "json": __import__("json"),
+        "with_not_invalidated": with_not_invalidated,
+        # Pin the hold window these tests were written against (12h) rather
+        # than inheriting the production default (48h), so the hold arithmetic
+        # assertions below are about the calculation, not the config value.
+        "get_app_setting": lambda group, key: 12 if (group, key) == ("referral_config", "qualify_hold_hours") else None,
+    }
     exec(compile(isolated, filename="main.py", mode="exec"), env)  # noqa: S102
-    env["datetime"] = datetime
-    env["timezone"] = timezone
-    env["json"] = __import__("json")
     return env
 
 
@@ -57,9 +68,15 @@ class _Collection:
         self.docs = docs
 
     def find(self, query, projection=None):
-        def _match(doc):
+        def _match(doc, query=query):
             for k, v in query.items():
-                if isinstance(v, dict) and "$in" in v:
+                if k == "$or":
+                    if not any(_match(doc, sub) for sub in v):
+                        return False
+                elif isinstance(v, dict) and "$exists" in v:
+                    if (k in doc) != bool(v["$exists"]):
+                        return False
+                elif isinstance(v, dict) and "$in" in v:
                     if doc.get(k) not in v["$in"]:
                         return False
                 elif doc.get(k) != v:
@@ -138,6 +155,53 @@ def test_pending_referral_shape_and_time_fields():
     assert item["remaining_hold_hours"] == 9
     assert item["qualified_at"] is None
     assert item["display_label"] == "@abc"
+
+
+def test_remaining_hold_uses_48h_production_default_when_unconfigured():
+    """With no referral_config.qualify_hold_hours setting, the hold falls back
+    to REFERRAL_HOLD_HOURS (48h default in main.py)."""
+    env = _load_symbols()
+    _inject_unified_stubs(env)
+    env["get_app_setting"] = lambda group, key: None
+    assert env["REFERRAL_HOLD_HOURS"] == 48
+    now = datetime(2026, 5, 14, 12, 0, tzinfo=timezone.utc)
+    env.update(
+        {
+            "pending_referrals_collection": _Collection([
+                {"inviter_user_id": 1, "invitee_user_id": 10, "status": "pending",
+                 "created_at_utc": now - timedelta(hours=3, minutes=10)}
+            ]),
+            "qualified_events_collection": _Collection([]),
+            "referral_events_collection": _Collection([]),
+        }
+    )
+    out = env["_build_referral_status_payload"](1, now)
+    assert out["hold_hours"] == 48
+    assert out["referrals"][0]["remaining_hold_hours"] == 45
+
+
+def test_remaining_hold_falls_back_to_default_when_setting_read_fails():
+    env = _load_symbols()
+    _inject_unified_stubs(env)
+
+    def _boom(group, key):
+        raise RuntimeError("settings unavailable")
+
+    env["get_app_setting"] = _boom
+    now = datetime(2026, 5, 14, 12, 0, tzinfo=timezone.utc)
+    env.update(
+        {
+            "pending_referrals_collection": _Collection([
+                {"inviter_user_id": 1, "invitee_user_id": 10, "status": "pending",
+                 "created_at_utc": now - timedelta(hours=3, minutes=10)}
+            ]),
+            "qualified_events_collection": _Collection([]),
+            "referral_events_collection": _Collection([]),
+        }
+    )
+    out = env["_build_referral_status_payload"](1, now)
+    assert out["hold_hours"] == 48
+    assert out["referrals"][0]["remaining_hold_hours"] == 45
 
 
 def test_invitee_display_label_fallbacks_and_masking():
@@ -238,6 +302,31 @@ def test_referral_revoked_maps_failed_without_qualified():
     out = env["_build_referral_status_payload"](1, now)
     assert out["referrals"][0]["status"] == "failed"
     assert out["referrals"][0]["status_label"] == "Not eligible"
+
+
+def test_invalidated_revocation_does_not_mark_referral_failed():
+    """A referral_revoked event later invalidated (ledger repair) must not
+    surface as "failed" — main.py filters it via with_not_invalidated."""
+    env = _load_symbols()
+    _inject_unified_stubs(env)
+    now = datetime.now(timezone.utc)
+    env.update(
+        {
+            "pending_referrals_collection": _Collection([
+                {"inviter_user_id": 1, "invitee_user_id": 10, "status": "pending", "created_at_utc": now},
+                {"inviter_user_id": 1, "invitee_user_id": 11, "status": "pending", "created_at_utc": now},
+            ]),
+            "qualified_events_collection": _Collection([]),
+            "referral_events_collection": _Collection([
+                {"inviter_id": 1, "invitee_id": 10, "event": "referral_revoked", "invalidated": True},
+                {"inviter_id": 1, "invitee_id": 11, "event": "referral_revoked", "invalidated": False},
+            ]),
+        }
+    )
+    out = env["_build_referral_status_payload"](1, now)
+    by_invitee = {r["invitee_user_id"]: r["status"] for r in out["referrals"]}
+    assert by_invitee[10] == "pending"
+    assert by_invitee[11] == "failed"
 
 
 def test_specific_public_reason_mappings():

@@ -4944,11 +4944,23 @@ def is_drop_active(doc: dict, ref: datetime) -> bool:
         return False
     return starts <= ref < ends
 
+def _is_internal_only_drop(drop: dict | None) -> bool:
+    """internal_only drops are server-issued only: never listed to users and
+    never claimable through /vouchers/claim (admin listings are unaffected)."""
+    return (drop or {}).get("internal_only") is True
+
+
+# Query clause matching every drop except internal_only=True ones (a missing
+# or false flag is an ordinary drop).
+NOT_INTERNAL_ONLY_FILTER = {"internal_only": {"$ne": True}}
+
+
 def get_active_drops(ref: datetime):
     return list(db.drops.find({
         "status": {"$nin": ["expired", "paused"]},
         "startsAt": {"$lte": ref},
-        "endsAt": {"$gt": ref}
+        "endsAt": {"$gt": ref},
+        **NOT_INTERNAL_ONLY_FILTER,
     }))
 
 def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None):
@@ -6110,6 +6122,7 @@ def api_drop_mode():
         {
             "startsAt": {"$lte": now},
             "endsAt": {"$gt": now},
+            **NOT_INTERNAL_ONLY_FILTER,
         },
         sort=[("priority", DESCENDING), ("startsAt", DESCENDING)],
     )
@@ -6213,6 +6226,8 @@ def claim_voucher_for_user(*, user_id: str, drop_id: str, username: str) -> dict
     drop = db.drops.find_one({"_id": _coerce_id(drop_id)})
     if not drop:
         raise NotEligible("drop_not_found")
+    if _is_internal_only_drop(drop):
+        raise NotEligible("internal_only")
 
     dtype = _normalize_drop_type(drop.get("type", "pooled"))
     usernameLower = norm_username(username)
@@ -6325,6 +6340,16 @@ def api_claim():
     deletion_guard = _drop_deletion_guard(drop)
     if deletion_guard:
         return deletion_guard
+
+    if _is_internal_only_drop(drop):
+        logger.info(
+            "[CLAIM_BLOCK] reason=%s drop_id=%s uid=%s username=%s",
+            "internal_only",
+            drop_id,
+            user_id_str,
+            username,
+        )
+        return jsonify({"status": "error", "code": "not_eligible", "reason": "internal_only"}), 403
 
     now_ref = now_utc()
     starts_at = _as_aware_utc(drop.get("startsAt"))

@@ -126,7 +126,9 @@ def test_the_workflow_deploys_nothing_and_needs_no_secret():
 def test_the_baseline_file_is_present_and_well_formed():
     assert BASELINE.exists(), "ci/known_test_failures.txt is missing"
     lines = [l for l in BASELINE.read_text().splitlines() if l.strip()]
-    assert lines, "the baseline is empty; an empty baseline compares against nothing"
+    # An empty baseline is valid — and the strictest state: full_suite_baseline
+    # then fails on ANY failing test, so truncating the file can never hide
+    # one (every real failure would surface as "new").
     bad = [l for l in lines if not re.match(r"^(FAILED|ERROR) [A-Za-z0-9_]+\.py", l)]
     assert not bad, f"malformed baseline entries: {bad[:5]}"
 

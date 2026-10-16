@@ -4,6 +4,21 @@ from datetime import datetime, timezone
 
 import scheduler
 
+_ORIG_DISABLE_LEVEL = logging.NOTSET
+
+
+def setUpModule():
+    # Several test modules call logging.disable(logging.CRITICAL) at import
+    # time and never re-enable it; in a full-suite run that silences every
+    # assertLogs() below (same guard as test_referral_ledger_integrity.py).
+    global _ORIG_DISABLE_LEVEL
+    _ORIG_DISABLE_LEVEL = logging.root.manager.disable
+    logging.disable(logging.NOTSET)
+
+
+def tearDownModule():
+    logging.disable(_ORIG_DISABLE_LEVEL)
+
 
 class _FakeReferralEventsWithRows:
     """Fake referral_events collection whose aggregate() returns pre-baked rows."""

@@ -103,7 +103,7 @@ WEEK = "2026-W25"
 passed = failed = 0
 
 
-def test(name, fn):
+def _run_case(name, fn):  # not named test*: pytest would collect it
     global passed, failed
     try:
         fn()
@@ -391,23 +391,25 @@ def test_pagination():
 
 # ---------------------------------------------------------------------------
 
-print("\nPhase 5 UIM comparison panel tests\n")
-for fn in [
-    test_match_rate,
-    test_mismatch_matrix,
-    test_filter_backend_segment,
-    test_filter_uim_segment,
-    test_filter_match_true,
-    test_filter_mismatch_only,
-    test_filter_claim_risk_level,
-    test_export_csv_fields,
-    test_missing_uim_segment,
-    test_totals,
-    test_rule_audit,
-    test_pagination,
-]:
-    test(fn.__name__, fn)
+if __name__ == "__main__":
+    # Standalone runner; under pytest the test_* functions are collected directly.
+    print("\nPhase 5 UIM comparison panel tests\n")
+    for fn in [
+        test_match_rate,
+        test_mismatch_matrix,
+        test_filter_backend_segment,
+        test_filter_uim_segment,
+        test_filter_match_true,
+        test_filter_mismatch_only,
+        test_filter_claim_risk_level,
+        test_export_csv_fields,
+        test_missing_uim_segment,
+        test_totals,
+        test_rule_audit,
+        test_pagination,
+    ]:
+        _run_case(fn.__name__, fn)
 
-print(f"\n{passed} passed, {failed} failed\n")
-if failed:
-    sys.exit(1)
+    print(f"\n{passed} passed, {failed} failed\n")
+    if failed:
+        sys.exit(1)

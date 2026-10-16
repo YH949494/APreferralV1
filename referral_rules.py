@@ -29,8 +29,9 @@ def calc_referral_progress(total_referrals: int, milestone_size: int = 3) -> dic
 def calc_referral_award(new_ref_count_total: int) -> tuple[int, int]:
     """
     Returns (xp_added_total, bonus_added) for a successful referral.
-    xp_added_total includes base 30 plus bonus when applicable.
-    bonus_added is 200 only if new_ref_count_total % 3 == 0 else 0.
+    xp_added_total includes REFERRAL_XP_PER_SUCCESS plus bonus when applicable.
+    bonus_added is REFERRAL_BONUS_XP only if
+    new_ref_count_total % REFERRAL_BONUS_INTERVAL == 0 else 0.
     """
     bonus_added = REFERRAL_BONUS_XP if new_ref_count_total % REFERRAL_BONUS_INTERVAL == 0 else 0
     return REFERRAL_XP_PER_SUCCESS + bonus_added, bonus_added

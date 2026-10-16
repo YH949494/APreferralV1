@@ -2,7 +2,6 @@ from datetime import datetime, timedelta, timezone
 import os
 import unittest
 
-from scheduler import _eligible_referrer_tiers
 from ugc_growth_referral import (
     create_referral_token,
     apply_growth_credit,
@@ -101,7 +100,13 @@ class UGCGrowthReferralTests(unittest.TestCase):
         self.assertEqual(reason2, "throttle")
         self.assertEqual(doc.get("credited_count"), 1)
 
+    @unittest.skip(
+        "obsolete: scheduler._eligible_referrer_tiers (UGC S2/S3/S4 referrer "
+        "tiers) was removed with the UGC reward subsystem"
+    )
     def test_tier_s2_s3_auto_s4_pending(self):
+        from scheduler import _eligible_referrer_tiers
+
         self.assertEqual(_eligible_referrer_tiers(3, {"s2": False, "s3": False, "s4": False}), ["S2"])
         self.assertEqual(_eligible_referrer_tiers(7, {"s2": True, "s3": False, "s4": False}), ["S3"])
         self.assertEqual(_eligible_referrer_tiers(15, {"s2": True, "s3": True, "s4": False}), ["S4"])
@@ -109,8 +114,13 @@ class UGCGrowthReferralTests(unittest.TestCase):
     def test_referral_xp_rules_unchanged(self):
         from referral_rules import calc_referral_award
 
-        self.assertEqual(calc_referral_award(1), (30, 0))
-        self.assertEqual(calc_referral_award(3), (230, 200))
+        # Literal pins on purpose: any change to the live referral XP economy
+        # (60 base, +400 every 3rd — also advertised in static/i18n.js) must
+        # fail here and be updated deliberately.
+        self.assertEqual(calc_referral_award(1), (60, 0))
+        self.assertEqual(calc_referral_award(2), (60, 0))
+        self.assertEqual(calc_referral_award(3), (460, 400))
+        self.assertEqual(calc_referral_award(6), (460, 400))
 
     def test_env_missing_fails_early(self):
         old1 = os.environ.pop("UGC_T1_SMALL_DROP_ID", None)

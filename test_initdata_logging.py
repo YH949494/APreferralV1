@@ -46,13 +46,27 @@ def vouchers_module(monkeypatch):
     fake_database_module.users_collection = _FakeCollection()
     fake_database_module.get_collection = lambda name: _FakeCollection()
     fake_database_module._ensure_equivalent_index = lambda *args, **kwargs: None
+    # Reloading vouchers against the stub rebinds its module globals (db,
+    # collections) to no-ops. monkeypatch restores sys.modules["database"]
+    # afterwards but not those globals, which used to poison every module
+    # collected later. Snapshot the namespace and put it back verbatim.
+    preexisting = sys.modules.get("vouchers")
+    saved_globals = dict(preexisting.__dict__) if preexisting is not None else None
+
     monkeypatch.setitem(sys.modules, "database", fake_database_module)
 
-    if "vouchers" in sys.modules:
-        mod = importlib.reload(sys.modules["vouchers"])
+    if preexisting is not None:
+        mod = importlib.reload(preexisting)
     else:
         mod = importlib.import_module("vouchers")
-    return mod
+    try:
+        yield mod
+    finally:
+        if saved_globals is not None:
+            mod.__dict__.clear()
+            mod.__dict__.update(saved_globals)
+        else:
+            sys.modules.pop("vouchers", None)
 
 
 def test_initdata_success_no_verbose_logs_by_default(vouchers_module, monkeypatch, caplog):

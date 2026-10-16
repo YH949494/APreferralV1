@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from unittest.mock import patch
 
 import bot_segment_sync as sync
+from config import BOT_SEGMENT_DEFAULT_PROBABILITY, BOT_SEGMENT_FALLBACK_PROBABILITY
 
 
 class FakeBulkResult:
@@ -116,10 +117,14 @@ class BotSegmentSyncTests(unittest.TestCase):
         self.assertEqual(users.docs[100]["for_bot_segment"], "Voucher Hunter")
         self.assertEqual(users.docs[100]["for_bot_segment_normalized"], "voucher_hunter")
         self.assertEqual(users.docs[100]["bot_segment_probability"], 0.10)
+        # Blank (101) and unrecognized (102) segments fail CLOSED to the
+        # conservative fallback, never the 70% known-segment default — see
+        # BOT_SEGMENT_FALLBACK_PROBABILITY in config.py.
         self.assertEqual(users.docs[101]["for_bot_segment_normalized"], "unclassified")
-        self.assertEqual(users.docs[101]["bot_segment_probability"], 0.70)
+        self.assertEqual(users.docs[101]["bot_segment_probability"], BOT_SEGMENT_FALLBACK_PROBABILITY)
         self.assertEqual(users.docs[102]["for_bot_segment_normalized"], "unclassified")
-        self.assertEqual(users.docs[102]["bot_segment_probability"], 0.70)
+        self.assertEqual(users.docs[102]["bot_segment_probability"], BOT_SEGMENT_FALLBACK_PROBABILITY)
+        self.assertLess(BOT_SEGMENT_FALLBACK_PROBABILITY, BOT_SEGMENT_DEFAULT_PROBABILITY)
         self.assertNotIn(999, users.docs)
         self.assertEqual(summary["snapshots_written"], 3)
         self.assertEqual(len(snapshots.docs), 3)

@@ -6,6 +6,12 @@ import database
 
 class ImportSideEffectsTests(unittest.TestCase):
     def setUp(self):
+        # Simulate a process that never called init_db(), then restore the
+        # handle: leaking ``_db = None`` breaks every later module that relies
+        # on a db initialised at import time (seen as "Database not
+        # initialized" in test_weekly_leaderboard_archive_recovery.py).
+        self._saved_db = database._db
+        self.addCleanup(setattr, database, "_db", self._saved_db)
         database._db = None
 
     def test_high_risk_modules_import_without_db_init(self):

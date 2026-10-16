@@ -33,16 +33,20 @@ def test_claim_error_state_rendering_hooks_present():
     assert 'displayState === "high_traffic"' in html
     assert 'hideRetry: true' in html
     assert 'displayState === "cooldown"' in html
-    assert 'Retry available in ${remaining}s' in html
-    assert 'Fully Claimed' in html
+    # Countdown copy is localized via i18n.js rather than inlined.
+    assert 't("retry_available_in", { n: remaining })' in html
+    i18n = Path("static/i18n.js").read_text(encoding="utf-8")
+    assert 'retry_available_in: "Retry available in {n}s"' in i18n
+    assert 'btn.textContent = t("fully_claimed");' in html
+    assert 'fully_claimed: "Fully Claimed"' in i18n
 
 
 def test_share_rank_button_lives_in_identity_modal_not_leaderboard_controls():
     html = Path("static/index.html").read_text(encoding="utf-8")
     identity_start = html.index('<div id="identity-modal"')
-    identity_end = html.index('<!-- 2. Core grid', identity_start)
+    identity_end = html.index('<!-- GUIDED JOURNEY CARD', identity_start)
     leaderboard_start = html.index('<div class="section" id="leaderboard-section"')
-    leaderboard_end = html.index('<!-- More / Admin', leaderboard_start)
+    leaderboard_end = html.index('<!-- MORE / ADMIN SECTION', leaderboard_start)
     identity_html = html[identity_start:identity_end]
     leaderboard_html = html[leaderboard_start:leaderboard_end]
     assert 'id="share-rank-btn"' in identity_html
@@ -63,8 +67,12 @@ def test_share_rank_button_has_scoped_compact_styling():
 
 def test_welcome_progress_card_renders_labelled_days():
     html = Path("static/index.html").read_text(encoding="utf-8")
-    assert 'dayLabels.push(`Day ${day} ${day <= completed ? "✅" : "⬜"}`);' in html
-    assert 'squaresEl.textContent = `${dayLabels.join(" / ")} → Welcome Reward`;' in html
+    # Rendered as a step timeline: one labelled step per required day, done
+    # days ticked.
+    assert "renderWelcomeTimeline(squaresEl, required, completed);" in html
+    assert "for (let day = 1; day <= required; day++) {" in html
+    assert 'circle.textContent = day <= completed ? "✓" : String(day);' in html
+    assert 'label.textContent = t("welcome_checkin_label", { day });' in html
 
 
 def test_welcome_unlocked_campaign_cta_says_view_reward():

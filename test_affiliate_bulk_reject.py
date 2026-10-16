@@ -308,8 +308,11 @@ def test_ledger_with_issued_pool_voucher_is_protected(monkeypatch):
 
 def test_reject_function_is_status_guarded():
     db = _db()
-    for status in ("ISSUED", "SETTLING", "REJECTED"):
-        lid = _ledger(db, hash(status) % 10_000, status=status)
+    # Fixed, distinct user ids: hash(str) is randomized per process, so the
+    # old hash(status) % 10_000 ids occasionally collided on the unique
+    # dedup_key (reproducible with PYTHONHASHSEED=253).
+    for uid, status in ((101, "ISSUED"), (102, "SETTLING"), (103, "REJECTED")):
+        lid = _ledger(db, uid, status=status)
         assert ar.reject_affiliate_ledger(db, ledger_id=lid, reason="x") is None
         assert _status(db, lid) == status
     voucher_row = _ledger(db, 77, status="PENDING_MANUAL", voucher_code="V")
@@ -325,8 +328,8 @@ def test_reject_function_is_status_guarded():
 def test_individual_reject_still_works_and_refuses_issued(monkeypatch):
     db = _db()
     client = _client(monkeypatch, db)
-    for status in ("PENDING_REVIEW", "SIMULATED_PENDING", "OUT_OF_STOCK"):
-        lid = _ledger(db, abs(hash(status)) % 10_000, status=status)
+    for uid, status in ((201, "PENDING_REVIEW"), (202, "SIMULATED_PENDING"), (203, "OUT_OF_STOCK")):
+        lid = _ledger(db, uid, status=status)
         res = client.post(f"/v2/miniapp/admin/affiliate/{lid}/reject", json={"reason": "x"})
         assert res.status_code == 200 and res.get_json()["status"] == "ok"
         assert _status(db, lid) == "REJECTED"
