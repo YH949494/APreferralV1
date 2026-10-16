@@ -1449,7 +1449,7 @@ class VoucherAntiHunterTests(unittest.TestCase):
             m.verify_telegram_init_data = orig_verify
             m.db = orig_db
 
-    def test_admin_start_now_sets_active_and_rewrites_window(self):
+    def test_admin_start_now_sets_active_and_preserves_the_scheduled_end(self):
         import vouchers as m
         from flask import Flask
 
@@ -1480,7 +1480,9 @@ class VoucherAntiHunterTests(unittest.TestCase):
             updated = m.db.drops.docs["drop-start-now"]
             self.assertEqual(updated.get("status"), "active")
             self.assertEqual(updated.get("startsAt"), now)
-            self.assertEqual(updated.get("endsAt"), now + timedelta(hours=24))
+            # P1 hotfix: the scheduled end (+3h) is kept; it used to be silently
+            # reset to now+24h. See test_drop_lifecycle.py for the full contract.
+            self.assertEqual(updated.get("endsAt"), now + timedelta(hours=3))
         finally:
             m.db = orig_db
             m.require_admin = orig_require_admin
