@@ -9,6 +9,7 @@ primitive the compiler is allowed to call.
 """
 
 import unittest
+import unittest.mock
 from datetime import datetime, timezone
 
 from bson.objectid import ObjectId
@@ -98,6 +99,8 @@ class FakeCollection:
                 if "$inc" in update:
                     for k, v in update["$inc"].items():
                         d[k] = d.get(k, 0) + v
+                for k in (update.get("$unset") or {}):
+                    d.pop(k, None)
                 return
         return None
 
@@ -112,6 +115,15 @@ class FakeCollection:
 
         class R:
             deleted_count = 0
+        return R()
+
+    def delete_many(self, filt):
+        keep = [d for d in self.docs if not _matches(d, filt or {})]
+        removed = len(self.docs) - len(keep)
+        self.docs = keep
+
+        class R:
+            deleted_count = removed
         return R()
 
     def count_documents(self, filt=None):
@@ -202,7 +214,14 @@ class CampaignBuilderCompilerTests(unittest.TestCase):
             audience_params={"segments": ["high_value", "low_value"]},
             reward_params={"codes": ["C1", "C2"], "pool": "public"},
         )
-        result, code = campaign_builder.compile_campaign(doc)
+        # The compiler hands every segment drop the SAME code list. This fake
+        # has no unique index on vouchers.code, so it would accept that; the real
+        # database refuses the second drop (and create_drop_from_spec now reports
+        # it without leaving anything behind). This test is about the spec
+        # mapping (allow-lists, source="segment"), so the duplicate-code guard is
+        # stubbed here; the realistic outcome is pinned in test_drop_create_atomic.py.
+        with unittest.mock.patch("vouchers._existing_voucher_codes", return_value=[]):
+            result, code = campaign_builder.compile_campaign(doc)
         self.assertEqual(code, 200)
         self.assertEqual(len(result["compiled_drop_ids"]), 2)
 

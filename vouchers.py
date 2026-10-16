@@ -7457,6 +7457,160 @@ def admin_create_drop():
     return jsonify(result), status_code
 
 
+# --- atomic drop creation support --------------------------------------------
+DROP_CREATION_STATE_FIELD = "creation_state"
+DROP_CREATION_STARTED_FIELD = "creation_started_at"
+DROP_CREATION_CREATING = "creating"
+DROP_CREATION_FAILED = "failed"
+# A creation that has been "creating" longer than this is a crashed attempt,
+# not an in-flight one (inserting thousands of codes takes seconds).
+DROP_CREATION_STALE_MINUTES = 10
+# Floor for the admin-supplied window: 0 would classify every running creation as stale.
+DROP_CREATION_MIN_STALE_MINUTES = 2
+_CODE_PRECHECK_CHUNK = 500
+_VOUCHER_INSERT_CHUNK = 1000
+_DUPLICATE_SAMPLE_LIMIT = 20
+
+
+def _existing_voucher_codes(codes) -> list:
+    """Codes that already exist in db.vouchers (any drop). Read-only."""
+    found = []
+    for start in range(0, len(codes), _CODE_PRECHECK_CHUNK):
+        chunk = codes[start:start + _CODE_PRECHECK_CHUNK]
+        for row in db.vouchers.find({"code": {"$in": chunk}}, projection={"code": 1}):
+            code = row.get("code")
+            if code is not None:
+                found.append(code)
+    return found
+
+
+def _duplicate_code_response(duplicate_codes) -> dict:
+    """409 body for a duplicate code. Keeps the historical ``code`` and the
+    ``inserted``/``duplicates`` fields; nothing was written."""
+    unique = list(dict.fromkeys(duplicate_codes))
+    body = {"status": "error", "code": "duplicate_code", "inserted": 0, "duplicates": len(unique)}
+    if unique:
+        body["duplicateCodes"] = unique[:_DUPLICATE_SAMPLE_LIMIT]
+    return body
+
+
+def _prepare_pooled_voucher_docs(raw_codes, pool_value):
+    if not isinstance(raw_codes, (list, tuple)):
+        return None, ({"status": "error", "code": "bad_request", "reason": "codes_must_be_list"}, 400)
+    codes = _normalize_codes(raw_codes)
+    if not codes:
+        return None, ({"status": "error", "code": "bad_request", "reason": "empty_codes"}, 400)
+    return [
+        {"type": "pooled", "code": c, "status": "free", "claimedBy": None, "claimedAt": None, "pool": pool_value}
+        for c in codes
+    ], None
+
+
+def _prepare_personalised_voucher_docs(raw_assignments):
+    if raw_assignments is not None and not isinstance(raw_assignments, (list, tuple)):
+        return None, ({"status": "error", "code": "bad_request", "reason": "assignments_must_be_list"}, 400)
+    docs, seen_codes, seen_users, repeated, repeated_users = [], set(), set(), [], []
+    for item in raw_assignments or []:
+        if not isinstance(item, dict):
+            continue
+        u = norm_username(item.get("username", ""))
+        c = (item.get("code") or "").strip()
+        if not u or not c:
+            continue
+        if c in seen_codes:
+            repeated.append(c)
+            continue
+        if u in seen_users:
+            # uniq_personalised_assignment allows one row per user per drop.
+            repeated_users.append(u)
+            continue
+        seen_codes.add(c)
+        seen_users.add(u)
+        docs.append({
+            "type": PERSONALISED_TYPE_CANONICAL, "usernameLower": u, "code": c,
+            "status": "unclaimed", "claimedBy": None, "claimedAt": None,
+        })
+    if repeated:
+        return None, (_duplicate_code_response(repeated), 409)
+    if repeated_users:
+        return None, ({"status": "error", "code": "bad_request", "reason": "duplicate_username",
+                       "usernames": list(dict.fromkeys(repeated_users))[:_DUPLICATE_SAMPLE_LIMIT]}, 400)
+    if not docs:
+        return None, ({"status": "error", "code": "bad_request", "reason": "empty_assignments"}, 400)
+    return docs, None
+
+
+def _rollback_drop_creation(drop_id) -> bool:
+    """Remove exactly what a failed creation wrote: the drop id is fresh, so
+    every voucher carrying it, and the hidden drop itself, belong to this call.
+    If even the cleanup fails the drop is marked ``failed`` (still hidden and
+    unclaimable) for reconcile_incomplete_drop_creations."""
+    drop_id_str = str(drop_id)
+    try:
+        db.vouchers.delete_many({"dropId": {"$in": _drop_id_variants(drop_id)}})
+        db.drops.delete_one({"_id": drop_id, DROP_CREATION_STATE_FIELD: {"$exists": True}})
+        return True
+    except Exception:
+        logger.exception("[admin][drops] creation_rollback_failed drop_id=%s", drop_id_str)
+        try:
+            db.drops.update_one(
+                {"_id": drop_id},
+                {"$set": {DROP_CREATION_STATE_FIELD: DROP_CREATION_FAILED, "status": "paused", "internal_only": True}},
+            )
+        except Exception:
+            logger.exception("[admin][drops] creation_mark_failed_failed drop_id=%s", drop_id_str)
+        return False
+
+
+def reconcile_incomplete_drop_creations(*, now=None, stale_minutes=None, dry_run=False) -> dict:
+    """Clean up creations that never finished (process crash, failed rollback).
+
+    Only drops still carrying a ``creation_state`` marker are touched, and only
+    once they are ``failed`` or older than the stale window, so an in-flight
+    creation is never disturbed. Any claimed/reserved voucher protects the drop
+    (reported, not deleted). The creator's own publish step is conditional on
+    the marker, so a creation reconciled mid-flight rolls itself back."""
+    now = now or now_utc()
+    minutes = DROP_CREATION_STALE_MINUTES if stale_minutes is None else stale_minutes
+    cutoff = now - timedelta(minutes=minutes)
+    summary = {"removed": [], "in_flight": [], "protected": [], "dry_run": bool(dry_run)}
+    for d in list(db.drops.find({DROP_CREATION_STATE_FIELD: {"$in": [DROP_CREATION_CREATING, DROP_CREATION_FAILED]}})):
+        drop_id = d.get("_id")
+        started = _as_aware_utc(d.get(DROP_CREATION_STARTED_FIELD))
+        stale = d.get(DROP_CREATION_STATE_FIELD) == DROP_CREATION_FAILED or started is None or started <= cutoff
+        if not stale:
+            summary["in_flight"].append(str(drop_id))
+            continue
+        variants = _drop_id_variants(drop_id)
+        attached = db.vouchers.count_documents({
+            "dropId": {"$in": variants},
+            "$or": [{"status": {"$in": _DELETE_UNSAFE_STATUSES}}, {"claimedBy": {"$ne": None}}],
+        })
+        if attached:
+            logger.error("[admin][drops] incomplete_creation_protected drop_id=%s attached=%s", drop_id, attached)
+            summary["protected"].append(str(drop_id))
+            continue
+        if not dry_run:
+            db.vouchers.delete_many({"dropId": {"$in": variants}})
+            db.drops.delete_one({"_id": drop_id, DROP_CREATION_STATE_FIELD: {"$in": [DROP_CREATION_CREATING, DROP_CREATION_FAILED]}})
+            logger.warning("[admin][drops] incomplete_creation_removed drop_id=%s", drop_id)
+        summary["removed"].append(str(drop_id))
+    return summary
+
+
+def _drop_creation_guard(drop):
+    """Same shape as _drop_deletion_guard: nothing may act on a drop that is
+    still being created (or is waiting for reconcile)."""
+    if (drop or {}).get(DROP_CREATION_STATE_FIELD):
+        return jsonify({
+            "ok": False,
+            "status": "error",
+            "code": "drop_creating",
+            "message": "This drop is still being created.",
+        }), 409
+    return None
+
+
 def create_drop_from_spec(data: dict) -> tuple[dict, int]:
     """Build + insert a drop (and its vouchers) from a drop spec dict.
 
@@ -7495,8 +7649,11 @@ def create_drop_from_spec(data: dict) -> tuple[dict, int]:
     if endsAt <= startsAt:
         return ({"status": "error", "code": "end_before_start"}), 400
 
-    priority = int(data.get("priority", 100))
-    
+    try:
+        priority = int(data.get("priority", 100))
+    except (TypeError, ValueError):
+        return ({"status": "error", "code": "bad_request", "reason": "bad_priority"}), 400
+
     now = now_utc()
     status = "active" if startsAt <= now < endsAt else "upcoming"
 
@@ -7609,80 +7766,103 @@ def create_drop_from_spec(data: dict) -> tuple[dict, int]:
     if audience_clean:
         drop_doc["audience"] = audience_clean     
      
-    res = db.drops.insert_one(drop_doc)
-    drop_id = res.inserted_id
-
-    # Insert vouchers
+    # ------------------------------------------------------------------
+    # Validate EVERYTHING before the first write. Previously the drop document
+    # was inserted first and the codes were validated afterwards, so an empty
+    # code list, a bad pool, or a code that already exists returned an error
+    # while leaving a drop (and possibly part of its codes) behind.
+    # ------------------------------------------------------------------
     if dtype == PERSONALISED_TYPE_CANONICAL:
-        assignments = data.get("assignments") or []
-        docs = []
-        for item in assignments:
-            u = norm_username(item.get("username", ""))
-            c = (item.get("code") or "").strip()
-            if not u or not c:
-                continue
-            docs.append({
-                "type": PERSONALISED_TYPE_CANONICAL,
-                "dropId": str(drop_id),
-                "usernameLower": u,
-                "code": c,
-                "status": "unclaimed",
-                "claimedBy": None,
-                "claimedAt": None
-            })
-        if docs:
-            db.vouchers.insert_many(docs, ordered=False)
+        voucher_docs, prep_err = _prepare_personalised_voucher_docs(data.get("assignments"))
+        pool_value = None
     else:
         pool_value = data.get("pool") or data.get("voucherPool") or "public"
         if pool_value not in ("public", "my"):
-            return ({"status": "error", "code": "bad_request", "reason": "bad_pool"}), 400     
-        codes = _normalize_codes(data.get("codes"))
-        if not codes:
-            return ({"status": "error", "code": "bad_request", "reason": "empty_codes"}), 400     
-        docs = []
-        for c in codes:
-            docs.append({
-                "type": "pooled",
-                "dropId": str(drop_id),
-                "code": c,
-                "status": "free",
-                "claimedBy": None,
-                "claimedAt": None,
-                "pool": pool_value,
-            })
-        if docs:
-            try:
-                result = db.vouchers.insert_many(docs, ordered=False)
-            except DuplicateKeyError:
-                return ({"status": "error", "code": "duplicate_code"}), 409
-            except BulkWriteError as exc:
-                # ordered=False may throw BulkWriteError on duplicates; normalize to 409
-                details = exc.details or {}
-                write_errors = details.get("writeErrors") or []
-                dup_count = sum(1 for err in write_errors if err.get("code") == 11000)
-                if dup_count:
-                    inserted = details.get("nInserted") or 0
-                    if inserted:
-                        remaining_field = "public_remaining" if pool_value == "public" else "my_remaining"
-                        db.drops.update_one({"_id": drop_id}, {"$inc": {remaining_field: inserted}})                 
-                    return ({
-                        "status": "error",
-                        "code": "duplicate_code",
-                        "inserted": inserted,
-                        "duplicates": dup_count,
-                    }), 409
-                try:
-                    current_app.logger.exception("[admin][drops] insert_many_failed")
-                except Exception:
-                    print("[admin][drops] insert_many_failed")
-                return ({"status": "error", "code": "server_error"}), 500
-            else:
-                inserted = len(result.inserted_ids)
-                if inserted:
-                    remaining_field = "public_remaining" if pool_value == "public" else "my_remaining"
-                    db.drops.update_one({"_id": drop_id}, {"$inc": {remaining_field: inserted}})
+            return ({"status": "error", "code": "bad_request", "reason": "bad_pool"}), 400
+        voucher_docs, prep_err = _prepare_pooled_voucher_docs(data.get("codes"), pool_value)
+    if prep_err:
+        return prep_err
 
-    return {"status": "ok", "dropId": str(drop_id)}, 200
+    # A crashed earlier attempt must not block a retry with the same codes.
+    try:
+        reconcile_incomplete_drop_creations()
+    except Exception:
+        logger.exception("[admin][drops] reconcile_incomplete_creations_failed")
+
+    voucher_codes = [d["code"] for d in voucher_docs]
+    existing = _existing_voucher_codes(voucher_codes)
+    if existing:
+        return _duplicate_code_response(existing), 409
+
+    # ------------------------------------------------------------------
+    # Pre-validation cannot make this atomic (another request can take a code
+    # between the check and the insert), so the write itself is built to be
+    # undoable: the drop is created HIDDEN (paused + internal_only + a
+    # creation_state marker, so no claim/listing path can see it), its vouchers
+    # are inserted under the fresh drop id, and only then is it published with
+    # one conditional update. Any failure removes exactly what this call wrote.
+    # ------------------------------------------------------------------
+    hidden_doc = dict(drop_doc)
+    hidden_doc.update({
+        "status": "paused",
+        "internal_only": True,
+        DROP_CREATION_STATE_FIELD: DROP_CREATION_CREATING,
+        DROP_CREATION_STARTED_FIELD: now_utc(),
+    })
+    res = db.drops.insert_one(hidden_doc)
+    drop_id = res.inserted_id
+    drop_id_str = str(drop_id)
+
+    try:
+        for start in range(0, len(voucher_docs), _VOUCHER_INSERT_CHUNK):
+            chunk = []
+            for d in voucher_docs[start:start + _VOUCHER_INSERT_CHUNK]:
+                row = dict(d)
+                row["dropId"] = drop_id_str
+                chunk.append(row)
+            db.vouchers.insert_many(chunk, ordered=False)
+    except DuplicateKeyError:
+        _rollback_drop_creation(drop_id)
+        return _duplicate_code_response([]), 409
+    except BulkWriteError as exc:
+        details = getattr(exc, "details", None) or {}
+        write_errors = details.get("writeErrors") or []
+        dups = [
+            ((e.get("op") or {}).get("code"))
+            for e in write_errors if e.get("code") == 11000
+        ]
+        _rollback_drop_creation(drop_id)
+        if dups:
+            return _duplicate_code_response([c for c in dups if c]), 409
+        logger.exception("[admin][drops] insert_many_failed drop_id=%s", drop_id_str)
+        return ({"status": "error", "code": "server_error"}), 500
+    except Exception:
+        _rollback_drop_creation(drop_id)
+        logger.exception("[admin][drops] insert_many_failed drop_id=%s", drop_id_str)
+        return ({"status": "error", "code": "server_error"}), 500
+
+    publish_set = {"status": status}
+    if dtype != PERSONALISED_TYPE_CANONICAL:
+        remaining_field = "public_remaining" if pool_value == "public" else "my_remaining"
+        publish_set[remaining_field] = len(voucher_docs)
+    try:
+        published = db.drops.update_one(
+            {"_id": drop_id, DROP_CREATION_STATE_FIELD: DROP_CREATION_CREATING},
+            {
+                "$set": publish_set,
+                "$unset": {DROP_CREATION_STATE_FIELD: "", DROP_CREATION_STARTED_FIELD: "", "internal_only": ""},
+            },
+        )
+        published_ok = getattr(published, "matched_count", 1) == 1
+    except Exception:
+        logger.exception("[admin][drops] publish_failed drop_id=%s", drop_id_str)
+        published_ok = False
+    if not published_ok:
+        # Reconciled away mid-flight or the DB failed: never leave a half-made drop.
+        _rollback_drop_creation(drop_id)
+        return ({"status": "error", "code": "server_error", "reason": "creation_not_completed"}), 500
+
+    return {"status": "ok", "dropId": drop_id_str}, 200
     
 def _admin_drop_summary(doc: dict, *, ref=None, skip_expired=False):
     """Return a normalised representation of a drop for admin surfaces."""
@@ -7692,7 +7872,11 @@ def _admin_drop_summary(doc: dict, *, ref=None, skip_expired=False):
     ends = _as_aware_utc(doc.get("endsAt"))
 
     status = doc.get("status", "upcoming")
-    if status not in ("paused", "expired"):
+    creation_state = doc.get(DROP_CREATION_STATE_FIELD)
+    if creation_state:
+        # Never shown as paused/live: it is hidden from players until published.
+        status = "creating" if creation_state == DROP_CREATION_CREATING else "creation_failed"
+    elif status not in ("paused", "expired"):
         if ends and ref >= ends:
             status = "expired"
         elif starts and starts <= ref < (ends or starts):
@@ -8768,7 +8952,7 @@ def admin_add_codes(drop_id):
     drop = db.drops.find_one({"_id": _coerce_id(drop_id)})
     if not drop:
         return jsonify({"status": "error", "code": "not_found"}), 404
-    guard = _drop_deletion_guard(drop)
+    guard = _drop_deletion_guard(drop) or _drop_creation_guard(drop)
     if guard:
         return guard
     dtype = _normalize_drop_type(drop.get("type", "pooled"))
@@ -8778,9 +8962,19 @@ def admin_add_codes(drop_id):
     if pool_value not in ("public", "my"):
         return jsonify({"status": "error", "code": "bad_request", "reason": "bad_pool"}), 400
 
-    codes = _normalize_codes(data.get("codes"))
+    raw_codes = data.get("codes")
+    if not isinstance(raw_codes, (list, tuple)):
+        return jsonify({"status": "error", "code": "bad_request", "reason": "codes_must_be_list"}), 400
+    codes = _normalize_codes(raw_codes)
     if not codes:
         return jsonify({"status": "error", "code": "bad_request", "reason": "empty_codes"}), 400
+
+    # Known duplicates are refused before anything is written, so the common
+    # case is all-or-nothing. (A code taken by a concurrent request between
+    # this check and the insert still takes the partial-insert path below.)
+    existing = _existing_voucher_codes(codes)
+    if existing:
+        return jsonify(_duplicate_code_response(existing)), 409
 
     docs = []
     for c in codes:
@@ -8840,6 +9034,10 @@ def admin_drop_actions(drop_id):
             # of just reporting not_found and leaving them stuck in the unique index.
             return _admin_recover_orphan_vouchers(drop_id, user, data)
         return jsonify({"status": "error", "code": "not_found"}), 404
+
+    creating_guard = _drop_creation_guard(drop)
+    if creating_guard:
+        return creating_guard
 
     if op != "delete":
         guard = _drop_deletion_guard(drop)
@@ -9270,6 +9468,24 @@ def admin_reconcile_drop_deletions():
         min_age_seconds = 0
     results = reconcile_stuck_drop_deletions(min_age_seconds=min_age_seconds)
     return jsonify({"status": "ok", "reconciled": len(results), "results": results}), 200
+
+@vouchers_bp.route("/admin/drops/reconcile-creations", methods=["POST"])
+def admin_reconcile_drop_creations():
+    """Remove drops whose creation never finished. Dry run unless
+    ``{"dryRun": false}`` is sent; in-flight creations are never touched."""
+    user, err = require_admin()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    dry_run = data.get("dryRun", True) is not False
+    try:
+        stale_minutes = data.get("staleMinutes")
+        stale_minutes = None if stale_minutes is None else max(DROP_CREATION_MIN_STALE_MINUTES, int(stale_minutes))
+    except (TypeError, ValueError):
+        stale_minutes = None
+    summary = reconcile_incomplete_drop_creations(stale_minutes=stale_minutes, dry_run=dry_run)
+    return jsonify({"status": "ok", **summary}), 200
+
 
 @vouchers_bp.route("/admin/drops", methods=["GET"])
 def admin_list_drops():

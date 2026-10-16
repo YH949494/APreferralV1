@@ -117,6 +117,8 @@ class FakeCollection:
                 if "$inc" in update:
                     for k, v in update["$inc"].items():
                         d[k] = d.get(k, 0) + v
+                for k in (update.get("$unset") or {}):
+                    d.pop(k, None)
                 if "$setOnInsert" in update:
                     pass
                 return FakeUpdateResult(1)
@@ -169,6 +171,15 @@ class FakeCollection:
 
         class R:
             deleted_count = 0
+        return R()
+
+    def delete_many(self, filt):
+        keep = [d for d in self.docs if not _matches(d, filt or {})]
+        removed = len(self.docs) - len(keep)
+        self.docs = keep
+
+        class R:
+            deleted_count = removed
         return R()
 
     def count_documents(self, filt=None):
