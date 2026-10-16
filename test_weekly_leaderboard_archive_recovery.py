@@ -44,6 +44,17 @@ def _reset_history_state():
     main.scheduler_locks_collection.delete_many({})
 
 
+@pytest.fixture(autouse=True)
+def _isolate_shared_collections():
+    """main.* collections are process-wide mongomock state shared with every
+    other module that imports main. Each test resets at its start, but nothing
+    cleaned up at its end, so the last test's users/history rows leaked into
+    whichever module ran next (users has a unique user_id index, so a stale
+    user_id=1 row makes the next module's insert raise DuplicateKeyError)."""
+    yield
+    _reset_history_state()
+
+
 # 1. Monday scheduled archive creates 2026-07-27 -> 2026-08-02.
 def test_monday_archive_creates_expected_week():
     _reset_history_state()

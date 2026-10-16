@@ -11,7 +11,7 @@ import os
 import onboarding
 import scheduler
 import vouchers
-from app_context import set_scheduler
+from app_context import get_scheduler, set_scheduler
 from onboarding import record_first_checkin, record_first_mywin
 from pymongo.errors import DuplicateKeyError
 
@@ -195,9 +195,16 @@ class OnboardingTests(unittest.TestCase):
     def setUp(self):
         self.users = FakeUsersCollection()
         self.scheduler = FakeScheduler()
-        self.events = FakeEventsCollection()        
-        onboarding.users_collection = self.users
-        onboarding.onboarding_events = self.events        
+        self.events = FakeEventsCollection()
+        # Restore everything on teardown. These were plain assignments that
+        # were never undone, so every later module calling
+        # onboarding.record_first_checkin() (e.g. main.process_checkin's
+        # first-checkin bonus) wrote to this fake instead of its own database.
+        for name, fake in (("users_collection", self.users), ("onboarding_events", self.events)):
+            patcher = patch.object(onboarding, name, fake)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.addCleanup(set_scheduler, get_scheduler())
         set_scheduler(self.scheduler)
 
     def test_e0_idempotent_api_visible(self):
