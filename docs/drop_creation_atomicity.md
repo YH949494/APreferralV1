@@ -25,7 +25,7 @@ If the process dies mid-creation (or the rollback itself fails) the drop stays h
 
 Manual inspection / cleanup: `POST /v2/miniapp/admin/drops/reconcile-creations`
 - body `{}` or `{"dryRun": true}`: lists what would be removed (default);
-- body `{"dryRun": false}`: removes it; optional `staleMinutes`.
+- body `{"dryRun": false}`: removes it; optional `staleMinutes` (default 10; values below 2 are raised to 2 so a request that is still inserting is never reclaimed — records already marked `failed` are cleaned immediately regardless).
 Response: `{status, removed[], in_flight[], protected[], dry_run}`.
 
 ## Known limits

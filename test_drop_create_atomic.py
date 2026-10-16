@@ -387,6 +387,21 @@ def test_reconcile_endpoint_is_a_dry_run_by_default(client, mdb):
     assert mdb.drops.count_documents({}) == 0 and mdb.vouchers.count_documents({}) == 0
 
 
+@pytest.mark.parametrize("window", [0, -5, 1])
+def test_reconcile_endpoint_never_reclaims_a_creation_that_is_still_running(client, mdb, window):
+    inflight = _stale_creation(mdb, age_minutes=0)
+    res = client.post("/v2/miniapp/admin/drops/reconcile-creations", json={"dryRun": False, "staleMinutes": window}).get_json()
+    assert res["removed"] == [] and res["in_flight"] == [str(inflight)]
+    assert mdb.drops.find_one({"_id": inflight}) is not None
+    assert mdb.vouchers.count_documents({"dropId": str(inflight)}) == 2
+
+
+def test_reconcile_endpoint_with_a_small_window_still_cleans_what_is_old_enough(client, mdb):
+    old = _stale_creation(mdb, age_minutes=30)
+    res = client.post("/v2/miniapp/admin/drops/reconcile-creations", json={"dryRun": False, "staleMinutes": 0}).get_json()
+    assert res["removed"] == [str(old)]
+
+
 def test_reconcile_endpoint_requires_admin(mdb, monkeypatch):
     app = Flask(__name__)
     app.register_blueprint(vouchers_bp, url_prefix="/v2/miniapp")
