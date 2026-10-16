@@ -104,6 +104,18 @@ test("single reject: reason is capped at 200 characters before sending", async (
   assert.equal(calls.fetches[0].body.reason.length, 200);
 });
 
+test("single reject: the 200-character cap never splits an emoji into a lone surrogate", async () => {
+  // 199 ASCII chars + an emoji: slice(0, 200) would keep only the first UTF-16 half.
+  const { sandbox, calls } = harness({ answers: ["a".repeat(199) + "😀😀"] });
+  await sandbox.affpRejectOne("L1", btn());
+  await flush();
+  const sent = calls.fetches[0].body.reason;
+  assert.equal(Array.from(sent).length, 200);
+  assert.ok(sent.endsWith("😀"), "whole emoji kept");
+  assert.equal(sent.isWellFormed(), true, "no lone surrogate");
+  assert.equal(JSON.stringify({ reason: sent }).includes("\\ud83d\""), false);
+});
+
 test("single reject: server refusal is shown, not swallowed", async () => {
   const { sandbox, calls } = harness({ answers: ["real reason"], response: { status: "error", reason: "reason_required" } });
   await sandbox.affpRejectOne("L1", btn());

@@ -166,3 +166,26 @@ def test_blank_reason_never_writes_anything(monkeypatch):
     for lid in ids:
         assert _reject(client, lid, reason="  ").status_code == 400
     assert [db.affiliate_ledger.find_one({"_id": i}) for i in ids] == before
+
+
+def test_lone_surrogate_in_reason_is_dropped_not_a_500(monkeypatch):
+    """A client that cut an emoji in half sends e.g. "ok\\ud83d"; PyMongo cannot encode it."""
+    db = _db()
+    lid = _ledger(db, 1)
+    res = _client(monkeypatch, db).post(
+        f"/v2/miniapp/admin/affiliate/{lid}/reject",
+        data='{"reason": "fake referrals \\ud83d"}', content_type="application/json",
+    )
+    assert res.status_code == 200
+    assert db.affiliate_ledger.find_one({"_id": lid})["review_reason"] == "fake referrals"
+
+
+def test_reason_that_is_only_a_lone_surrogate_counts_as_blank(monkeypatch):
+    db = _db()
+    lid = _ledger(db, 1)
+    res = _client(monkeypatch, db).post(
+        f"/v2/miniapp/admin/affiliate/{lid}/reject",
+        data='{"reason": "\\ud83d"}', content_type="application/json",
+    )
+    assert res.status_code == 400
+    assert _status(db, lid) == "PENDING_REVIEW"

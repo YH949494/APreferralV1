@@ -8718,7 +8718,9 @@ def admin_affiliate_reject_v2(ledger_id):
     # (or an older cached dashboard script that mapped Cancel to "") must not be
     # able to reject. Bulk reject keeps its documented default-reason fallback.
     raw_reason = data.get("reason")
-    reason = raw_reason.strip()[:200] if isinstance(raw_reason, str) else ""
+    # Lone surrogates (e.g. a client that sliced an emoji) cannot be stored as
+    # UTF-8 BSON; drop them rather than turn a valid rejection into a 500.
+    reason = raw_reason.encode("utf-8", "ignore").decode("utf-8").strip()[:200] if isinstance(raw_reason, str) else ""
     if not reason:
         # No write on this path. A ledger that could be rejected needs a reason;
         # one that cannot keeps the answer it always got (404/409/already_rejected).

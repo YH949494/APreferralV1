@@ -12318,7 +12318,8 @@
     if (raw === null || raw === undefined) return { cancelled: true };
     var reason = String(raw).trim();
     if (reason.length < AFFP_REJECT_REASON_MIN) return { error: AFFP_REJECT_REASON_ERROR };
-    return { reason: reason.slice(0, AFFP_REJECT_REASON_MAX) };
+    // Cap by code points, not UTF-16 units: slice() could split an emoji and leave a lone surrogate.
+    return { reason: Array.from(reason).slice(0, AFFP_REJECT_REASON_MAX).join("") };
   }
 
   function affpRejectOne(ledgerId, btn) {
