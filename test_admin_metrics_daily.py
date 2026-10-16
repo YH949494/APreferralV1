@@ -1,5 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
+import json
+
 from flask import Flask
 
 import vouchers
@@ -52,7 +54,20 @@ class _FakeDb:
         self.voucher_pools = _FakeCountCollection(voucher_pool_docs)
 
 
+def _fake_verify(init_data_raw):
+    # "signed:<uid>" verifies as <uid>; see test_affiliate_admin_auth.py.
+    if init_data_raw.startswith("signed:"):
+        return True, {"user": json.dumps({"id": int(init_data_raw.split(":", 1)[1])})}, "ok"
+    return False, {}, "bad_hash"
+
+
+def _patch_auth(monkeypatch):
+    monkeypatch.setattr(vouchers, "BYPASS_ADMIN", False)
+    monkeypatch.setattr(vouchers, "verify_telegram_init_data", _fake_verify)
+
+
 def _client(monkeypatch, admin_ids=None, voucher_pool_docs=None):
+    _patch_auth(monkeypatch)
     app = Flask(__name__)
     app.register_blueprint(vouchers_bp, url_prefix="/v2/miniapp")
 
@@ -67,6 +82,15 @@ def _client(monkeypatch, admin_ids=None, voucher_pool_docs=None):
     return app.test_client()
 
 
+def test_admin_metrics_daily_rejects_unsigned_admin_user_id(monkeypatch):
+    """Regression: a cached admin's id passed as a bare query param (no signed
+    initData) must not unlock the metrics endpoint."""
+    client = _client(monkeypatch, admin_ids=[12345])
+    res = client.get("/v2/miniapp/admin/metrics/daily?user_id=12345&days=1")
+    assert res.status_code == 400
+    assert res.get_json().get("code") == "missing_init_data"
+
+
 def test_admin_metrics_daily_requires_admin(monkeypatch):
     client = _client(monkeypatch)
     res = client.get("/v2/miniapp/admin/metrics/daily")
@@ -76,7 +100,7 @@ def test_admin_metrics_daily_requires_admin(monkeypatch):
 def test_admin_metrics_daily_returns_rows_and_keys(monkeypatch):
     days = 5
     client = _client(monkeypatch, admin_ids=[12345])
-    res = client.get(f"/v2/miniapp/admin/metrics/daily?user_id=12345&days={days}")
+    res = client.get(f"/v2/miniapp/admin/metrics/daily?init_data=signed:12345&days={days}")
 
     assert res.status_code == 200
     payload = res.get_json()
@@ -113,7 +137,7 @@ def test_admin_metrics_daily_affiliate_rewards_uses_voucher_pool_issued_at(monke
         ],
     )
 
-    res = client.get("/v2/miniapp/admin/metrics/daily?user_id=12345&days=1")
+    res = client.get("/v2/miniapp/admin/metrics/daily?init_data=signed:12345&days=1")
     assert res.status_code == 200
     payload = res.get_json()
     assert payload["rows"][0]["affiliate_rewards_issued"] == 2
@@ -135,6 +159,7 @@ def test_admin_metrics_daily_qualified_events_uses_qualified_at(monkeypatch):
 
     app = Flask(__name__)
     app.register_blueprint(vouchers_bp, url_prefix="/v2/miniapp")
+    _patch_auth(monkeypatch)
     monkeypatch.setattr(vouchers, "db", _DbWithQualified())
     monkeypatch.setattr(vouchers, "users_collection", _FakeCountCollection())
     monkeypatch.setattr(vouchers, "miniapp_sessions_daily_col", _FakeCountCollection())
@@ -142,7 +167,7 @@ def test_admin_metrics_daily_qualified_events_uses_qualified_at(monkeypatch):
     admin_cache.ids = [12345]
     monkeypatch.setattr(vouchers, "admin_cache_col", admin_cache)
 
-    res = app.test_client().get("/v2/miniapp/admin/metrics/daily?user_id=12345&days=1")
+    res = app.test_client().get("/v2/miniapp/admin/metrics/daily?init_data=signed:12345&days=1")
     assert res.status_code == 200
     payload = res.get_json()
     assert payload["rows"][0]["qualified_events"] == 1

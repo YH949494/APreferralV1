@@ -368,10 +368,15 @@ def test_schedule_in_past_rejected(fake_db):
 
 
 def test_poll_close_before_publish_rejected(fake_db):
-    """Publish 10 Aug 3pm, close 10 Aug 2pm KL — must be rejected."""
+    """Poll closes one hour before it would publish — must be rejected.
+
+    Dates are relative to now: a fixed calendar date eventually falls in the
+    past and the earlier ``schedule_in_past`` guard fires instead.
+    """
     _make_destination()
-    publish_at = cc._parse_utc_datetime(datetime(2026, 8, 10, 15, 0))
-    close_at = cc._parse_utc_datetime(datetime(2026, 8, 10, 14, 0))
+    base = (datetime.now(timezone.utc) + timedelta(days=30)).replace(minute=0, second=0, microsecond=0)
+    publish_at = cc._parse_utc_datetime(base + timedelta(hours=1))
+    close_at = cc._parse_utc_datetime(base)
     payload = _poll_payload()
     payload["poll"]["close_mode"] = "date"
     payload["poll"]["close_at_utc"] = close_at.isoformat()

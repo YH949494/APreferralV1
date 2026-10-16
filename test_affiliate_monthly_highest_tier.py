@@ -2,7 +2,7 @@
 import unittest
 from datetime import datetime, timezone
 
-from pymongo.errors import DuplicateKeyError
+import mongomock
 
 from affiliate_rewards import (
     _month_window_utc,
@@ -12,105 +12,20 @@ from affiliate_rewards import (
 )
 
 
-class FakeCollection:
-    def __init__(self, unique_fields=None):
-        self.docs = []
-        self._id = 1
-        self.unique_fields = unique_fields or []
+def FakeDb():
+    """In-memory Mongo with this suite's uniqueness constraints.
 
-    def _match_value(self, value, cond):
-        if isinstance(cond, dict):
-            for op, expected in cond.items():
-                if op == "$gte" and not (value is not None and value >= expected):
-                    return False
-                if op == "$lt" and not (value is not None and value < expected):
-                    return False
-                if op == "$in" and value not in expected:
-                    return False
-                if op == "$nin" and value in expected:
-                    return False
-            return True
-        return value == cond
-
-    def _match(self, doc, filt):
-        for k, v in (filt or {}).items():
-            if not self._match_value(doc.get(k), v):
-                return False
-        return True
-
-    def insert_one(self, doc):
-        for fields in self.unique_fields:
-            for existing in self.docs:
-                if all(existing.get(f) == doc.get(f) for f in fields):
-                    raise DuplicateKeyError("duplicate")
-        row = dict(doc)
-        row.setdefault("_id", self._id)
-        self._id += 1
-        self.docs.append(row)
-        return row
-
-    def find_one(self, filt=None, proj=None):
-        for d in self.docs:
-            if self._match(d, filt or {}):
-                if not proj:
-                    return dict(d)
-                return {k: d.get(k) for k in proj.keys()}
-        return None
-
-    def update_one(self, filt, update, upsert=False):
-        for d in self.docs:
-            if self._match(d, filt):
-                for k, v in update.get("$set", {}).items():
-                    d[k] = v
-                return
-        if upsert:
-            row = dict(filt)
-            for k, v in update.get("$setOnInsert", {}).items():
-                row.setdefault(k, v)
-            for k, v in update.get("$set", {}).items():
-                row[k] = v
-            self.insert_one(row)
-
-    def count_documents(self, filt):
-        return sum(1 for d in self.docs if self._match(d, filt))
-
-    def find_one_and_update(self, filt, update, sort=None, return_document=None):
-        matches = [d for d in self.docs if self._match(d, filt)]
-        if not matches:
-            return None
-        if sort:
-            key, direction = sort[0]
-            matches.sort(key=lambda x: x.get(key, 0), reverse=(direction < 0))
-        d = matches[0]
-        for k, v in update.get("$set", {}).items():
-            d[k] = v
-        return dict(d)
-
-    def aggregate(self, pipeline):
-        rows = list(self.docs)
-        for stage in pipeline:
-            if "$match" in stage:
-                rows = [r for r in rows if self._match(r, stage["$match"])]
-            elif "$group" in stage:
-                key_field = stage["$group"]["_id"].lstrip("$")
-                grouped = {}
-                for r in rows:
-                    key = r.get(key_field)
-                    grouped.setdefault(key, set()).add(r.get("invitee_id"))
-                rows = [{"_id": k, "invitees": list(v)} for k, v in grouped.items()]
-            elif "$project" in stage:
-                rows = [{"count": len(r.get("invitees") or [])} for r in rows]
-        return rows
-
-
-class FakeDb:
-    def __init__(self):
-        self.users = FakeCollection(unique_fields=[("user_id",)])
-        self.qualified_events = FakeCollection(unique_fields=[("invitee_id",)])
-        self.affiliate_ledger = FakeCollection(unique_fields=[("dedup_key",)])
-        self.voucher_pools = FakeCollection(unique_fields=[("pool_id", "code")])
-        self.affiliate_voucher_batches = FakeCollection()
-        self.referral_audit = FakeCollection()
+    The previous hand-rolled fake treated any operator it did not model
+    ($and/$or/$exists, ...) as a match and returned None from update_one, so it
+    could not exercise the settle/claim queries in
+    evaluate_monthly_affiliate_reward. mongomock gives real query semantics.
+    """
+    db = mongomock.MongoClient(tz_aware=True)["affiliate_monthly_highest_tier"]
+    db.users.create_index([("user_id", 1)], unique=True)
+    db.qualified_events.create_index([("invitee_id", 1)], unique=True)
+    db.affiliate_ledger.create_index([("dedup_key", 1)], unique=True)
+    db.voucher_pools.create_index([("pool_id", 1), ("code", 1)], unique=True)
+    return db
 
 
 class AffiliateMonthlyHighestTierTests(unittest.TestCase):

@@ -10,7 +10,12 @@ def _load_defs(*names):
     body = [node for node in module.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in names]
     isolated = ast.Module(body=body, type_ignores=[])
     ast.fix_missing_locations(isolated)
-    env = {}
+    # Signature annotations (``context: ContextTypes.DEFAULT_TYPE``) are
+    # evaluated when each ``def`` executes, so the names must exist up front.
+    from telegram import Update
+    from telegram.ext import ContextTypes
+
+    env = {"ContextTypes": ContextTypes, "Update": Update}
     exec(compile(isolated, filename="main.py", mode="exec"), env)  # noqa: S102
     return [env[n] for n in names]
 

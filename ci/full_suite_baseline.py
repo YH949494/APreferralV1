@@ -15,18 +15,12 @@ direction:
   * a missing one     -> a known failure was fixed; update the baseline in the
                          same PR so the file keeps meaning what it says
 
-Two modules are excluded, both broken before this branch existed:
-
-  test_ugc_growth_referral.py   imports ``scheduler._eligible_referrer_tiers``,
-                                which does not exist. A collection error aborts
-                                the entire pytest run, so it cannot simply be
-                                left to fail.
-  test_initdata_logging.py      replaces the ``database`` module with a stub at
-                                import time, which leaks into unrelated modules
-                                collected after it.
-
-Both exclusions are asserted below, so an exclusion cannot quietly grow into a
-way of hiding a newly broken module.
+No module is excluded. Two used to be (test_ugc_growth_referral.py, an
+ImportError that aborted collection; test_initdata_logging.py, which leaked a
+stubbed ``database`` into later modules); both were fixed at the root. If an
+exclusion is ever needed again, add it to EXCLUDED with the exact failure it
+is excluded for: each one is asserted below, so an exclusion cannot quietly
+grow into a way of hiding a newly broken module.
 """
 from __future__ import annotations
 
@@ -38,12 +32,8 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BASELINE = ROOT / "ci" / "known_test_failures.txt"
 
-EXCLUDED = {
-    "test_ugc_growth_referral.py":
-        "ImportError: cannot import name '_eligible_referrer_tiers' from 'scheduler'",
-    "test_initdata_logging.py":
-        None,  # import-time monkeypatching of `database`; runs clean alone
-}
+# module -> exact failure text it is excluded for (None: asserted only to exist)
+EXCLUDED: dict[str, str | None] = {}
 
 LINE_RE = re.compile(r"^(FAILED|ERROR) ([A-Za-z0-9_]+\.py[^\s]*)")
 
@@ -105,7 +95,7 @@ def main() -> int:
                if re.search(r"\d+ (passed|failed)", l)]
 
     # A run that never got past collection has no failure set to compare, and
-    # comparing anyway is actively misleading: the baseline's 89 entries all
+    # comparing anyway is actively misleading: every baseline entry would
     # look "newly passing" when in truth nothing ran. Diagnose it as what it
     # is — usually a missing test dependency (see requirements-dev.txt).
     interrupted = re.search(r"Interrupted: (\d+) errors? during collection", combined)

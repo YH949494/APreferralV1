@@ -1,6 +1,8 @@
 import unittest
 from datetime import datetime, timedelta, timezone
 
+import mongomock
+
 from scheduler import compute_affiliate_daily_kpi
 
 
@@ -59,6 +61,14 @@ class FakeCollection:
             row = dict(filt)
             row.update(update.get("$set", {}))
             self.docs.append(row)
+
+    def aggregate(self, pipeline):
+        # Run the real pipeline ($match/$group/...) on mongomock over a
+        # snapshot of this collection's docs.
+        col = mongomock.MongoClient(tz_aware=True)["kpi"]["agg"]
+        if self.docs:
+            col.insert_many([dict(d) for d in self.docs])
+        return list(col.aggregate(pipeline))
 
     def distinct(self, key, filt=None):
         vals = []

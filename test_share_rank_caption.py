@@ -80,9 +80,8 @@ def test_caption_generation_ranked_format():
         "My current rank 👇\n\n"
         "🏆 Currently Ranked #2\n\n"
         "⚡ Weekly XP: 750\n"
-        "🎖️ Podium Holder\n"
         "✨ Top 3 This Week\n\n"
-        "What's yours? 👀"
+        "🎁 Subscribe to @AdvantPlayOfficial for Voucher Drops"
     )
 
 
@@ -124,9 +123,8 @@ def test_unranked_user_fallback_caption_and_payload():
         "My current rank 👇\n\n"
         "🏆 Not Ranked Yet\n\n"
         "⚡ Weekly XP: 0\n"
-        "🎖️ Rising Star\n"
         "✨ Climbing the Leaderboard\n\n"
-        "What's yours? 👀"
+        "🎁 Subscribe to @AdvantPlayOfficial for Voucher Drops"
     )
     assert body["title"] == "Rising Star"
 

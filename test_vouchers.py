@@ -2,7 +2,11 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from flask import Flask
 
+import mongomock
+import pytest
 from pymongo.errors import DuplicateKeyError
+
+import database
 
 from config import normalize_for_bot_segment, public_pool_probability_for_bot_segment, is_new_user_segment
 
@@ -44,6 +48,44 @@ from vouchers import (
     get_active_drops,
 )
 import vouchers as vouchers_module
+
+
+
+
+def _in_app_context(fn):
+    """Run a test inside a bare Flask app context.
+
+    claim_pooled()/claim_personalised() log through ``current_app``; in
+    production they are only reached from the /vouchers/claim request handler,
+    which always has one.
+    """
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with Flask(__name__).app_context():
+            return fn(*args, **kwargs)
+
+    return wrapper
+
+
+@pytest.fixture(autouse=True)
+def _isolated_mongomock_db():
+    """Back every unstubbed module-level collection with a fresh in-memory db.
+
+    vouchers.py binds collections such as ``request_dedup_col`` to lazy
+    ``database`` proxies at import. Tests that stub only the collections they
+    assert on otherwise reach the process-wide ``database._db`` — None in a
+    clean run ("Database not initialized"), or another module's leftover state
+    in a full-suite run.
+    """
+    saved = (database._client, database._db)
+    database._client = mongomock.MongoClient()
+    database._db = database._client["referral_bot"]
+    try:
+        yield
+    finally:
+        database._client, database._db = saved
 
 
 class FakeInsertResult:
@@ -700,6 +742,7 @@ class VoucherAntiHunterTests(unittest.TestCase):
         self.assertEqual(_compute_claimable_remaining("th", drop), 0)
         self.assertEqual(_compute_claimable_remaining("MY", drop), 2)
 
+    @_in_app_context
     def test_claim_pooled_prefers_my_pool_then_public(self):
         import vouchers as vouchers_module
 
@@ -736,6 +779,7 @@ class VoucherAntiHunterTests(unittest.TestCase):
         finally:
             vouchers_module.db = original_db
 
+    @_in_app_context
     def test_claim_pooled_non_my_uses_public_only(self):
         import vouchers as vouchers_module
 
@@ -770,6 +814,7 @@ class VoucherAntiHunterTests(unittest.TestCase):
             vouchers_module.db = original_db
 
 
+    @_in_app_context
     def test_claim_pooled_reconciles_stale_my_remaining(self):
         import vouchers as vouchers_module
 
@@ -788,6 +833,7 @@ class VoucherAntiHunterTests(unittest.TestCase):
         finally:
             vouchers_module.db = original_db
 
+    @_in_app_context
     def test_claim_pooled_reconciles_stale_public_remaining_precheck(self):
         import vouchers as vouchers_module
 
@@ -814,6 +860,7 @@ class VoucherAntiHunterTests(unittest.TestCase):
         finally:
             vouchers_module.db = original_db
 
+    @_in_app_context
     def test_claim_pooled_persists_reconciled_public_remaining(self):
         import vouchers as vouchers_module
 
@@ -852,6 +899,7 @@ class VoucherAntiHunterTests(unittest.TestCase):
         finally:
             vouchers_module.db = original_db
 
+    @_in_app_context
     def test_claim_pooled_my_pool_decrements_when_available(self):
         import vouchers as vouchers_module
 
@@ -878,6 +926,7 @@ class VoucherAntiHunterTests(unittest.TestCase):
         finally:
             vouchers_module.db = original_db
 
+    @_in_app_context
     def test_legacy_public_pool_counts_missing_pool_field(self):
         import vouchers as vouchers_module
 
@@ -973,6 +1022,7 @@ class VoucherAntiHunterTests(unittest.TestCase):
         orig_welcome_eligibility = m.welcome_eligibility
         orig_get_active_drops = m.get_active_drops
         orig_claims = m.voucher_claims_col
+        orig_access = m.check_public_pool_access
         try:
             m.db = fake_db
             m.users_collection = FakeSimpleCollection([{"user_id": 42, "usernameLower": "alice", "region": "th"}])
@@ -982,6 +1032,10 @@ class VoucherAntiHunterTests(unittest.TestCase):
             m.is_user_eligible_for_drop = lambda *args, **kwargs: True
             m.welcome_eligibility = lambda *_args, **_kwargs: (True, "ok", None)
             m.get_active_drops = lambda _ref: [drop]
+            # Probability shaping is a random per-user draw (10% for an
+            # unclassified user); this test is about counter reconciliation,
+            # so pin the draw to "allowed" to keep it deterministic.
+            m.check_public_pool_access = lambda **kwargs: {"status": "allowed", "assignment": {"access_allowed": True}}
             with Flask(__name__).app_context():
                 cards, _region = user_visible_drops({"usernameLower": "alice", "userId": "42"}, now, tg_user={"id": 42, "username": "alice"})
             self.assertEqual(len(cards), 1)
@@ -997,6 +1051,7 @@ class VoucherAntiHunterTests(unittest.TestCase):
             m.welcome_eligibility = orig_welcome_eligibility
             m.get_active_drops = orig_get_active_drops
             m.voucher_claims_col = orig_claims
+            m.check_public_pool_access = orig_access
 
     def test_user_visible_drops_persists_true_sold_out_zero(self):
         import vouchers as m
@@ -1032,7 +1087,15 @@ class VoucherAntiHunterTests(unittest.TestCase):
             m.get_active_drops = lambda _ref: [drop]
             with Flask(__name__).app_context():
                 cards, _region = user_visible_drops({"usernameLower": "alice", "userId": "42"}, now, tg_user={"id": 42, "username": "alice"})
-            self.assertEqual(cards, [])
+            # A truly sold-out drop stays listed as a non-claimable
+            # "fully_redeemed" card (same contract as
+            # test_visible_sold_out_includes_fully_redeemed_display_state).
+            self.assertEqual(len(cards), 1)
+            self.assertEqual(cards[0]["dropId"], "drop-visible-empty")
+            self.assertTrue(cards[0]["sold_out"])
+            self.assertFalse(cards[0]["claimable"])
+            self.assertEqual(cards[0]["visible_remaining"], 0)
+            self.assertEqual(cards[0]["display_state"], "fully_redeemed")
             self.assertEqual(fake_db.drops.docs["drop-visible-empty"]["public_remaining"], 0)
         finally:
             m.db = orig_db
@@ -1122,16 +1185,14 @@ class VoucherAntiHunterTests(unittest.TestCase):
         orig_load_user_context = m.load_user_context
         orig_is_drop_allowed = m.is_drop_allowed
         orig_is_user_eligible = m.is_user_eligible_for_drop
-        orig_ledger = m.ugc_reward_ledger_col
         try:
             m.extract_raw_init_data_from_query = lambda req: "ok"
             m.verify_telegram_init_data = lambda init_data: (True, {"user": '{"id": 42, "username": "u42"}'}, "ok")
-            m.db = FakeDb([drop], [])
+            m.db = FakeDb([drop], [{"type": "pooled", "dropId": drop_id, "code": "INT1", "status": "free", "pool": "public"}])
             m.users_collection = FakeSimpleCollection([{"user_id": 42, "usernameLower": "u42", "region": "th"}])
             m.load_user_context = lambda **kwargs: {}
             m.is_drop_allowed = lambda *args, **kwargs: True
             m.is_user_eligible_for_drop = lambda *args, **kwargs: True
-            m.ugc_reward_ledger_col = FakeSimpleCollection([])
 
             with app.test_request_context(
                 "/vouchers/claim?init_data=ok",
@@ -1150,7 +1211,6 @@ class VoucherAntiHunterTests(unittest.TestCase):
             m.load_user_context = orig_load_user_context
             m.is_drop_allowed = orig_is_drop_allowed
             m.is_user_eligible_for_drop = orig_is_user_eligible
-            m.ugc_reward_ledger_col = orig_ledger
     
     def test_claim_new_joiner_drop_requires_subscription(self):
         import vouchers as m
@@ -1186,7 +1246,9 @@ class VoucherAntiHunterTests(unittest.TestCase):
         try:
             m.extract_raw_init_data_from_query = lambda req: "ok"
             m.verify_telegram_init_data = lambda init_data: (True, {"user": '{"id": 42, "username": "u42"}'}, "ok")
-            m.db = FakeDb([drop], [])
+            # Pool stock is checked before the subscription gate; with no free
+            # code the claim short-circuits to 410 sold_out first.
+            m.db = FakeDb([drop], [{"type": "pooled", "dropId": drop_id, "code": "NJ1", "status": "free", "pool": "public"}])
             m.users_collection = FakeSimpleCollection([{"user_id": 42, "usernameLower": "u42", "region": "th"}])
             m.voucher_claims_col = FakeSimpleCollection([])
             m.load_user_context = lambda **kwargs: {}
@@ -1204,7 +1266,9 @@ class VoucherAntiHunterTests(unittest.TestCase):
             ):
                 resp, status = m.api_claim()
                 self.assertEqual(status, 403)
-                self.assertEqual(resp.get_json().get("code"), "not_subscribed")
+                # Welcome V2 contract: locked card code, subscription reason.
+                self.assertEqual(resp.get_json().get("code"), "welcome_locked")
+                self.assertEqual(resp.get_json().get("reason"), "not_subscribed")
         finally:
             m.extract_raw_init_data_from_query = orig_extract
             m.verify_telegram_init_data = orig_verify
@@ -1258,7 +1322,9 @@ class VoucherAntiHunterTests(unittest.TestCase):
         try:
             m.extract_raw_init_data_from_query = lambda req: "ok"
             m.verify_telegram_init_data = lambda init_data: (True, {"user": '{"id": 42, "username": "u42"}'}, "ok")
-            m.db = FakeDb([drop], [])
+            # Pool stock is checked before the subscription gate; with no free
+            # code the claim short-circuits to 410 sold_out first.
+            m.db = FakeDb([drop], [{"type": "pooled", "dropId": drop_id, "code": "NJ1", "status": "free", "pool": "public"}])
             m.users_collection = FakeSimpleCollection([{"user_id": 42, "usernameLower": "u42", "region": "th"}])
             m.voucher_claims_col = FakeSimpleCollection([])
             m.load_user_context = lambda **kwargs: {}
@@ -1505,6 +1571,7 @@ class VoucherAntiHunterTests(unittest.TestCase):
             m.is_drop_allowed = orig_allowed
             m.is_user_eligible_for_drop = orig_eligible
 
+    @_in_app_context
     def test_claim_personalised_supports_both_type_spellings(self):
         import vouchers as m
 
@@ -1617,8 +1684,10 @@ class VoucherAntiHunterTests(unittest.TestCase):
             m.verify_telegram_init_data = lambda init_data: (True, {}, "ok")
             m._user_ctx_or_preview = lambda req, **kwargs: ({"userId": "0", "usernameLower": "admin"}, True)
             with app.test_request_context("/vouchers/visible?init_data=ok", method="GET"):
-                resp, status = m.api_visible()
-                self.assertEqual(status, 200)
+                # Returned via _miniapp_no_store_json(): a Response, not a tuple.
+                resp = m.api_visible()
+                self.assertEqual(resp.status_code, 200)
+                self.assertIn("no-store", resp.headers.get("Cache-Control", ""))
                 items = resp.get_json()["drops"]
                 self.assertEqual(len(items), 1)
                 self.assertTrue(items[0]["adminPreview"])
@@ -2410,7 +2479,7 @@ class FakeSimpleCollection:
                 return False
         return True
 
-    def find_one(self, filt):
+    def find_one(self, filt, projection=None):
         for d in self.docs:
             if self._match(d, filt):
                 return dict(d)
@@ -2468,6 +2537,11 @@ class FakeSimpleCollection:
         return sum(1 for d in self.docs if self._match(d, filt))
 
 
+@unittest.skip(
+    "obsolete: the UGC reward subsystem (_post_hash, _issue_small_reward, "
+    "_compute_user_kpis, ugc_* collections) was removed from vouchers.py and "
+    "exists nowhere else in the codebase; nothing left to test"
+)
 class UGCRewardTests(unittest.TestCase):
     def test_dedupe_submission_hash(self):
         import vouchers as m
@@ -2566,6 +2640,14 @@ class FakeReferralEventsCollection:
     def __init__(self, docs=None):
         self.docs = docs or []
 
+    def find(self, filt=None, projection=None):
+        # Delegate query semantics ($in/$or/$exists) to mongomock rather than
+        # re-implementing them here.
+        col = mongomock.MongoClient()["ref_events"]["referral_events"]
+        if self.docs:
+            col.insert_many([dict(d) for d in self.docs])
+        return col.find(filt or {}, projection)
+
     def count_documents(self, filt, limit=0):
         count = 0
         for doc in self.docs:
@@ -2582,13 +2664,23 @@ class FakeReferralEventsCollection:
 
 
 class FakeDbForReferralProgress:
+    """referral_events is the ledger under test; every other collection the
+    progress endpoint reads (pending_referrals, qualified_events, ...) is an
+    empty in-memory collection rather than an AttributeError."""
+
     def __init__(self, referral_events_col):
         self._referral_events_col = referral_events_col
+        self._empty = mongomock.MongoClient()["referral_progress"]
 
     def __getitem__(self, name):
         if name == "referral_events":
             return self._referral_events_col
-        raise KeyError(name)
+        return self._empty[name]
+
+    def __getattr__(self, name):
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return self[name]
 
 
 class ReferralProgressTests(unittest.TestCase):
