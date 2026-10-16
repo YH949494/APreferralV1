@@ -9,9 +9,26 @@ from datetime import datetime, timedelta, timezone
 
 import mongomock
 
+import pytest
+
 import official_channel_reopen_audit as audit_mod
 import referral_invitee_lock
 import scheduler
+
+
+@pytest.fixture(autouse=True)
+def _restore_scheduler_membership_checker(monkeypatch):
+    """Tests below stub scheduler._get_official_channel_member_status with a
+    plain assignment, which nothing undid. The stub (always "member") then
+    leaked into later modules, e.g. test_affiliate_reward_retention drives the
+    REAL checker and saw 'member' instead of timeout/not_member (16 failures,
+    order-dependent). Registering the original with monkeypatch makes it
+    revert after each test regardless of how the test rebinds it."""
+    monkeypatch.setattr(
+        scheduler,
+        "_get_official_channel_member_status",
+        scheduler._get_official_channel_member_status,
+    )
 
 
 def _fresh_db():

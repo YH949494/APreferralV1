@@ -56,6 +56,22 @@ def _reload_referral_destination(monkeypatch, **env):
     return importlib.reload(referral_destination)
 
 
+@pytest.fixture(autouse=True)
+def _restore_referral_destination_module(monkeypatch):
+    """_reload_referral_destination() re-executes the module under test-specific
+    env, which rebinds module-level constants (OFFICIAL_CHANNEL_ID, ...).
+    monkeypatch undoes the env afterwards but nothing re-evaluated the module,
+    so the last test's constants leaked into whatever ran next: with
+    OFFICIAL_CHANNEL_ID left at a test override, destination_type_for_chat_id()
+    classified the real channel id as community_group. Restore the env first,
+    then reload, so every test (here and in later modules) sees the defaults."""
+    yield
+    monkeypatch.undo()
+    import referral_destination
+
+    importlib.reload(referral_destination)
+
+
 def test_default_mode_resolves_community_group(monkeypatch):
     mod = _reload_referral_destination(monkeypatch)
     chat_id, destination_type = mod.get_referral_destination()

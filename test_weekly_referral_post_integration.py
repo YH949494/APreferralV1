@@ -27,6 +27,23 @@ else:  # pragma: no cover
     import main  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _isolate_shared_collections():
+    """main.users_collection is process-wide mongomock state with a unique
+    user_id index, shared with every module that imports main. Start from and
+    leave behind empty collections so this file neither fails on rows another
+    module left (DuplicateKeyError on user_id=1) nor leaks its own."""
+    def _clear():
+        main.users_collection.delete_many({})
+        main.db["weekly_referral_posts"].delete_many({})
+        main.history_collection.delete_many({})
+        main.weekly_reset_markers_collection.delete_many({})
+        main.scheduler_locks_collection.delete_many({})
+    _clear()
+    yield
+    _clear()
+
+
 def test_monday_reset_does_not_remove_weekly_referral_post_history():
     now = datetime.now(main.KL_TZ)
     week_end_date = (now - timedelta(days=1)).date()
