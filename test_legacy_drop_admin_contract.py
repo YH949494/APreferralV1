@@ -99,18 +99,21 @@ def test_personalised_create_with_assignments(client, mdb):
 
 
 @pytest.mark.parametrize(
-    "eligibility, expected_mode",
+    "eligibility, expected",
     [
-        ({"mode": "tier", "allow": ["VIP1", "vip2"]}, "tier"),
-        ({"mode": "user_id", "allow": [1, "2"]}, "user_id"),
-        ({"mode": "admin_only"}, "admin_only"),
-        ({"mode": "public"}, "public"),
+        ({"mode": "tier", "allow": ["VIP1", "vip2"]}, {"mode": "tier", "allow": ["VIP1", "VIP2"]}),
+        ({"mode": "user_id", "allow": [1, "2", "x"]}, {"mode": "user_id", "allow": [1, 2]}),
+        ({"mode": "admin_only"}, {"mode": "admin_only"}),
+        ({"mode": "public"}, {"mode": "public"}),
     ],
 )
-def test_every_eligibility_mode_the_panel_offers_is_accepted(client, mdb, eligibility, expected_mode):
+def test_every_eligibility_mode_the_panel_offers_is_accepted_with_its_values(client, mdb, eligibility, expected):
     res = _create(client, type="pooled", codes=["E1"], eligibility=eligibility)
     assert res.status_code == 200
-    assert mdb.drops.find_one({})["eligibility"]["mode"] == expected_mode
+    stored = mdb.drops.find_one({})["eligibility"]
+    # The whole stored eligibility is the contract: a dropped or corrupted allow-list would
+    # silently retarget a legacy-created drop.
+    assert stored == expected
 
 
 def test_welcome_new_joiner_shortcut_still_maps_to_public_pooled_new_joiner_audience(client, mdb):

@@ -26,16 +26,16 @@ Sources read: `static/index.html` (Mini App "Voucher Drops" admin panel: create 
 | 4 | **Hero** title / subtitle / image | Not exposed | **Missing** | Yes (`hero_*`) |
 | 5 | **Whitelist usernames** (pooled) | Not exposed | **Missing** | Yes (`whitelistUsernames`) |
 | 6 | **CSV/TXT import** for pairs and codes | Paste only | **Missing** | Client only |
-| 7 | Client-side duplicate detection (usernames, codes, malformed rows) | Server-side only (explained in plain language since the atomic-create PR) | Partial | – |
+| 7 | Client-side duplicate detection (usernames, codes, malformed rows) | Server-side only; on `main` the raw backend code is shown. Plain-language text and rollback-safe creation arrive with the **pending** atomic-create PR (#556) | Partial | – |
 | 8 | **Edit name + start/end** | No UI | **Missing** | Yes (`set_dates`) |
 | 9 | **Delete drop** with typed-name confirmation, claimed/total counts, "Retry delete" state, partial-cleanup message | No UI; "deleting…" state not shown | **Missing** | Yes (`delete`, resumable) |
 | 10 | **Copy drop ID** | No | **Missing** | – |
 | 11 | Add data to a drop: pooled **and personalised assignments** | Pooled only | Personalised **broken on both** (see §3) | **No** |
-| 12 | Start / Pause / End | Yes; Start/Resume semantics fixed in the lifecycle PR | Covered | Yes |
+| 12 | Start / Pause / End | Yes on `main`, with the old Start semantics (resets expiry, shown on live drops); corrected by the **pending** lifecycle PR (#557) | Covered (pending fix) | Yes |
 | 13 | Row stats: free/total, claimed/assigned, priority | Yes | Covered | – |
 | 14 | Mission Pool rows merged into the same list | Yes | Covered (dashboard has more) | – |
 
-Dashboard-only capabilities (must not be lost either): mission-pool actions in the same list, idempotent writes, plain-language failure text, rollback-safe creation.
+Dashboard-only capability on `main` (must not be lost either): mission-pool actions in the same list. **Pending, not yet on `main`:** rollback-safe creation and plain-language failure text (#556), Start/Pause/Resume semantics (#557), idempotent writes (#558) — these are hotfixes in review, not current capabilities.
 
 ## 3. Pre-existing defect found during the inventory (not fixed here)
 
@@ -48,7 +48,7 @@ Dashboard-only capabilities (must not be lost either): mission-pool actions in t
 
 ## 5. Recommended order for the dashboard parity work (next phase, not started)
 
-1. Row actions that need no new design: **Edit name/dates** (8), **Copy ID** (10), **Delete with typed confirmation** (9) — all backend-ready; reuse the lifecycle PR's `availableOps` and the confirm pattern.
+1. Row actions that need no new design: **Edit name/dates** (8), **Copy ID** (10), **Delete with typed confirmation** (9) — all backend-ready; once #557 merges, reuse its `availableOps` and confirm pattern.
 2. **Create form parity** (2–5) behind the existing payload shape; reuse `voucher_drop_preview.js` for **preview + warnings** (1, 7).
 3. **CSV import** (6).
 4. Decide on row 11 (personalised add-data) as a product + backend change.
