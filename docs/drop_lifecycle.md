@@ -10,7 +10,7 @@
 | `end_now` | any | `endsAt = now`, status `expired`; already-expired is a no-op | |
 | `set_dates` / `delete` | unchanged | unchanged | unchanged |
 
-Every lifecycle write is conditional on the status that was read; if another admin changed the drop in between, the second request gets `409 drop_changed` and the first change stands.
+Every lifecycle write is conditional on the status **and the schedule (`startsAt`, `endsAt`)** that were read; if another admin changed the drop in between (including a `set_dates` that leaves the status alone), the second request gets `409 drop_changed` and the first change stands. `start_now` writes only the dates it actually changes (`startsAt` when it was still in the future, `endsAt` only when supplied explicitly).
 
 Response additions (additive): `dropStatus`, `startsAt`, `endsAt`, `unchanged`. Errors carry a human `message`.
 `GET /admin/drops_v2` and `GET /admin/drops` rows gain `availableOps` (`start_now|pause|resume|end_now`), the single source of truth for which buttons to show; drops still being created have none.

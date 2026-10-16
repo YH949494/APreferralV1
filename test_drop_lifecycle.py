@@ -223,6 +223,47 @@ def test_a_concurrent_change_between_read_and_write_is_not_overwritten(client, m
     assert real.find_one({"_id": did})["status"] == "expired", "the other admin's change must win"
 
 
+def _racing_set_dates(mdb, monkeypatch, did, new_end):
+    """Another admin runs set_dates after our read and before our write (status untouched)."""
+    real = mdb.drops
+
+    class Racing:
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+        def update_one(self, flt, upd, *a, **k):
+            real.update_one({"_id": did}, {"$set": {"endsAt": new_end}})
+            return real.update_one(flt, upd, *a, **k)
+
+    class Db:
+        def __getattr__(self, name):
+            return Racing() if name == "drops" else getattr(mdb, name)
+
+    monkeypatch.setattr(vouchers, "db", Db())
+
+
+@pytest.mark.parametrize("op,status,start_h", [("start_now", "upcoming", 2), ("pause", "active", -1), ("resume", "paused", -1)])
+def test_a_concurrent_set_dates_is_never_reverted_nor_slips_past_the_checks(client, mdb, monkeypatch, op, status, start_h):
+    did = _drop(mdb, start_h=start_h, end_h=5, status=status)
+    changed_end = datetime.now(timezone.utc) + timedelta(days=30)
+    _racing_set_dates(mdb, monkeypatch, did, changed_end)
+    res = _op(client, did, op)
+    assert res.status_code == 409 and res.get_json()["code"] == "drop_changed"
+    stored = mdb.drops.find_one({"_id": did})
+    assert _utc(stored["endsAt"]) == changed_end.replace(microsecond=changed_end.microsecond // 1000 * 1000), \
+        "the other admin's new end time must survive"
+    assert stored["status"] == status
+
+
+def test_start_now_only_writes_the_dates_it_changes(client, mdb):
+    did = _drop(mdb, start_h=2, end_h=9, status="upcoming")
+    _, end0, _ = _schedule(mdb, did)
+    res = _op(client, did, "start_now")
+    body = res.get_json()
+    assert res.status_code == 200 and body["endsAt"] == end0.isoformat() and body["startsAt"]
+    assert _schedule(mdb, did)[1] == end0
+
+
 def test_two_simultaneous_start_requests_only_one_applies(mdb, monkeypatch):
     import threading
     app = Flask(__name__)

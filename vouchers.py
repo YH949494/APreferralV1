@@ -8880,7 +8880,15 @@ def _drop_lifecycle_op(drop: dict, op: str, data: dict):
     state = _drop_runtime_state(drop, now)
     starts = _as_aware_utc(drop.get("startsAt"))
     ends = _as_aware_utc(drop.get("endsAt"))
-    where = {"_id": drop["_id"], "status": drop.get("status")}
+    # Conditional on everything the decision below was based on, not just status: a
+    # concurrent set_dates changes the schedule without touching status, and must not
+    # be overwritten by (or slip past the checks of) this operation.
+    where = {
+        "_id": drop["_id"],
+        "status": drop.get("status"),
+        "startsAt": drop.get("startsAt"),
+        "endsAt": drop.get("endsAt"),
+    }
     fields: dict = {}
 
     if op == "start_now":
@@ -8901,7 +8909,12 @@ def _drop_lifecycle_op(drop: dict, op: str, data: dict):
                 "This drop's end time has passed. Choose a new end time to start it again.",
             )
         new_start = starts if (starts is not None and starts <= now) else now
-        update = {"startsAt": new_start, "endsAt": new_end, "status": "active"}
+        # Only write the dates this request actually changes.
+        update = {"status": "active"}
+        if starts is None or starts > now:
+            update["startsAt"] = new_start
+        if explicit_end:
+            update["endsAt"] = new_end
     elif op == "pause":
         if state == "paused":
             return {"unchanged": True, "dropStatus": "paused"}
@@ -8923,8 +8936,10 @@ def _drop_lifecycle_op(drop: dict, op: str, data: dict):
     if getattr(result, "matched_count", 1) != 1:
         return _drop_lifecycle_error("drop_changed", "Someone else changed this drop. Refresh and try again.")
     fields["dropStatus"] = update["status"]
+    if op == "start_now":  # report the effective schedule even where it was left untouched
+        update = {"startsAt": update.get("startsAt", starts), "endsAt": update.get("endsAt", ends), **update}
     for key in ("startsAt", "endsAt"):
-        if key in update:
+        if update.get(key) is not None:
             fields[key] = _as_aware_utc(update[key]).isoformat()
     return fields
 
