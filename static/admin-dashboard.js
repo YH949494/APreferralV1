@@ -12304,6 +12304,43 @@
     for (var i = 0; i < btns.length; i++) btns[i].disabled = !!busy;
   }
 
+  // Rejecting an affiliate reward is irreversible, so the reason prompt is the
+  // confirmation: prompt() returns null on Cancel, and Cancel must never reach
+  // the server. A blank/too-short reason is rejected client-side too (the
+  // server enforces it as well, see admin_affiliate_reject_v2).
+  var AFFP_REJECT_REASON_MIN = 3;
+  var AFFP_REJECT_REASON_MAX = 200;
+  var AFFP_REJECT_REASON_ERROR = "Enter a reason for the rejection (at least " + AFFP_REJECT_REASON_MIN + " characters). Nothing was rejected.";
+
+  // Returns {cancelled:true} | {error:string} | {reason:string}.
+  function affpAskRejectReason(promptText, defaultText) {
+    var raw = prompt(promptText, defaultText || "");
+    if (raw === null || raw === undefined) return { cancelled: true };
+    var reason = String(raw).trim();
+    if (reason.length < AFFP_REJECT_REASON_MIN) return { error: AFFP_REJECT_REASON_ERROR };
+    // Cap by code points, not UTF-16 units: slice() could split an emoji and leave a lone surrogate.
+    return { reason: Array.from(reason).slice(0, AFFP_REJECT_REASON_MAX).join("") };
+  }
+
+  function affpRejectOne(ledgerId, btn) {
+    var ask = affpAskRejectReason("Reason for rejection (required):", "");
+    if (ask.cancelled) return;
+    if (ask.error) { banner(ask.error, "error"); return; }
+    btn.disabled = true;
+    return fetch("/v2/miniapp/admin/affiliate/" + encodeURIComponent(ledgerId) + "/reject", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reason: ask.reason }),
+    }).then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d.status === "ok") { toast("✅ Affiliate reward rejected", "success"); loadAffiliatePending(true); }
+        else banner("❌ Reject failed: " + (d.reason || "unknown"), "error");
+      })
+      .catch(function (e) { banner("❌ Reject failed: " + e.message, "error"); })
+      .finally(function () { btn.disabled = false; });
+  }
+
   // Scope: ONLY the rows in the loaded pending response (affpLoaded.ids).
   function affpRejectAll(btn) {
     if (affpLoaded.submitting) return;
@@ -12316,9 +12353,10 @@
     var typed = prompt('Second confirmation: type "REJECT ' + n + '" to proceed.');
     if (typed === null) return;
     if (String(typed).trim() !== "REJECT " + n) { banner("Reject All cancelled: confirmation text did not match.", "error"); return; }
-    var reason = prompt("Reason (optional):", "bulk_admin_reject");
-    if (reason === null) return;
-    reason = String(reason).trim() || "bulk_admin_reject";
+    var ask = affpAskRejectReason("Reason (required):", "bulk_admin_reject");
+    if (ask.cancelled) return;
+    if (ask.error) { banner(ask.error, "error"); return; }
+    var reason = ask.reason;
     affpLoaded.submitting = true;
     affpSetBulkBusy(true);
     btnStart(btn, "Rejecting...");
@@ -12414,20 +12452,7 @@
       } else if (op === "hist-replenish") {
         affpOpenHistoricalReplenishModal(ledgerId);
       } else if (op === "reject") {
-        var reason = prompt("Reason for rejection (optional):") || "";
-        btn.disabled = true;
-        fetch("/v2/miniapp/admin/affiliate/" + encodeURIComponent(ledgerId) + "/reject", {
-          method: "POST",
-          credentials: "same-origin",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ reason: reason }),
-        }).then(function (r) { return r.json(); })
-          .then(function (d) {
-            if (d.status === "ok") { toast("✅ Affiliate reward rejected", "success"); loadAffiliatePending(true); }
-            else banner("❌ Reject failed: " + (d.reason || "unknown"), "error");
-          })
-          .catch(function (e) { banner("❌ Reject failed: " + e.message, "error"); })
-          .finally(function () { btn.disabled = false; });
+        affpRejectOne(ledgerId, btn);
       } else if (op === "approve") {
         if (!confirm("Approve this affiliate reward? A voucher may be issued immediately.")) return;
         btn.disabled = true;

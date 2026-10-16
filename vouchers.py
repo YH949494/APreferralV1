@@ -35,6 +35,7 @@ from affiliate_rewards import (
     affiliate_bundle_visible_cards,
     AFFILIATE_BULK_REJECTABLE_STATUSES,
     affiliate_reject_refusal_reason,
+    AFFILIATE_ADMIN_REJECTABLE_STATUSES,
     approve_affiliate_ledger,
     reject_affiliate_ledger,
     issue_current_month_affiliate_rewards,
@@ -8712,7 +8713,27 @@ def admin_affiliate_reject_v2(ledger_id):
         return jsonify({"status": "error", "reason": "bad_ledger_id"}), 400
 
     data = request.get_json(silent=True) or {}
-    before = reject_affiliate_ledger(db, ledger_id=oid, reason=data.get("reason"), now_utc=datetime.now(timezone.utc))
+    # Rejecting is irreversible, so a reason is mandatory. This is enforced
+    # here as well as in the dashboard: a client that cancels the reason prompt
+    # (or an older cached dashboard script that mapped Cancel to "") must not be
+    # able to reject. Bulk reject keeps its documented default-reason fallback.
+    raw_reason = data.get("reason")
+    # Lone surrogates (e.g. a client that sliced an emoji) cannot be stored as
+    # UTF-8 BSON; drop them rather than turn a valid rejection into a 500.
+    reason = raw_reason.encode("utf-8", "ignore").decode("utf-8").strip()[:200] if isinstance(raw_reason, str) else ""
+    if not reason:
+        # No write on this path. A ledger that could be rejected needs a reason;
+        # one that cannot keeps the answer it always got (404/409/already_rejected).
+        current = db.affiliate_ledger.find_one({"_id": oid})
+        if not current:
+            return jsonify({"status": "error", "reason": "not_found"}), 404
+        why = affiliate_reject_refusal_reason(current)
+        if why == "status_not_rejectable" and current.get("status") in AFFILIATE_ADMIN_REJECTABLE_STATUSES:
+            return jsonify({"status": "error", "reason": "reason_required"}), 400
+        if why == "already_rejected":
+            return jsonify({"status": "ok", "already_rejected": True})
+        return jsonify({"status": "error", "reason": why, "ledger_status": current.get("status")}), 409
+    before = reject_affiliate_ledger(db, ledger_id=oid, reason=reason, now_utc=datetime.now(timezone.utc))
     if before is not None:
         return jsonify({"status": "ok"})
     current = db.affiliate_ledger.find_one({"_id": oid})
