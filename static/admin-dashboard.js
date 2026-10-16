@@ -4755,6 +4755,13 @@
     var codesInfo = d.type === "personalised"
       ? ("Assigned " + fmt(d.assigned) + " / Claimed " + fmt(d.claimed))
       : ("Free " + fmt(d.codesFree) + " / Total " + fmt(d.codesTotal));
+    var claimed = d.type === "personalised" ? d.claimed : (d.codesTotal || 0) - (d.codesFree || 0);
+    var buttons = dropAvailableOps(d).map(function (op) {
+      return '<button class="btn' + (op === "end_now" ? " danger" : "") + '" data-drop-op="' + op + '" data-drop-id="' + esc(d.dropId) + '"' +
+        ' data-drop-name="' + esc(d.name) + '" data-drop-starts="' + esc(d.startsAt || "") + '" data-drop-ends="' + esc(d.endsAt || "") + '"' +
+        ' data-drop-claimed="' + esc(claimed == null ? "" : claimed) + '" data-drop-total="' + esc(d.type === "personalised" ? (d.assigned || 0) : (d.codesTotal || 0)) + '">' +
+        esc(DROP_OP_LABELS[op] || op) + "</button>";
+    }).join(" ");
     return "<tr>" +
       "<td>" + esc(d.name) + '<div class="sub">Priority ' + fmt(d.priority) + "</div></td>" +
       "<td>" + esc(d.type) + "</td>" +
@@ -4763,12 +4770,53 @@
       "<td>—</td>" +
       "<td>—</td>" +
       "<td>" + codesInfo + "</td>" +
-      "<td>" +
-      '<button class="btn" data-drop-op="start_now" data-drop-id="' + esc(d.dropId) + '">Start</button> ' +
-      '<button class="btn" data-drop-op="pause" data-drop-id="' + esc(d.dropId) + '">Pause</button> ' +
-      '<button class="btn danger" data-drop-op="end_now" data-drop-id="' + esc(d.dropId) + '">End</button>' +
-      "</td></tr>";
+      "<td>" + (buttons || "—") + "</td></tr>";
   }
+
+  // Lifecycle buttons offered per drop. The server decides (`availableOps`, see
+  // vouchers._DROP_OPS_BY_STATE) so e.g. Start is never shown on a drop that is
+  // already live; the fallback mirrors the same table for older responses.
+  var DROP_OP_LABELS = { start_now: "Start", pause: "Pause", resume: "Resume", end_now: "End" };
+  function dropAvailableOps(d) {
+    if (Array.isArray(d.availableOps)) return d.availableOps;
+    var byStatus = { active: ["pause", "end_now"], upcoming: ["start_now", "pause", "end_now"], paused: ["resume", "end_now"] };
+    return byStatus[d.status] || [];
+  }
+
+  // Every lifecycle action is confirmed with what it will (and will not) change.
+  // ctx: {name, ends (ISO), claimed, total}. Returns the confirm() text.
+  function dropOpConfirmMessage(op, ctx) {
+    ctx = ctx || {};
+    var name = "\u201c" + (ctx.name || "this drop") + "\u201d";
+    var ends = ctx.ends ? ccUtcToKlDisplay(ctx.ends) : null;
+    var keeps = ends ? " Its end time stays " + ends + "." : " Its end time is not changed.";
+    if (op === "start_now") return "Start " + name + " now?\n\nPlayers can claim from it immediately." + keeps;
+    if (op === "pause") return "Pause " + name + "?\n\nPlayers can't claim from it while it is paused. Its schedule is not changed" + (ends ? " (ends " + ends + ")" : "") + ", and you can Resume it later.";
+    if (op === "resume") return "Resume " + name + "?\n\nPlayers can claim from it again." + keeps;
+    if (op === "end_now") {
+      var claimed = ctx.claimed !== "" && ctx.claimed != null ? ctx.claimed + (ctx.total ? " of " + ctx.total : "") + " codes have been claimed. " : "";
+      return "End " + name + " now?\n\n" + claimed + "Players can't claim after this, and it can't be restarted with the same end time.";
+    }
+    return "";
+  }
+
+  var DROP_ACTION_ERRORS = {
+    already_live: "This drop is already live. Nothing was changed.",
+    end_time_passed: "This drop's end time has passed, so it can't be started without choosing a new end time.",
+    end_in_past: "The end time must be in the future.",
+    bad_end: "The end time is not valid.",
+    drop_ended: "This drop has already ended.",
+    not_paused: "Only a paused drop can be resumed.",
+    drop_changed: "Someone else changed this drop. The list was refreshed; check it and try again.",
+    drop_creating: "This drop is still being created.",
+    drop_deleting: "This drop is being deleted.",
+    not_found: "That drop no longer exists.",
+  };
+  function dropActionErrorMessage(d) {
+    d = d || {};
+    return DROP_ACTION_ERRORS[d.code] || "Something went wrong (" + (d.code || "unknown") + "). Check the list before trying again.";
+  }
+  var DROP_ACTION_DONE = { start_now: "Drop started", pause: "Drop paused", resume: "Drop resumed", end_now: "Drop ended" };
 
   // Mission Pool campaigns don't live in db.drops — they're gc_campaigns
   // documents with mechanic="mission_pool", surfaced by the same admin
@@ -4999,7 +5047,10 @@
       if (!btn) return;
       var op = btn.dataset.dropOp;
       var dropId = btn.dataset.dropId;
-      if (op === "end_now" && !confirm("End this drop now?")) return;
+      var confirmText = dropOpConfirmMessage(op, {
+        name: btn.dataset.dropName, ends: btn.dataset.dropEnds, claimed: btn.dataset.dropClaimed, total: btn.dataset.dropTotal,
+      });
+      if (confirmText && !confirm(confirmText)) return;
       btn.disabled = true;
       fetch("/v2/miniapp/admin/drops/" + encodeURIComponent(dropId) + "/actions", {
         method: "POST",
@@ -5008,10 +5059,10 @@
         body: JSON.stringify({ op: op }),
       }).then(function (r) { return r.json(); })
         .then(function (d) {
-          if (d.status === "ok") { toast("✅ Drop updated", "success"); loadDrops(true); }
-          else banner("❌ Drop action failed: " + (d.code || "unknown"), "error");
+          if (d.status === "ok") { toast("✅ " + (d.unchanged ? "Already in that state" : (DROP_ACTION_DONE[op] || "Drop updated")), "success"); loadDrops(true); }
+          else { banner("❌ " + dropActionErrorMessage(d), "error"); loadDrops(true); }
         })
-        .catch(function (e) { banner("❌ Drop action failed: " + e.message, "error"); })
+        .catch(function (e) { banner("❌ Drop action failed: " + "The connection dropped, so we can't tell whether this was applied. Refresh the list before trying again.", "error"); })
         .finally(function () { btn.disabled = false; });
     });
 
