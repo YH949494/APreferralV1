@@ -3330,9 +3330,12 @@ def ensure_welcome_eligibility(uid: int, *, users_exists: bool | None = None) ->
             welcome_eligibility_col.update_one(
                 {"uid": uid},
                 {
+                    # uid / user_id are written by $set below on both insert and
+                    # update. Repeating them under $setOnInsert makes MongoDB
+                    # reject the whole update (code 40, "Updating the path 'uid'
+                    # would create a conflict at 'uid'"), so they must NOT be
+                    # listed here. The inserted document is unchanged.
                     "$setOnInsert": {
-                        "user_id": uid,
-                        "uid": uid,
                         "first_seen_at": now,
                         "claimed": False,
                         "claimed_at": None,

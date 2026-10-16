@@ -13,6 +13,7 @@ from telegram.ext import (
 )
 from telegram.error import BadRequest, Forbidden, NetworkError
 from telegram.request import HTTPXRequest
+from update_lanes import StartFastLaneUpdateProcessor
 from datetime import datetime, timedelta, timezone, date
 from werkzeug.exceptions import HTTPException
 from urllib.parse import urlencode, quote
@@ -5531,7 +5532,15 @@ httpx_request = HTTPXRequest(
     pool_timeout=20,
     connection_pool_size=16,  # increase pool stability
 )
-app_bot = ApplicationBuilder().token(BOT_TOKEN).request(httpx_request).build()
+# StartFastLaneUpdateProcessor: /start is never queued behind a slow handler; all other
+# updates stay serialized in arrival order (same as PTB's default). Still ONE poller.
+app_bot = (
+    ApplicationBuilder()
+    .token(BOT_TOKEN)
+    .request(httpx_request)
+    .concurrent_updates(StartFastLaneUpdateProcessor())
+    .build()
+)
 
 
 @app.route("/api/is_admin")
@@ -8265,6 +8274,35 @@ def run_boot_catchup():
     if os.getenv("BACKFILL_STATUS_ON_BOOT", "false").lower() == "true":
         backfill_missing_statuses()
 
+def start_boot_catchup(blocking: bool | None = None) -> Thread | None:
+    """Run run_boot_catchup() WITHOUT holding up Telegram polling.
+
+    run_boot_catchup() can do a full xp_events/referral_events ledger rebuild
+    (missed weekly archive) and, on the 1st, the monthly tier update. When it
+    ran inline in run_worker() it sat in front of app_bot.run_polling(), so a
+    long catch-up meant /start (and every other update) got no reply until it
+    finished. Every step is idempotent and is already safe to run alongside
+    the scheduler (tick_5min runs run_weekly_archive_catchup the same way), so
+    it now runs on a daemon thread. BOOT_CATCHUP_BLOCKING=1 restores the old
+    inline behaviour as a rollback switch.
+    """
+    if blocking is None:
+        blocking = os.getenv("BOOT_CATCHUP_BLOCKING", "").strip().lower() in {"1", "true", "yes"}
+
+    def _run() -> None:
+        try:
+            run_boot_catchup()
+        except Exception:
+            logger.exception("[BOOT][CATCHUP] run_boot_catchup failed")
+
+    if blocking:
+        _run()
+        return None
+    thread = Thread(target=_run, name="boot-catchup", daemon=True)
+    thread.start()
+    logger.info("[BOOT][CATCHUP] started in background thread (polling not blocked)")
+    return thread
+
 def apply_monthly_tier_update(run_time: datetime | None = None, run_id: str | None = None):
     run_id = run_id or _new_run_id()
     run_at_local = run_time.astimezone(KL_TZ) if run_time else datetime.now(KL_TZ)
@@ -8783,7 +8821,7 @@ async def ensure_user_initialized_for_referral(update: Update, context: ContextT
     user = update.effective_user
     if not user:
         return
-    _ensure_user_registered(user)
+    await asyncio.to_thread(_ensure_user_registered, user)
 
 
 async def send_referral_link_with_share_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -8976,14 +9014,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if user:
         user_id = user.id
-        user_doc_before = users_collection.find_one(
+        # pymongo is synchronous: run it in a worker thread so a slow Mongo call
+        # (or a busy scheduler) cannot stall the bot's event loop / other updates.
+        user_doc_before = await asyncio.to_thread(
+            users_collection.find_one,
             {"user_id": user_id},
             {"pm_sent.pm0_welcome": 1},
         ) or {}
         first_time_pm0 = not (user_doc_before.get("pm_sent") or {}).get("pm0_welcome")
 
-        _ensure_user_registered(user)
-        user_doc = users_collection.find_one({"user_id": user_id}, {"joined_main_at": 1})
+        await asyncio.to_thread(_ensure_user_registered, user)
+        user_doc = await asyncio.to_thread(users_collection.find_one, {"user_id": user_id}, {"joined_main_at": 1})
         if not (user_doc or {}).get("joined_main_at"):
             logger.info(
                 "[WELCOME][JOIN_BACKFILL_DISABLED] uid=%s joined_main_at_missing",
@@ -9017,7 +9058,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     raise_on_non_transient=False,
                 )
                 if sent:
-                    _users_update_one(
+                    await asyncio.to_thread(
+                        _users_update_one,
                         {"user_id": user_id},
                         {"$set": {"pm_sent.pm0_welcome": now_utc()}},
                         context="pm0_welcome_sent",
@@ -9684,11 +9726,8 @@ def run_worker():
     set_bot(app_bot.bot)
     logger.info("[COMMUNITY_WORKER][BOT_OBJECT_READY]")
 
-    # 2) Catch up maintenance before bot handlers start
-    try:
-        run_boot_catchup()
-    except Exception as e:
-        print("run_boot_catchup error:", e)
+    # 2) Catch up maintenance — off the Telegram critical path (see start_boot_catchup)
+    start_boot_catchup()
 
     # 3) Telegram handlers
     app_bot.add_handler(CommandHandler("start", start))
