@@ -20,7 +20,7 @@ Module: `admin_idempotency.py`. Collection: `admin_idempotency` (`_id = "<scope>
 
 | Endpoint | Scope | Notes |
 |---|---|---|
-| `POST /v2/miniapp/admin/drops` | `create_drop` | Additionally the **drop document stores the key** (`admin_request_key`, sparse index). A retry finds the drop it already made even if the idempotency record expired, was wiped, or the store was down: exactly-once does not depend on the 24h record. A key whose drop is still `creating` answers `409 drop_creating`. |
+| `POST /v2/miniapp/admin/drops` | `create_drop` | Additionally the **drop document stores the key** (`admin_request_key`, sparse index). The drop also stores a fingerprint of the request (`admin_request_fp`). A retry finds the drop it already made even if the idempotency record expired, was wiped, or the store was down: exactly-once does not depend on the 24h record, and reusing the key with a different spec is still `422 idempotency_key_reused`. The request-key index is **unique** (partial: only drops carrying a key), so two concurrent deliveries cannot both insert a drop even with the idempotency store down; the loser answers from the winner. A key whose drop is still `creating` answers `409 drop_creating`. |
 | `POST /v2/miniapp/admin/drops/<id>/codes` | `add_codes:<drop_id>` | Replays the first answer. After a crash mid-insert, the retry reports the honest `duplicate_code` (with the codes that did land) rather than inserting twice. |
 | `POST /api/add_xp` | `xp_adjust` | Header key only. Ledger key is `adminreq:<key>`, so even without the record the XP ledger refuses a second grant. The fat-finger cooldown is kept (`update_user_xp(..., enforce_cooldown=True)`); soft failures that return HTTP 200 (`success:false`) are never cached. The legacy body-key path is unchanged (keyed ⇒ no cooldown), including its `Duplicate admin XP grant ignored.` answer. |
 
@@ -32,7 +32,7 @@ Not wrapped, on purpose: drop lifecycle ops (conditional updates already make a 
 
 ## Deployment
 
-No migration. The TTL index and the sparse `ix_drops_admin_request_key` index are created by `ensure_voucher_indexes()` at startup (best-effort). Old clients without a key keep working unchanged. Rollback: revert the PR; stored records are inert and expire by themselves.
+No migration. The TTL index and the partial unique `uniq_drops_admin_request_key` index (no existing drop carries the field, so it builds without conflicts; if it cannot be built the endpoint falls back to the non-atomic claim) are created by `ensure_voucher_indexes()` at startup (best-effort). Old clients without a key keep working unchanged. Rollback: revert the PR; stored records are inert and expire by themselves.
 
 ## Known limits
 

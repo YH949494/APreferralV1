@@ -278,6 +278,58 @@ def test_lost_idempotency_record_still_cannot_create_a_second_drop(client, vdb):
     assert vdb.drops.count_documents({}) == 1
 
 
+def test_key_reuse_with_different_spec_is_still_refused_after_the_record_expired(client, vdb):
+    first = client.post("/v2/miniapp/admin/drops", json=SPEC, headers=KEY)
+    assert first.status_code == 200
+    vdb[idem.COLLECTION].delete_many({})  # 24h TTL elapsed / record lost
+    other = client.post("/v2/miniapp/admin/drops", json=dict(SPEC, name="Different", codes=["Z1"]), headers=KEY)
+    assert other.status_code == 422 and other.get_json()["code"] == "idempotency_key_reused"
+    assert vdb.drops.count_documents({}) == 1 and vdb.vouchers.count_documents({}) == 2
+
+
+def test_concurrent_delivery_that_loses_the_insert_race_is_answered_from_the_winner(client, vdb, monkeypatch):
+    """Idempotency store down + two deliveries of one new request: the unique request-key
+    index makes the loser load the winner's drop instead of inserting a second one."""
+    vouchers._ensure_admin_idempotency_indexes()
+    winner = client.post("/v2/miniapp/admin/drops", json=SPEC, headers=KEY).get_json()["dropId"]
+    vdb[idem.COLLECTION].delete_many({})
+    real_find_one = vdb.drops.find_one
+    calls = {"n": 0}
+
+    class RacingDrops:
+        def __getattr__(self, name):
+            return getattr(vdb.drops, name)
+
+        def find_one(self, flt, *a, **k):
+            if vouchers.DROP_REQUEST_KEY_FIELD in flt:
+                calls["n"] += 1
+                if calls["n"] == 1:  # the pre-check ran before the winner's insert was visible
+                    return None
+            return real_find_one(flt, *a, **k)
+
+    class Db:
+        def __getattr__(self, name):
+            return RacingDrops() if name == "drops" else getattr(vdb, name)
+
+    monkeypatch.setattr(vouchers, "db", Db())
+    monkeypatch.setattr(vouchers, "_existing_voucher_codes", lambda codes: [])  # pre-checks ran before the winner wrote
+    # Take the idempotency layer out of the picture (store unavailable -> fail open).
+    monkeypatch.setattr(idem, "_begin", lambda *a, **k: (_ for _ in ()).throw(AttributeError("store down")))
+    res = client.post("/v2/miniapp/admin/drops", json=SPEC, headers=KEY)
+    assert res.status_code == 200 and res.get_json()["dropId"] == winner
+    assert vdb.drops.count_documents({}) == 1
+
+
+def test_request_key_index_is_unique_but_only_for_keyed_drops(vdb):
+    vouchers._ensure_admin_idempotency_indexes()
+    vdb.drops.insert_one({"name": "a"})
+    vdb.drops.insert_one({"name": "b"})  # keyless drops never collide
+    vdb.drops.insert_one({"name": "c", "admin_request_key": "k-0000001"})
+    with pytest.raises(Exception) as exc:
+        vdb.drops.insert_one({"name": "d", "admin_request_key": "k-0000001"})
+    assert "duplicate" in str(exc.value).lower() or "E11000" in str(exc.value)
+
+
 def test_key_for_a_drop_still_being_created_is_not_answered_as_done(client, vdb):
     vdb.drops.insert_one({
         "name": "x", "admin_request_key": "create-0001-abcd", "creation_state": "creating",
@@ -329,7 +381,8 @@ def test_add_codes_key_is_scoped_per_drop(client, vdb):
 
 def test_idempotency_indexes_are_created(vdb):
     vouchers._ensure_admin_idempotency_indexes()
-    assert "ix_drops_admin_request_key" in vdb.drops.index_information()
+    info = vdb.drops.index_information()
+    assert info["uniq_drops_admin_request_key"]["unique"] is True
     assert "ttl_admin_idempotency_expires_at" in vdb[idem.COLLECTION].index_information()
 
 

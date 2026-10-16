@@ -740,9 +740,14 @@ def _ensure_admin_idempotency_indexes():
     """Exactly-once drop creation: a retry carrying the same admin request key finds the
     drop it already made. Both indexes are best-effort; correctness does not need them."""
     try:
-        db.drops.create_index([(DROP_REQUEST_KEY_FIELD, ASCENDING)], sparse=True, name="ix_drops_admin_request_key")
+        # Unique so two concurrent deliveries of one request cannot both insert a drop even
+        # when the idempotency store is down. Partial: drops without a key are unaffected.
+        db.drops.create_index(
+            [(DROP_REQUEST_KEY_FIELD, ASCENDING)], unique=True, name="uniq_drops_admin_request_key",
+            partialFilterExpression={DROP_REQUEST_KEY_FIELD: {"$type": "string"}},
+        )
     except (OperationFailure, PyMongoError):
-        logger.warning("[indexes] could not create ix_drops_admin_request_key", exc_info=True)
+        logger.warning("[indexes] could not create uniq_drops_admin_request_key", exc_info=True)
     admin_idempotency.ensure_indexes(db)
 
 
@@ -7493,6 +7498,7 @@ def _idempotent_response(*, scope, key, payload, user, handler):
 # --- atomic drop creation support --------------------------------------------
 DROP_CREATION_STATE_FIELD = "creation_state"
 DROP_REQUEST_KEY_FIELD = "admin_request_key"
+DROP_REQUEST_FP_FIELD = "admin_request_fp"
 DROP_CREATION_STARTED_FIELD = "creation_started_at"
 DROP_CREATION_CREATING = "creating"
 DROP_CREATION_FAILED = "failed"
@@ -7645,6 +7651,27 @@ def _drop_creation_guard(drop):
     return None
 
 
+def _replay_for_request_key(request_key: str, request_fp: str):
+    """``(body, status)`` for a drop already created (or being created) under this admin
+    request key, else None. The stored payload fingerprint keeps the
+    ``idempotency_key_reused`` contract even after the idempotency record expired."""
+    previous = db.drops.find_one({DROP_REQUEST_KEY_FIELD: request_key})
+    if not previous:
+        return None
+    stored_fp = previous.get(DROP_REQUEST_FP_FIELD)
+    if stored_fp and stored_fp != request_fp:
+        return ({
+            "status": "error", "code": "idempotency_key_reused",
+            "message": "This request id was already used with different data. Start a new request.",
+        }), 422
+    if previous.get(DROP_CREATION_STATE_FIELD):
+        return ({
+            "status": "error", "code": "drop_creating",
+            "message": "This drop is still being created.",
+        }), 409
+    return {"status": "ok", "dropId": str(previous["_id"]), "replayed": True}, 200
+
+
 def create_drop_from_spec(data: dict, request_key: str | None = None) -> tuple[dict, int]:
     """Build + insert a drop (and its vouchers) from a drop spec dict.
 
@@ -7653,17 +7680,13 @@ def create_drop_from_spec(data: dict, request_key: str | None = None) -> tuple[d
     drop without going through an HTTP request. Returns (json_body, http_status).
     """
     data = data or {}
+    request_fp = admin_idempotency.fingerprint(data) if request_key else None
     if request_key:
         # Exactly-once for a retried admin request: the drop this key already
         # created is the answer, whether or not the idempotency record survived.
-        previous = db.drops.find_one({DROP_REQUEST_KEY_FIELD: request_key})
-        if previous:
-            if previous.get(DROP_CREATION_STATE_FIELD):
-                return ({
-                    "status": "error", "code": "drop_creating",
-                    "message": "This drop is still being created.",
-                }), 409
-            return {"status": "ok", "dropId": str(previous["_id"]), "replayed": True}, 200
+        replay = _replay_for_request_key(request_key, request_fp)
+        if replay:
+            return replay
     name = data.get("name")
     # "new_joiner" is an admin-UI-only eligibility shortcut for Welcome Voucher pooled
     # drops: it always maps to eligibility.mode="public" + audience.type="new_joiner" +
@@ -7850,13 +7873,22 @@ def create_drop_from_spec(data: dict, request_key: str | None = None) -> tuple[d
     hidden_doc = dict(drop_doc)
     if request_key:
         hidden_doc[DROP_REQUEST_KEY_FIELD] = request_key
+        hidden_doc[DROP_REQUEST_FP_FIELD] = request_fp
     hidden_doc.update({
         "status": "paused",
         "internal_only": True,
         DROP_CREATION_STATE_FIELD: DROP_CREATION_CREATING,
         DROP_CREATION_STARTED_FIELD: now_utc(),
     })
-    res = db.drops.insert_one(hidden_doc)
+    try:
+        res = db.drops.insert_one(hidden_doc)
+    except DuplicateKeyError:
+        # The unique request-key index: a concurrent delivery of this same request
+        # won the insert. Answer from the winner instead of creating a second drop.
+        replay = _replay_for_request_key(request_key, request_fp) if request_key else None
+        if replay:
+            return replay
+        raise
     drop_id = res.inserted_id
     drop_id_str = str(drop_id)
 
