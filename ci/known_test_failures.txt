@@ -1,2 +1,0 @@
-FAILED test_vouchers.py::VoucherAntiHunterTests::test_claim_internal_drop_without_ledger_rejected
-FAILED test_vouchers.py::VoucherAntiHunterTests::test_internal_drop_not_in_visible_list

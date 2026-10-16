@@ -237,12 +237,17 @@ test("renderClaimError shows an HH:MM:SS countdown and disables Retry while retr
   assert.equal(activeIntervalCount(intervals), 1, "exactly one countdown timer should be running");
 });
 
-test("renderClaimError derives the countdown deadline from buffer_until, not just retry_after_sec", () => {
+// The deadline used to come from the absolute buffer_until compared against
+// Date.now(); a device clock ahead of the server then saw an expired deadline
+// on every re-render and rechecked in a tight loop (a /vouchers/claim request
+// storm — and an out-of-memory crash of this very test file). The server's
+// relative retry_after_sec is now authoritative.
+test("countdown deadline comes from server-relative retry_after_sec, not the device-clock-compared buffer_until", () => {
   const { sandbox, intervals, clock } = buildSandbox();
   run(sandbox);
 
-  // retry_after_sec is stale/rounded, but buffer_until is the authoritative deadline.
-  const bufferUntil = new Date(clock.now + 10000).toISOString();
+  // Device clock is 2h ahead of the server: buffer_until already looks past.
+  const bufferUntil = new Date(clock.now - 2 * 3600 * 1000).toISOString();
   const uiModel = sandbox.claimErrorToUi(
     { code: "rejoin_buffer_active", retry_after_sec: 3600, buffer_until: bufferUntil },
     403
@@ -253,12 +258,13 @@ test("renderClaimError derives the countdown deadline from buffer_until, not jus
   const actions = card.children.find((c) => c.children && c.children.length >= 2);
   const countdown = actions.children.find((c) => c.textContent && c.textContent.startsWith("Try again"));
 
-  assert.equal(countdown.textContent, "Try again in 00:00:10");
+  assert.equal(countdown.textContent, "Try again in 01:00:00");
+  assert.equal(activeIntervalCount(intervals), 1, "countdown keeps running despite the skewed buffer_until");
 
   const [, entry] = [...intervals.entries()][0];
-  clock.now += 10000;
+  clock.now += 3600 * 1000;
   entry.fn();
-  assert.equal(activeIntervalCount(intervals), 0, "countdown must end once the real deadline passes");
+  assert.equal(activeIntervalCount(intervals), 0, "countdown ends once retry_after_sec has elapsed");
 });
 
 test("countdown expiry re-enables Retry after a passing eligibility recheck", async () => {
@@ -270,7 +276,7 @@ test("countdown expiry re-enables Retry after a passing eligibility recheck", as
   const { sandbox, intervals, clock } = buildSandbox({ fetchImpl });
   run(sandbox);
 
-  const uiModel = sandbox.claimErrorToUi({ code: "rejoin_buffer_active", retry_after_sec: 2 }, 403);
+  const uiModel = sandbox.claimErrorToUi({ code: "rejoin_buffer_active", retry_after_sec: 6 }, 403);
   sandbox.renderClaimError(uiModel, { dropId: "drop1" });
 
   const card = sandbox.document.getElementById("claim-error").children[0];
@@ -280,10 +286,10 @@ test("countdown expiry re-enables Retry after a passing eligibility recheck", as
   assert.ok(retryBtn.disabled);
 
   const [id, entry] = [...intervals.entries()][0];
+  clock.now += 5000;
+  await entry.fn(); // remaining=1
   clock.now += 1000;
-  await entry.fn(); // tick 1 -> remaining=1
-  clock.now += 1000;
-  await entry.fn(); // tick 2 -> remaining=0 -> triggers recheck
+  await entry.fn(); // remaining=0 -> triggers recheck
 
   assert.equal(activeIntervalCount(intervals), 0, "timer must be cleared once countdown ends");
   assert.equal(sandbox.document.getElementById("claim-error").style.display, "none", "error card cleared once eligible");
@@ -362,4 +368,129 @@ test("clearClaimError stops any running rejoin-buffer countdown timer", () => {
 
   sandbox.clearClaimError();
   assert.equal(activeIntervalCount(intervals), 0);
+});
+
+// ---------------------------------------------------------------------
+// Request-storm guards: clock skew, minimum delay, bounded auto-rechecks,
+// one claim request in flight
+// ---------------------------------------------------------------------
+
+function stillActiveFetch(calls, overrides = {}) {
+  return async () => {
+    calls.push(1);
+    return {
+      ok: false,
+      status: 403,
+      json: async () => ({
+        status: "blocked",
+        code: "rejoin_buffer_active",
+        reason: "rejoin_buffer_active",
+        retry_after_sec: 1,
+        // Already in the past on the device clock (device ahead of server).
+        buffer_until: "2000-01-01T00:00:00Z",
+        ...overrides,
+      }),
+    };
+  };
+}
+
+async function driveTicks(intervals, clock, rounds, stepMs) {
+  for (let i = 0; i < rounds; i += 1) {
+    clock.now += stepMs;
+    const live = [...intervals.values()].filter((e) => !e.cleared);
+    for (const entry of live) await entry.fn();
+  }
+}
+
+test("a re-render after a still-active recheck never rechecks immediately (no tight loop)", async () => {
+  const calls = [];
+  const { sandbox, intervals, clock } = buildSandbox({ fetchImpl: stillActiveFetch(calls) });
+  run(sandbox);
+
+  sandbox.renderClaimError(
+    sandbox.claimErrorToUi({ code: "rejoin_buffer_active", retry_after_sec: 1 }, 403),
+    { dropId: "drop1" }
+  );
+  // Floor: nothing fires before REJOIN_RECHECK_MIN_DELAY_SEC (5s).
+  await driveTicks(intervals, clock, 4, 1000);
+  assert.equal(calls.length, 0);
+  await driveTicks(intervals, clock, 1, 1000);
+  assert.equal(calls.length, 1, "exactly one recheck once the floored deadline passes");
+  // The re-render's own immediate tick must not fire a second request.
+  assert.equal(activeIntervalCount(intervals), 1);
+});
+
+test("automatic rechecks are capped; afterwards Retry is re-enabled for a manual tap", async () => {
+  const calls = [];
+  const { sandbox, intervals, clock, container } = buildSandbox({ fetchImpl: stillActiveFetch(calls) });
+  run(sandbox);
+
+  sandbox.renderClaimError(
+    sandbox.claimErrorToUi({ code: "rejoin_buffer_active", retry_after_sec: 1 }, 403),
+    { dropId: "drop1" }
+  );
+  // Ten minutes of simulated time.
+  await driveTicks(intervals, clock, 600, 1000);
+
+  assert.equal(calls.length, 3, "no more than REJOIN_MAX_AUTO_RECHECKS automatic requests");
+  assert.equal(activeIntervalCount(intervals), 0, "no timer left running after the cap");
+  // The fake DOM keeps every appended card (innerHTML="" does not clear
+  // children), so read the latest one.
+  const latestCard = container.children[container.children.length - 1];
+  const actions = latestCard.children.find((c) => c.children && c.children.length >= 2);
+  const retryBtn = actions.children.find((c) => c.textContent === "Retry");
+  assert.equal(retryBtn.disabled, false, "Retry is enabled for a manual attempt");
+});
+
+test("a fresh (user-initiated) block render resets the auto-recheck budget", async () => {
+  const calls = [];
+  const { sandbox, intervals, clock } = buildSandbox({ fetchImpl: stillActiveFetch(calls) });
+  run(sandbox);
+  const uiModel = sandbox.claimErrorToUi({ code: "rejoin_buffer_active", retry_after_sec: 1 }, 403);
+
+  sandbox.renderClaimError(uiModel, { dropId: "drop1" });
+  await driveTicks(intervals, clock, 600, 1000);
+  assert.equal(calls.length, 3);
+
+  sandbox.renderClaimError(uiModel, { dropId: "drop1" }); // user tapped Claim again
+  await driveTicks(intervals, clock, 600, 1000);
+  assert.equal(calls.length, 6);
+});
+
+test("only one recheck request is in flight at a time", async () => {
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const calls = [];
+  const fetchImpl = async () => {
+    calls.push(1);
+    await gate;
+    return { ok: true, status: 200, json: async () => ({ status: "ok", check_only: true }) };
+  };
+  const { sandbox } = buildSandbox({ fetchImpl });
+  run(sandbox);
+
+  const first = sandbox.recheckAfterRejoinBuffer("drop1", null, null);
+  const second = sandbox.recheckAfterRejoinBuffer("drop1", null, null);
+  await second;
+  assert.equal(calls.length, 1, "overlapping recheck must not issue a second request");
+  release();
+  await first;
+  await sandbox.recheckAfterRejoinBuffer("drop1", null, null);
+  assert.equal(calls.length, 2, "the flag is released once the first request settles");
+});
+
+test("a recheck never overlaps a user-initiated claim already in flight", async () => {
+  const calls = [];
+  const { sandbox } = buildSandbox({ fetchImpl: stillActiveFetch(calls) });
+  sandbox.window = { __claimInFlight: true };
+  run(sandbox);
+
+  await sandbox.recheckAfterRejoinBuffer("drop1", null, null);
+  assert.equal(calls.length, 0);
+  assert.equal(sandbox.window.__claimInFlight, true, "the user's claim keeps ownership of the flag");
+
+  sandbox.window.__claimInFlight = false;
+  await sandbox.recheckAfterRejoinBuffer("drop1", null, null);
+  assert.equal(calls.length, 1);
+  assert.equal(sandbox.window.__claimInFlight, false, "recheck releases the shared flag when done");
 });

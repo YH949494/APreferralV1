@@ -5588,6 +5588,17 @@
 
     const PROFILE_PHOTO_SETTINGS_LINK = "tg://settings";
     let claimErrorCountdownTimer = null;
+    // Rejoin-buffer auto-recheck guards. The countdown deadline is anchored to
+    // the server's relative retry_after_sec (not the absolute buffer_until,
+    // which is compared against a possibly-skewed device clock), rechecks are
+    // floored at REJOIN_RECHECK_MIN_DELAY_SEC, only one runs at a time, and
+    // after REJOIN_MAX_AUTO_RECHECKS consecutive "still active" answers the
+    // user has to press Retry. Together these make a skewed clock unable to
+    // drive back-to-back /vouchers/claim requests.
+    const REJOIN_RECHECK_MIN_DELAY_SEC = 5;
+    const REJOIN_MAX_AUTO_RECHECKS = 3;
+    let rejoinRecheckInFlight = false;
+    let rejoinAutoRecheckCount = 0;
     
     function isMyRegion(region) {
       if (!region) return false;
@@ -6153,6 +6164,7 @@
         clearInterval(claimErrorCountdownTimer);
         claimErrorCountdownTimer = null;
       }
+      rejoinAutoRecheckCount = 0;
     }
 
     function normalizeRetryAfterSec(value) {
@@ -6262,6 +6274,9 @@
       const container = document.getElementById("claim-error");
       if (!container || !uiModel) return;
       hapticNotify("error");
+      // Only the automatic recheck continues an existing recheck streak; any
+      // other render (a fresh user claim) starts a new one.
+      if (!options.autoRecheck) rejoinAutoRecheckCount = 0;
 
       if (claimErrorCountdownTimer) {
         clearInterval(claimErrorCountdownTimer);
@@ -6327,16 +6342,26 @@
         actions.appendChild(countdown);
 
         if (uiModel.retryAfterSec && uiModel.isRejoinBuffer) {
-          const parsedDeadline = uiModel.bufferUntil ? new Date(uiModel.bufferUntil).getTime() : NaN;
-          const deadlineMs = Number.isFinite(parsedDeadline)
-            ? parsedDeadline
-            : Date.now() + uiModel.retryAfterSec * 1000;
+          // Server-authoritative: retry_after_sec is a duration the server
+          // computed at response time, so anchoring it to the device clock at
+          // receipt is immune to device/server clock skew. Comparing the
+          // absolute buffer_until against Date.now() is not: a device clock
+          // ahead of the server saw an already-expired deadline on every
+          // re-render and rechecked in a tight loop.
+          const waitSec = Math.max(REJOIN_RECHECK_MIN_DELAY_SEC, uiModel.retryAfterSec);
+          const deadlineMs = Date.now() + waitSec * 1000;
           retryBtn.setAttribute("disabled", "disabled");
           const tick = async () => {
             const remaining = Math.max(0, Math.round((deadlineMs - Date.now()) / 1000));
             if (remaining <= 0) {
               clearInterval(claimErrorCountdownTimer);
               claimErrorCountdownTimer = null;
+              if (rejoinAutoRecheckCount >= REJOIN_MAX_AUTO_RECHECKS) {
+                retryBtn.removeAttribute("disabled");
+                countdown.textContent = t("you_can_retry");
+                return;
+              }
+              rejoinAutoRecheckCount += 1;
               countdown.textContent = "Checking…";
               await recheckAfterRejoinBuffer(options.dropId, retryBtn, countdown);
               return;
@@ -6373,6 +6398,17 @@
         if (countdown) countdown.textContent = t("you_can_retry");
         return;
       }
+      // One claim request at a time: skip if a recheck or a user-initiated
+      // claim (window.__claimInFlight) is already outstanding, and hold the
+      // same flag so a Claim tap cannot overlap this recheck.
+      const claimFlagHost = typeof window !== "undefined" ? window : null;
+      if (rejoinRecheckInFlight || (claimFlagHost && claimFlagHost.__claimInFlight)) {
+        if (retryBtn) retryBtn.removeAttribute("disabled");
+        if (countdown) countdown.textContent = t("you_can_retry");
+        return;
+      }
+      rejoinRecheckInFlight = true;
+      if (claimFlagHost) claimFlagHost.__claimInFlight = true;
       try {
         const res = await v2Fetch(`${API_V2}/vouchers/claim`, {
           method: "POST",
@@ -6391,7 +6427,7 @@
         }
 
         if (data?.code === "rejoin_buffer_active" || data?.reason === "rejoin_buffer_active") {
-          renderClaimError(claimErrorToUi(data, res.status), { dropId });
+          renderClaimError(claimErrorToUi(data, res.status), { dropId, autoRecheck: true });
           return;
         }
 
@@ -6401,6 +6437,9 @@
         console.warn("Rejoin buffer recheck failed", e);
         if (retryBtn) retryBtn.removeAttribute("disabled");
         if (countdown) countdown.textContent = t("you_can_retry");
+      } finally {
+        rejoinRecheckInFlight = false;
+        if (claimFlagHost) claimFlagHost.__claimInFlight = false;
       }
     }
 
