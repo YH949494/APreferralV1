@@ -184,6 +184,48 @@ class AdminXPTests(unittest.TestCase):
         self.assertEqual(len(self.fake_db.xp_events.store), 1)
         self.assertEqual(len(self.fake_db.xp_ledger.store), 1)
 
+    # --- enforce_cooldown: keyed callers that opt in keep the fat-finger guard ---
+    def _real_cooldowns(self):
+        from pymongo.errors import DuplicateKeyError
+
+        class Cooldowns:
+            def __init__(self):
+                self.ids = set()
+
+            def insert_one(self, doc):
+                if doc["_id"] in self.ids:
+                    raise DuplicateKeyError("dup")
+                self.ids.add(doc["_id"])
+
+            def delete_one(self, filt):
+                self.ids.discard(filt["_id"])
+
+        cooldowns = Cooldowns()
+        self.database_module.admin_xp_cooldowns = cooldowns
+        return cooldowns
+
+    def test_keyed_call_without_opt_in_still_bypasses_cooldown(self):
+        self._real_cooldowns()
+        self.assertTrue(update_user_xp("alice", 10, "k-1")[0])
+        self.assertTrue(update_user_xp("alice", 10, "k-2")[0])
+
+    def test_enforce_cooldown_blocks_a_second_keyed_grant_with_a_new_key(self):
+        self._real_cooldowns()
+        self.assertTrue(update_user_xp("alice", 10, "adminreq:a", enforce_cooldown=True)[0])
+        blocked = update_user_xp("alice", 10, "adminreq:b", enforce_cooldown=True)
+        self.assertIsInstance(blocked, dict)
+        self.assertEqual(blocked["code"], "cooldown")
+        self.assertEqual(len(self.fake_db.xp_events.store), 1)
+
+    def test_enforce_cooldown_duplicate_key_is_ignored_and_releases_the_lock(self):
+        cooldowns = self._real_cooldowns()
+        self.assertTrue(update_user_xp("alice", 10, "adminreq:a", enforce_cooldown=True)[0])
+        cooldowns.ids.clear()  # cooldown elapsed; the ledger still remembers the key
+        dup = update_user_xp("alice", 10, "adminreq:a", enforce_cooldown=True)
+        self.assertEqual(dup, (False, "Duplicate admin XP grant ignored."))
+        self.assertEqual(cooldowns.ids, set())
+        self.assertEqual(len(self.fake_db.xp_events.store), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

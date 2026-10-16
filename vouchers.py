@@ -27,6 +27,7 @@ import config as _cfg
  
 from database import db, users_collection, _ensure_equivalent_index
 import snapshot_publish
+import admin_idempotency
 from time_utils import as_aware_utc
 from onboarding import record_onboarding_start, record_visible_ping
 from affiliate_rewards import (
@@ -735,6 +736,16 @@ def _maybe_migrate_verification_queue_uid():
         except Exception:
             print("[VERIFY_QUEUE] migrate_uid_to_user_id_failed")
          
+def _ensure_admin_idempotency_indexes():
+    """Exactly-once drop creation: a retry carrying the same admin request key finds the
+    drop it already made. Both indexes are best-effort; correctness does not need them."""
+    try:
+        db.drops.create_index([(DROP_REQUEST_KEY_FIELD, ASCENDING)], sparse=True, name="ix_drops_admin_request_key")
+    except (OperationFailure, PyMongoError):
+        logger.warning("[indexes] could not create ix_drops_admin_request_key", exc_info=True)
+    admin_idempotency.ensure_indexes(db)
+
+
 def ensure_voucher_indexes():
     _warn_bypass_disabled_once() 
     db.drops.create_index([("startsAt", ASCENDING)])
@@ -742,6 +753,7 @@ def ensure_voucher_indexes():
     db.drops.create_index([("priority", DESCENDING)])
     db.drops.create_index([("status", ASCENDING)])
     db.drops.create_index([("deletion_status", ASCENDING)], sparse=True)
+    _ensure_admin_idempotency_indexes()
     db.vouchers.create_index([("code", ASCENDING)], unique=True)
     db.vouchers.create_index([("dropId", ASCENDING), ("type", ASCENDING), ("status", ASCENDING)])
     db.vouchers.create_index(
@@ -7453,12 +7465,34 @@ def admin_create_drop():
     user, err = require_admin()
     if err: return err
     data = request.get_json(force=True)
-    result, status_code = create_drop_from_spec(data)
-    return jsonify(result), status_code
+    key, key_err = admin_idempotency.extract_key(request, data)
+    if key_err:
+        return jsonify(key_err), 400
+    if not key:
+        result, status_code = create_drop_from_spec(data)
+        return jsonify(result), status_code
+    return _idempotent_response(
+        scope="create_drop", key=key, payload=data, user=user,
+        handler=lambda: create_drop_from_spec(data, request_key=key),
+    )
+
+
+def _idempotent_response(*, scope, key, payload, user, handler):
+    """Run ``handler() -> (body, status)`` once per admin request key and build the Flask response."""
+    admin = (user or {}).get("usernameLower") or (user or {}).get("username")
+    body, status, headers = admin_idempotency.run(
+        db, scope=scope, key=key, payload=payload, handler=handler, admin=admin,
+    )
+    resp = jsonify(body)
+    resp.status_code = int(status)
+    for name, value in headers.items():
+        resp.headers[name] = value
+    return resp
 
 
 # --- atomic drop creation support --------------------------------------------
 DROP_CREATION_STATE_FIELD = "creation_state"
+DROP_REQUEST_KEY_FIELD = "admin_request_key"
 DROP_CREATION_STARTED_FIELD = "creation_started_at"
 DROP_CREATION_CREATING = "creating"
 DROP_CREATION_FAILED = "failed"
@@ -7609,7 +7643,7 @@ def _drop_creation_guard(drop):
     return None
 
 
-def create_drop_from_spec(data: dict) -> tuple[dict, int]:
+def create_drop_from_spec(data: dict, request_key: str | None = None) -> tuple[dict, int]:
     """Build + insert a drop (and its vouchers) from a drop spec dict.
 
     This is the same body-insertion logic `admin_create_drop` has always used,
@@ -7617,6 +7651,17 @@ def create_drop_from_spec(data: dict) -> tuple[dict, int]:
     drop without going through an HTTP request. Returns (json_body, http_status).
     """
     data = data or {}
+    if request_key:
+        # Exactly-once for a retried admin request: the drop this key already
+        # created is the answer, whether or not the idempotency record survived.
+        previous = db.drops.find_one({DROP_REQUEST_KEY_FIELD: request_key})
+        if previous:
+            if previous.get(DROP_CREATION_STATE_FIELD):
+                return ({
+                    "status": "error", "code": "drop_creating",
+                    "message": "This drop is still being created.",
+                }), 409
+            return {"status": "ok", "dropId": str(previous["_id"]), "replayed": True}, 200
     name = data.get("name")
     # "new_joiner" is an admin-UI-only eligibility shortcut for Welcome Voucher pooled
     # drops: it always maps to eligibility.mode="public" + audience.type="new_joiner" +
@@ -7801,6 +7846,8 @@ def create_drop_from_spec(data: dict) -> tuple[dict, int]:
     # one conditional update. Any failure removes exactly what this call wrote.
     # ------------------------------------------------------------------
     hidden_doc = dict(drop_doc)
+    if request_key:
+        hidden_doc[DROP_REQUEST_KEY_FIELD] = request_key
     hidden_doc.update({
         "status": "paused",
         "internal_only": True,
@@ -8947,32 +8994,46 @@ def admin_add_codes(drop_id):
     user, err = require_admin()
     if err: return err
     data = request.get_json(force=True)
+    key, key_err = admin_idempotency.extract_key(request, data)
+    if key_err:
+        return jsonify(key_err), 400
+    if key:
+        return _idempotent_response(
+            scope=f"add_codes:{drop_id}", key=key, payload=data, user=user,
+            handler=lambda: _admin_add_codes_impl(drop_id, data),
+        )
+    body, status = _admin_add_codes_impl(drop_id, data)
+    return jsonify(body), status
+
+
+def _admin_add_codes_impl(drop_id, data):
+    """Returns ``(body, status)``; the body of the original endpoint, unchanged."""
     drop = db.drops.find_one({"_id": _coerce_id(drop_id)})
     if not drop:
-        return jsonify({"status": "error", "code": "not_found"}), 404
+        return {"status": "error", "code": "not_found"}, 404
     guard = _drop_deletion_guard(drop) or _drop_creation_guard(drop)
     if guard:
-        return guard
+        return guard[0].get_json(), guard[1]
     dtype = _normalize_drop_type(drop.get("type", "pooled"))
     if dtype != "pooled":
-        return jsonify({"status": "error", "code": "bad_request", "reason": "bad_type"}), 400
+        return {"status": "error", "code": "bad_request", "reason": "bad_type"}, 400
     pool_value = data.get("pool") or data.get("voucherPool") or "public"
     if pool_value not in ("public", "my"):
-        return jsonify({"status": "error", "code": "bad_request", "reason": "bad_pool"}), 400
+        return {"status": "error", "code": "bad_request", "reason": "bad_pool"}, 400
 
     raw_codes = data.get("codes")
     if not isinstance(raw_codes, (list, tuple)):
-        return jsonify({"status": "error", "code": "bad_request", "reason": "codes_must_be_list"}), 400
+        return {"status": "error", "code": "bad_request", "reason": "codes_must_be_list"}, 400
     codes = _normalize_codes(raw_codes)
     if not codes:
-        return jsonify({"status": "error", "code": "bad_request", "reason": "empty_codes"}), 400
+        return {"status": "error", "code": "bad_request", "reason": "empty_codes"}, 400
 
     # Known duplicates are refused before anything is written, so the common
     # case is all-or-nothing. (A code taken by a concurrent request between
     # this check and the insert still takes the partial-insert path below.)
     existing = _existing_voucher_codes(codes)
     if existing:
-        return jsonify(_duplicate_code_response(existing)), 409
+        return _duplicate_code_response(existing), 409
 
     docs = []
     for c in codes:
@@ -8988,7 +9049,7 @@ def admin_add_codes(drop_id):
     try:
         result = db.vouchers.insert_many(docs, ordered=False)
     except DuplicateKeyError:
-        return jsonify({"status": "error", "code": "duplicate_code"}), 409
+        return {"status": "error", "code": "duplicate_code"}, 409
     except BulkWriteError as exc:
         # ordered=False may throw BulkWriteError on duplicates; normalize to 409
         details = exc.details or {}
@@ -8999,23 +9060,23 @@ def admin_add_codes(drop_id):
             if inserted:
                 remaining_field = "public_remaining" if pool_value == "public" else "my_remaining"
                 db.drops.update_one({"_id": drop["_id"]}, {"$inc": {remaining_field: inserted}})         
-            return jsonify({
+            return {
                 "status": "error",
                 "code": "duplicate_code",
                 "inserted": inserted,
                 "duplicates": dup_count,
-            }), 409
+            }, 409
         try:
             current_app.logger.exception("[admin][drops] append_codes_failed")
         except Exception:
             print("[admin][drops] append_codes_failed")
-        return jsonify({"status": "error", "code": "server_error"}), 500
+        return {"status": "error", "code": "server_error"}, 500
 
     inserted = len(result.inserted_ids)
     if inserted:
         remaining_field = "public_remaining" if pool_value == "public" else "my_remaining"
         db.drops.update_one({"_id": drop["_id"]}, {"$inc": {remaining_field: inserted}})
-    return jsonify({"status": "ok", "dropId": str(drop["_id"]), "inserted": len(result.inserted_ids)}) 
+    return {"status": "ok", "dropId": str(drop["_id"]), "inserted": len(result.inserted_ids)}, 200
 
 @vouchers_bp.route("/admin/drops/<drop_id>/actions", methods=["POST"])
 def admin_drop_actions(drop_id):

@@ -7646,15 +7646,38 @@ def api_add_xp():
     else:
         return jsonify({"success": False, "message": "Use @username format."}), 400
 
-    idempotency_key = data.get("idempotency_key") or data.get("unique_key")
-    result = update_user_xp(username, amount, idempotency_key)
-    if isinstance(result, dict):
-        return (
-            jsonify({"success": False, "message": result["message"], "code": result["code"]}),
-            429,
+    def _grant(unique_key=None, enforce_cooldown=False):
+        result = update_user_xp(username, amount, unique_key, enforce_cooldown=enforce_cooldown)
+        if isinstance(result, dict):
+            return {"success": False, "message": result["message"], "code": result["code"]}, 429
+        success, message = result
+        return {"success": success, "message": message}, 200
+
+    # New contract: a stable `Idempotency-Key` request header. The grant runs once per
+    # key (a retry after a lost response replays the stored answer instead of granting
+    # again) and keeps the fat-finger cooldown. The legacy body field below is unchanged.
+    header_key = (request.headers.get("Idempotency-Key") or "").strip()
+    if header_key:
+        import admin_idempotency
+        key, key_err = admin_idempotency.extract_key(request, None)
+        if key_err:
+            return jsonify({"success": False, **key_err}), 400
+        body, status, headers = admin_idempotency.run(
+            db, scope="xp_adjust", key=key, payload={"user": username.lower(), "xp": amount},
+            handler=lambda: _grant(f"adminreq:{key}", True),
+            should_cache=lambda b, st: bool(b.get("success")),
         )
-    success, message = result
-    return jsonify({"success": success, "message": message})
+        if "success" not in body:  # idempotency-layer refusal (key reused / still running)
+            body = {"success": False, **body}
+        resp = jsonify(body)
+        resp.status_code = int(status)
+        for name, value in headers.items():
+            resp.headers[name] = value
+        return resp
+
+    idempotency_key = data.get("idempotency_key") or data.get("unique_key")
+    body, status = _grant(idempotency_key)
+    return jsonify(body), status
 
 @app.route("/api/join_requests")
 def api_join_requests():
