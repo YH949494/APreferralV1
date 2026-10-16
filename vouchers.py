@@ -7499,6 +7499,8 @@ DROP_CREATION_FAILED = "failed"
 # A creation that has been "creating" longer than this is a crashed attempt,
 # not an in-flight one (inserting thousands of codes takes seconds).
 DROP_CREATION_STALE_MINUTES = 10
+# Floor for the admin-supplied window: 0 would classify every running creation as stale.
+DROP_CREATION_MIN_STALE_MINUTES = 2
 _CODE_PRECHECK_CHUNK = 500
 _VOUCHER_INSERT_CHUNK = 1000
 _DUPLICATE_SAMPLE_LIMIT = 20
@@ -9539,7 +9541,7 @@ def admin_reconcile_drop_creations():
     dry_run = data.get("dryRun", True) is not False
     try:
         stale_minutes = data.get("staleMinutes")
-        stale_minutes = None if stale_minutes is None else max(0, int(stale_minutes))
+        stale_minutes = None if stale_minutes is None else max(DROP_CREATION_MIN_STALE_MINUTES, int(stale_minutes))
     except (TypeError, ValueError):
         stale_minutes = None
     summary = reconcile_incomplete_drop_creations(stale_minutes=stale_minutes, dry_run=dry_run)
