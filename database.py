@@ -353,9 +353,10 @@ def init_user(user_id, username):
             # keep username updated on subsequent calls
             "$set": {"username": username},
             # only set these on first insert
+            # (username is written by $set above; listing it here too would be
+            # a MongoDB code-40 path conflict)
             "$setOnInsert": {
                 "user_id": user_id,
-                "username": username,
                 "last_checkin": None,                
                 "status": "Normal",       # or "VIP1"
                 "next_status": "VIP1",    # scheduled for next month
