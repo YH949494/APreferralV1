@@ -299,12 +299,12 @@ function buildPeople() {
 
 /* ---------- confirmation component (T2 / T3) ---------- */
 const ERR = {
-  network: "We couldn't reach the server. Nothing was changed. Your entries are still here, so you can try again.",
+  network: "The connection dropped, so we can't tell whether this was saved. It may or may not have gone through. Check the list this belongs to before you try again. Your entries are still here.",
   unauthorized: "Your session expired. Sign in again. Your entries are kept.",
   not_pending_review: "A colleague already handled this reward. Nothing was changed.",
   insufficient_stock: "Not enough vouchers for this. Nothing was changed.",
   cooldown: "You can adjust XP again in 42 seconds.",
-  unknown: "Something went wrong. Nothing was changed. Support code: E-4821.",
+  unknown: "Something went wrong and we can't confirm the result. Check the list this belongs to before you try again. Support code: E-4821.",
 };
 function modal(o) {
   // o: {title, body (html), tier: 2|3, phrase, primary, danger, run: async()=>result, needReason:[...]}
@@ -523,9 +523,10 @@ function startDrop(d) {
     body: `<p>Players can claim immediately.</p><div class="notice warn"><div><b>The end time is reset to 24 hours from now</b> (${esc(fmtKL(newEnd))}). It is currently ${esc(fmtKL(d.ends))}. Use “Edit name or dates” afterwards if you need a different end.</div></div>`,
     run: () => server(() => { d.status = "live"; d.starts = new Date(); d.ends = newEnd; }) }).then(r => { if (r) { toast(`“${d.name}” is live. It ends ${fmtKL(d.ends)}.`); render(); } });
 }
-function pauseDrop(d) { // T1: reversible, so no dialog. Undo calls the inverse.
-  server(() => { d.status = "paused"; }).then(() => { toast(`Paused “${d.name}”.`, () => { d.status = "live"; toast("Resumed."); render(); }); render(); })
-    .catch(e => toast(ERR[e.code] || ERR.unknown));
+function pauseDrop(d) { // T2, not an Undo toast: the live API has no plain "resume". Resuming uses Start, which resets the dates.
+  modal({ title: `Pause “${d.name}”?`, tier: 2, primary: "Pause drop",
+    body: `<p>Players can't claim from this drop while it is paused.</p><div class="notice warn"><div><b>Resuming later uses Start, which sets a new 24-hour window</b> from the moment you press it. The current end time (${esc(fmtKL(d.ends))}) is not kept.</div></div>`,
+    run: () => server(() => { d.status = "paused"; }) }).then(r => { if (r) { toast(`Paused “${d.name}”.`); render(); } });
 }
 function endDrop(d) {
   const claimed = d.total - d.left;
@@ -774,7 +775,8 @@ VIEWS["vouchers:create"] = function () {
         $("#vd", body).onclick = () => go("vouchers", "drops"); $("#ac", body).onclick = () => go("vouchers", "upload", { dest: "drop", dropId: S.drops[0].id }); $("#nw", body).onclick = () => go("vouchers", "create");
       } catch (e) {
         busy = false; btn.disabled = false; btn.textContent = label;
-        $("#cerr", c).innerHTML = `<div class="notice bad"><div>${esc(ERR[e.code] || ERR.unknown)}</div></div>`;
+        const unsure = e.code === "network" || !ERR[e.code];
+        $("#cerr", c).innerHTML = `<div class="notice bad"><div>${esc(ERR[e.code] || ERR.unknown)}${unsure ? `<br><b>Before you press the button again:</b> open Drops and look for “${esc(D.name)}”. If it is there, don't create it twice.` : ""}</div></div>`;
       }
     };
   }

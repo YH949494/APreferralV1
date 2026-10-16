@@ -17,7 +17,8 @@ Sizing is relative (S ≈ a day or two of focused work, M ≈ a week, L ≈ seve
 | A-3 | `username` (and `first_name`) on `GET /admin/affiliate/pending` rows | additive field | names in the review queue | ok to add? |
 | A-4 | `GET /admin/drops/<id>/claims` | additive, read-only | "who claimed" from a drop | optional |
 | A-5 | Server-side idempotency for `POST /admin/drops` and code uploads (honour `idempotency_key`) | **behaviour** | true duplicate-submit protection (R-4) | **yes** — changes a production write path |
-| A-6 | Validate codes **before** inserting the drop (or roll back on failure) | **behaviour** | removes orphan drops (R-5) | **yes** |
+| A-6 | Validate codes **before** inserting the drop (or roll back on failure); until then return `dropId`, `inserted`, `duplicates` on **every** failure response of `POST /admin/drops` | **behaviour** (the field addition is additive) | removes orphan drops (R-5); lets the UI open the leftover drop | **yes** |
+| A-8 | `resume` op on `POST /admin/drops/<id>/actions` that restores a paused drop **without** touching its dates | **behaviour** | a true Undo for drop Pause; avoids the silent end-time reset of `start_now` | **yes** |
 | A-7 | Per-action admin audit rows for drops / affiliate approve-reject / XP / Builder launch | **behaviour (audit)** | "recent activity" with who did what | **yes** — touches audit/permissions area |
 
 Everything else in the prototype maps to endpoints that exist today (`02 §H`).
@@ -72,7 +73,7 @@ No timing data exists today, so the first deliverable of Phase 2 is **instrument
 ## 4. Open questions for you
 1. Approve IA (8 destinations) and the label dictionary — or edit it.
 2. Which Phase-0 hotfixes may proceed now?
-3. A-1…A-4 additive endpoints OK? A-5…A-7 (behaviour) — separate approval each.
+3. A-1…A-4 additive endpoints OK? A-5…A-8 (behaviour) — separate approval each.
 4. Confirmation tiers and the XP threshold (suggested 1,000).
 5. VIP tier list to offer as chips (no canonical server list exists).
 6. Should *Maintenance* actions (issue-current-month, snapshot regenerate…) stay UI-hidden and CLI-only instead?

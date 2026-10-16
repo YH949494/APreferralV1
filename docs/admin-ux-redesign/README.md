@@ -51,7 +51,7 @@ Proposed interaction counts in `03-before-after-and-risk.md` come from a scripte
 
 ## What the redesign does (one paragraph)
 
-Replace 13 module-centric menus with **8 task-centric destinations** (Home, Campaigns, Vouchers, Affiliates, Players, Content & Community, Reports, Settings & Tools) topped by a **"What do you want to do?"** action bar and a global **player/affiliate search**. Routine work becomes 1–3 stage flows with live inline validation, a plain-language review screen and one consistent confirmation component whose strictness scales with irreversibility. Everything maps onto **existing endpoints**; the gaps are named: 4 optional additive read-only endpoints/fields and 3 behavioural hardening items that need your separate approval (see roadmap §API work). All existing capabilities remain reachable (traceability matrix in the inventory).
+Replace 13 module-centric menus with **8 task-centric destinations** (Home, Campaigns, Vouchers, Affiliates, Players, Content & Community, Reports, Settings & Tools) topped by a **"What do you want to do?"** action bar and a global **player/affiliate search**. Routine work becomes 1–3 stage flows with live inline validation, a plain-language review screen and one consistent confirmation component whose strictness scales with irreversibility. Everything maps onto **existing endpoints**; the gaps are named: 4 optional additive read-only endpoints/fields and 4 behavioural hardening items that need your separate approval (see roadmap §API work). All existing capabilities remain reachable (traceability matrix in the inventory).
 
 ## Decisions needed before any implementation
 

@@ -173,9 +173,9 @@ Motion: ≤ 150 ms, disabled under `prefers-reduced-motion`.
 | **Date-time** | presets + picker; always echoes "Thu 22 Oct, 9:00 am (Malaysia time)" |
 | **Review panel** | read-only summary in sentences; blocking errors (✖) vs warnings (⚠) separated; primary button = the action |
 | **Confirm modal (T2/T3)** | title = consequence; list of what changes; counts; typed phrase field (T3) with exact phrase shown; focus trapped; Esc = cancel; primary disabled until valid; in-flight state locks the modal |
-| **Toast + Undo (T1)** | 8 s; Undo calls the inverse existing endpoint |
+| **Toast + Undo (T1)** | 8 s; only where a true inverse endpoint exists (campaign/mission/batch pause→resume, banner). **Drops have none** (resume = `start_now`, which resets dates), so drop Pause is T2 |
 | **Result summary** | what happened, numbers, next-step buttons, "copy summary" |
-| **Empty / loading / error** | skeleton ≤ 400 ms; empty states say what to do; errors say what is *unchanged* ("Nothing was changed") and offer Retry |
+| **Empty / loading / error** | skeleton ≤ 400 ms; empty states say what to do; errors say what is *known*: after a server rejection "Nothing was changed"; after a dropped connection or unknown error **"we can't tell whether this was saved. Check the list before retrying"** (a write may have committed before the response was lost). Retry is offered, with that warning on create flows |
 | **Search** | `/` focuses; accepts @username / numeric ID; shows what it can't do ("exact match only") |
 
 ### 2.3 Copy rules
@@ -183,13 +183,13 @@ Motion: ≤ 150 ms, disabled under `prefers-reduced-motion`.
 2. Say **who is affected and when** ("1,284 players can claim from 9:00 am").
 3. Numbers always with units and source ("qualified this month", "codes left").
 4. No raw codes, enum values or IDs in sentences; IDs available via "Copy ID".
-5. Errors = what happened + what is unchanged + what to do.
+5. Errors = what happened + what is known about the result + what to do. Say "nothing was changed" only when the server clearly rejected the request.
 6. Time always "Malaysia time"; relative time only as a secondary hint.
 
 ### 2.4 Error dictionary (server code → message; source of each code verified in repo)
 | Code | Message |
 |---|---|
-| `duplicate_code` (409, drops) | "{n} of these codes are already used in another voucher drop. {m} new codes were saved to this drop before it stopped — open the drop to review." *(server inserts before it fails)* |
+| `duplicate_code` (409, drops) | "Some of these codes are already used in another voucher drop. A drop named {name} may have been created with part of your codes. Open Drops and check before trying again." *(server inserts before it fails and returns no `dropId`)* |
 | `empty_codes` · `no_codes` | "No usable codes found. Paste one code per line." |
 | `bad_start` · `bad_end` · `invalid_start_at` · `invalid_end_at` | "That date or time isn't valid. Pick it from the calendar." |
 | `end_before_start` | "The end must be after the start." |
@@ -207,7 +207,7 @@ Motion: ≤ 150 ms, disabled under `prefers-reduced-motion`.
 | `replace_in_progress` | "Another upload to this pool is running. Try again in a minute." |
 | HTTP 429 (XP cooldown) | "You can adjust XP again in {n} seconds." |
 | `unauthorized` · `auth_failed` · 401/403 | "Your session expired. Sign in again." |
-| *unknown* | "Something went wrong. Nothing was changed. Support code: {code}." |
+| *network error / timeout / unknown* | "The connection dropped, so we can't tell whether this was saved. Check {list} before you try again. Support code: {code}." |
 
 ## 3. Smart-form checklist (Phase 4) — how each rule is applied
 

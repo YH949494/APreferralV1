@@ -24,11 +24,11 @@
 | 14 | Mission create + publish (multiple choice, existing pool) | ~15 | 7 | ~ −8 (−53%) | one Details page replaces 4 steps; logic unchanged |
 | 15 | Voucher campaign via Builder, launched (typical, with preview) | ~16 | 7 | ~ −9 (−56%) | min path today ~11 (skips preview, which the UI allows); preview now automatic |
 | 16 | Add/remove XP | 5 | 5 | 0 | adds lookup, preview, confirm, idempotency key |
-| 17 | Pause a live drop | 3 | 2 | −1 (−33%) | reversible: toast with Undo |
+| 17 | Pause a live drop | 3 | 3 | 0 | confirmation discloses that resuming opens a new 24 h window; no Undo (API has no resume, A-8) |
 | 18 | Start a scheduled drop | 3 | 3 | 0 | adds disclosure that end time resets |
 | 19 | End a live drop that has claims | 4 | 4 | 0 | adds typed `END`; an unclaimed drop needs 3 |
 
-**Summary of the 19 measured flows:** 13 need fewer interactions, 6 stay level (and gain safeguards: 6, 7, 8, 16, 18, 19), none increase. The big reductions (9, 10, 11–15) are the tasks that today **cross modules, run a multi-step wizard or hide state until an error**. Money-moving single actions stay level on purpose.
+**Summary of the 19 measured flows:** 12 need fewer interactions, 7 stay level (and gain safeguards: 6, 7, 8, 16, 17, 18, 19), none increase. The big reductions (9, 10, 11–15) are the tasks that today **cross modules, run a multi-step wizard or hide state until an error**. Money-moving single actions stay level on purpose.
 Not re-measured (label/confirm changes only): providers, banners, lucky games, community composer, settings, segment/abuse reports.
 
 ### 1.2 Manual input, navigation, error prevention, remaining risk
@@ -45,7 +45,7 @@ Not re-measured (label/confirm changes only): providers, banners, lucky games, c
 | 14 | ~10 → 3 (name, question, options; pool and winners default) | action bar | inventory bar, humanised eligibility | none new |
 | 15 | ~7 → 2 (name, codes; template, release, start default) | action bar | Launch disabled until preview OK; auto-preview; typed `LAUNCH` kept | compile is irreversible: rollback deletes only the campaign doc, drops keep running |
 | 16 | 2 → 2 | player card/search | name/ID + current→new XP, threshold T3, idempotency key | no reason field (API lacks one) |
-| 17–19 | 0 | row menu | impact copy; end-time reset disclosed; claimed-count shown | `start_now` semantics unchanged |
+| 17–19 | 0 | row menu | impact copy; end-time reset disclosed (also before Pause); claimed-count shown | `start_now` semantics unchanged |
 
 ## 2. Regression risk assessment
 

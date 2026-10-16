@@ -53,7 +53,7 @@ Where one *task* crosses modules today:
 | Tier | When | Pattern | Examples |
 |---|---|---|---|
 | **T0** | Read, filter, navigate | none | search, tabs |
-| **T1** | Reversible, low blast radius | do it + toast with **Undo / reverse action** | pause drop (resume exists), pause campaign, disable banner |
+| **T1** | Reversible, low blast radius | do it + toast with **Undo / reverse action** | pause a campaign, mission or batch campaign (each has a real resume), disable a banner. **Not** pausing a drop: the drops API has no plain resume (see C.3) |
 | **T2** | Consequential but recoverable | **Review modal**: plain-language summary of *what changes and who is affected*, primary button names the action ("Create drop and go live") | create drop, upload codes, start drop, approve one reward, **reject one reward (reason required)**, retry waiting rewards, publish campaign |
 | **T3** | Irreversible, money-moving at scale, or live-to-all | T2 summary **plus** typed phrase containing the number ("APPROVE 12", "REJECT 12", "LAUNCH") and, for rejects, a required reason picker | bulk approve/reject, Builder launch, end drop that has claims, delete anything, replace global bonus, XP change ≥ threshold |
 
@@ -62,7 +62,7 @@ Where a flow ends in a **Review stage** (create drop, publish campaign), that st
 
 ### B.2 Universal form behaviours
 1. **Inline validation** on blur/paste, not on submit; errors sit under the field, in plain words, with the fix ("That time is in the past — pick a later time or choose *Start now*").
-2. **One error dictionary** (server code → sentence). 43 call sites that print raw codes route through it; unknown codes show "Something went wrong — nothing was changed" + a copyable support code. Existing maps (`AFF_BATCH_ERROR_MESSAGES`, `gcActionErrorMessage`, `gcVisibilityReasonText`) are merged, not rewritten.
+2. **One error dictionary** (server code → sentence). 43 call sites that print raw codes route through it; unknown codes show "Something went wrong and we can't confirm the result" + a copyable support code. Existing maps (`AFF_BATCH_ERROR_MESSAGES`, `gcActionErrorMessage`, `gcVisibilityReasonText`) are merged, not rewritten.
 3. **Double-submit guard**: button disables and shows progress; the request carries a client idempotency key (server ignores it today — see risk R-4, so a server-side guard is a roadmap item, not assumed).
 4. **After-action summary** instead of a bare toast for T2/T3: what was created/changed, counts, the next sensible action ("12 drops live → *Add codes*, *View drop*").
 5. **Keep my typing**: failed submits never clear the form (the legacy `DropSubmissionController` already does this).
@@ -110,10 +110,10 @@ Preserves issuance logic: all calls hit the same endpoints; **no change** to cla
    Then, on the same page: paste codes (C.1 parser, inline), **When**: *Start now* / *Schedule…* (date-time presets) and *Ends* default "24 hours after start" (the server's default, now **stated**); priority hidden under Advanced (default 100).
 2. **Review** — `buildDropPreview()` (existing, unit-tested, `static/js/voucher_drop_preview.js`) renders summary + **errors (blocking) / warnings** it already computes ("start is in the past", "no region restriction", "very small inventory", "end < 1 h away") with state badge **Live now / Scheduled**; primary button reads *Create drop and go live* or *Create drop (starts Thu 9:00 am)*. **The review stage is the T2 confirmation** (no extra dialog).
 
-Eliminated: 2 navigation clicks (action bar), the separate wizard pages, start-time typing for the common case, the raw `duplicate_code` dead end (pre-check ➕, otherwise plain explanation that *"this code is already used in another drop; nothing was removed"* and a button that opens the existing drop — because the server leaves the drop behind).
+Eliminated: 2 navigation clicks (action bar), the separate wizard pages, start-time typing for the common case, the raw `duplicate_code` dead end (pre-check ➕; otherwise a plain explanation, see below).
 Fields hidden by default: priority, hero, regions, whitelist, CSV import (CSV stays one click away on the code box).
 Safe defaults: type pooled; pool Everyone; end +24 h; priority 100. **Explicit**: name, who can claim, codes, start choice.
-Existing risk the UI must contain until the server is fixed: **orphan drop on duplicate/validation failure** — the review screen runs the full client-side validation first and, after a 409/500, shows "A drop named X was created with N of M codes. Open it to finish or end it" (the `inserted` and `duplicates` counts are already in the 409 body).
+Existing risk the UI can only *reduce*, not remove, until the server is fixed: **orphan drop on duplicate/validation failure**. The review screen runs full client-side validation (and, with A-1, the duplicate pre-check) first. After a failure the UI cannot reliably open the orphan: the bulk-write 409 returns `inserted` and `duplicates` but **no `dropId`**, the single `DuplicateKeyError` 409 and the generic 500 return neither, and drop names are not unique. So the failure screen says *"A drop named X may have been created. Open Drops, look for it (newest first) and end or finish it before trying again"*, and **never** claims counts it does not have. Returning `dropId`, `inserted` and `duplicates` on every failure response is added to the API list (A-6); validating before inserting (A-6) removes the problem.
 
 ### C.3 Manage drops (replaces V3/V4/V5 + restores them)
 
@@ -122,8 +122,8 @@ One **Live & upcoming drops** table with plain statuses (*Live · Scheduled · P
 | State | Menu | Tier | Copy shown |
 |---|---|---|---|
 | Scheduled | Start now · Edit name/dates · Add codes · Delete | T2 · T2 · T2 · T3 | Start now: "Goes live immediately **and the end time is reset to 24 hours from now** (currently Thu 18:00)." |
-| Live | Pause · End now · Add codes · Edit dates | T1 (Undo=Resume) · T2 (T3 if any code claimed) · T2 · T2 | End now: "123 of 480 codes claimed. Players can't claim after this." |
-| Paused | Resume (= `start_now`, same warning) · End · Edit · Delete | T2 | Resume copy states the end-time reset because the API has no pure "resume". |
+| Live | Pause · End now · Add codes · Edit dates | T2 (no Undo until A-8) · T2 (T3 if any code claimed) · T2 · T2 | End now: "123 of 480 codes claimed. Players can't claim after this." |
+| Paused | Resume (= `start_now`, same warning) · End · Edit · Delete | T2 | Resume copy states the end-time reset because the API has no pure "resume". Pause says the same *before* it happens: resuming later opens a new 24-hour window (the old end time is not kept). A real `resume` op (A-8) would restore the schedule and allow an Undo toast. |
 | Ended | View · Delete | T3 | Delete: shows protected-code counts; server blocks if any claimed/allocated/personalised (existing guard). |
 
 `set_dates` and `delete` are existing endpoints currently reachable only from the legacy panel — **this restores them** in the main dashboard, nothing new server-side. `reconcile-deletions` appears under Tools › Maintenance.

@@ -22,6 +22,7 @@ const SHOT = require('os').tmpdir();
   async function flow(name, expected, fn, vp) {
     const page = await fresh(vp); n = 0; let ok = true, note = '';
     try { await fn(page); } catch (e) { ok = false; note = e.message.split('\n')[0]; }
+    if (ok && expected && n !== expected) { ok = false; note = `interaction count ${n} != expected ${expected}`; }
     results.push({ name, count: n, expected, ok, note }); await page.context().close();
   }
   const bar = (page, label) => C.click(page, `#quick button:has-text("${label}")`);
@@ -77,14 +78,14 @@ const SHOT = require('os').tmpdir();
     await bar(p, 'Create campaign'); await C.click(p, '.pick:has-text("Voucher campaign")'); await C.fill(p, '#cn', 'VC'); await C.fill(p, '#cb-codes', 'V-1\nV-2\nV-3\nV-4\nV-5\nV-6'); await C.click(p, '#nx');
     await p.waitForSelector('#lc'); await C.fill(p, '#lc', 'LAUNCH'); await C.click(p, '#go'); await p.waitForSelector('text=Launched');
   });
-  await flow('pause live drop', 2, async p => { await C.click(p, 'tbody tr:first-child .menu button'); await C.click(p, '.menu-pop button:has-text("Pause")'); await p.waitForSelector('.toast:has-text("Paused")'); });
+  await flow('pause live drop', 3, async p => { await C.click(p, 'tbody tr:first-child .menu button'); await C.click(p, '.menu-pop button:has-text("Pause")'); await p.waitForSelector('text=sets a new 24-hour window'); await C.click(p, '#m-ok'); await p.waitForSelector('.toast:has-text("Paused")'); });
   await flow('end live drop (claimed => typed)', 4, async p => { await C.click(p, 'tbody tr:first-child .menu button'); await C.click(p, '.menu-pop button:has-text("End now")'); await C.fill(p, '#m-phrase', 'END'); await C.click(p, '#m-ok'); await p.waitForSelector('.toast:has-text("Ended")'); });
   await flow('start scheduled drop', 3, async p => { await C.click(p, 'tbody tr:has-text("VIP October") .menu button'); await C.click(p, '.menu-pop button:has-text("Start now")'); await p.waitForSelector('text=end time is reset'); await C.click(p, '#m-ok'); await p.waitForSelector('.toast:has-text("is live")'); });
   await flow('add codes from row', 4, async p => { await C.click(p, 'tbody tr:first-child button:has-text("Add codes")'); await C.fill(p, '#cb-text', 'N-1\nN-2'); await C.click(p, '#u-go'); await C.click(p, '#m-ok'); await p.waitForSelector('text=uploaded'); });
   // error states
   await flow('error: network fail on create', 0, async p => {
     await p.click('#quick button:has-text("Create voucher drop")'); await p.fill('#dn', 'X'); await p.fill('#cb-codes', 'Q-1\nQ-2'); await p.click('#n1'); await p.check('#demo-btn ~ * #d-fail, #d-fail', { force: true }).catch(async () => { await p.click('#demo-btn'); await p.check('#d-fail'); });
-    await p.click('#create'); await p.waitForSelector('text=couldn\'t reach the server'); await p.waitForSelector('#create:not([disabled])');
+    await p.click('#create'); await p.waitForSelector('text=may or may not have gone through'); await p.waitForSelector('text=open Drops and look for'); await p.waitForSelector('#create:not([disabled])');
   });
   await flow('error: duplicate code blocks drop create', 0, async p => {
     await p.click('#quick button:has-text("Create voucher drop")'); await p.fill('#dn', 'X'); await p.fill('#cb-codes', 'WKND-0007\nQ-2'); await p.waitForSelector('text=already used in another drop'); await p.click('#n1'); await p.waitForSelector('.toast:has-text("already used")');
@@ -126,5 +127,7 @@ const SHOT = require('os').tmpdir();
   console.log(results.map(r => `${r.ok ? 'PASS' : 'FAIL'}  ${r.name}  count=${r.count}${r.expected ? ' expected=' + r.expected : ''}${r.note ? '  ' + r.note : ''}`).join('\n'));
   console.log('network attempts:', netAttempts.length, netAttempts.slice(0, 3));
   console.log('page errors:', errors.length, errors.slice(0, 5));
+  const failed = results.filter(r => !r.ok).length;
+  if (failed || netAttempts.length || errors.length) { console.error(`FAILED: ${failed} flow check(s), ${netAttempts.length} network request(s), ${errors.length} page error(s)`); process.exitCode = 1; }
   await browser.close();
 })();
