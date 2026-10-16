@@ -58,15 +58,35 @@ function makeElement(id) {
   return {
     id,
     classList: new ClassList(),
+    className: "",
     _text: "",
     disabled: false,
     style: {},
+    children: [],
     scrollIntoViewCalls: [],
     get textContent() {
+      // Container elements built via appendChild (e.g. the campaign
+      // leaderboard rows) report their descendants' text, like the DOM.
+      if (this.children.length) return this.children.map((c) => c.textContent).join("");
       return this._text;
     },
     set textContent(v) {
       this._text = v;
+      this.children = [];
+    },
+    // Only the "clear the container" use (innerHTML = "") is supported; the
+    // page never assigns interpolated markup, which a test below pins.
+    set innerHTML(v) {
+      if (v !== "") throw new Error("element stub only supports innerHTML = \"\"");
+      this._text = "";
+      this.children = [];
+    },
+    get innerHTML() {
+      return this._text;
+    },
+    appendChild(child) {
+      this.children.push(child);
+      return child;
     },
     scrollIntoView(opts) {
       this.scrollIntoViewCalls.push(opts);
@@ -118,12 +138,14 @@ const ELEMENT_IDS = [
   "stat-tier-message",
   "recent-win-card",
   "recent-win-text",
+  "campaign-activity-card",
+  "campaign-activity-list",
 ];
 
 // Mirrors the `class="... hidden"` markup already present in
 // static/creator-share.html, since the lightweight element stubs below don't
 // parse the real HTML/CSS -- only classes the inline script itself toggles.
-const INITIALLY_HIDDEN_IDS = ["access-denied", "app-shell", "package-card", "package-caption", "package-playback", "rewards-section", "stat-tier-message", "recent-win-card"];
+const INITIALLY_HIDDEN_IDS = ["access-denied", "app-shell", "package-card", "package-caption", "package-playback", "rewards-section", "stat-tier-message", "recent-win-card", "campaign-activity-card"];
 
 function buildSandbox({ initData = "tg_init_data_ok", fetchImpl, clipboardWriteText, execCommandResult = true, openTelegramLink, windowOpenResult, windowOpenThrows } = {}) {
   const elements = {};
@@ -148,7 +170,10 @@ function buildSandbox({ initData = "tg_init_data_ok", fetchImpl, clipboardWriteT
         createdTextareas.push(ta);
         return ta;
       }
-      return { style: {} };
+      return makeElement(null);
+    },
+    createTextNode(text) {
+      return { textContent: String(text) };
     },
     body: {
       appendChild() {},
@@ -952,11 +977,16 @@ test("reward ladder: collapsed by default, expands and collapses on toggle, no p
 
 test("reward ladder markup lists the five static tiers and the monthly reset note, with no dynamic highlighting", () => {
   const html = fs.readFileSync(path.join(__dirname, "static", "creator-share.html"), "utf8");
-  assert.match(html, /10 qualified referrals.*\$10/);
-  assert.match(html, /25 qualified referrals.*\$15/);
-  assert.match(html, /50 qualified referrals.*\$50/);
-  assert.match(html, /150 qualified referrals.*\$125/);
-  assert.match(html, /250 qualified referrals.*\$250/);
+  // Per-tier totals of the live reward plan (affiliate_reward_plans.py
+  // _DENOMINATION_RECIPES, every entitlement month from 202609): T1 $10,
+  // T2 $5+2x$10, T3 $10+$50, T4 3x$10+3x$50, T5 7x$50. The previous
+  // $10/$15/$50/$125/$250 figures were neither plan (legacy is
+  // $10/$15/$50/$150/$250) and no longer describe what users receive.
+  assert.match(html, /10 qualified referrals.*\$10</);
+  assert.match(html, /25 qualified referrals.*\$25</);
+  assert.match(html, /50 qualified referrals.*\$60</);
+  assert.match(html, /150 qualified referrals.*\$180</);
+  assert.match(html, /250 qualified referrals.*\$350</);
   assert.match(html, /reset on the 1st of every month/i);
   assert.match(html, /Only qualified referrals count/i);
 });
@@ -1195,4 +1225,93 @@ test("dynamic package fields are rendered via textContent, never innerHTML, so t
   const source = loadScriptSource();
   assert.ok(source.includes("el.textContent = text;"));
   assert.ok(!/package(Caption|Playback|Cta|Link)\.innerHTML/.test(source));
+});
+
+// ---------------------------------------------------------------------
+// Campaign leaderboard card (/api/campaign/active/activity). Its elements
+// were missing from the stub DOM above, so every init() crashed with an
+// unhandled rejection inside hideCampaignActivity(); these pin its behaviour.
+// ---------------------------------------------------------------------
+
+function activityRoute(activityResponse) {
+  return (url) => {
+    if (url.includes("/api/creator/share/status")) return statusOkResponse();
+    if (url.includes("/api/campaign/active/activity")) return activityResponse();
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ status: "ok" }) });
+  };
+}
+
+async function settle() {
+  for (let i = 0; i < 5; i++) await flush();
+}
+
+test("campaign leaderboard: active campaign renders top rows with qualified/joins/conversion, null joins as an em dash", async () => {
+  const { elements, fetchCalls } = buildSandbox({
+    fetchImpl: activityRoute(() =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () =>
+          Promise.resolve({
+            state: "active",
+            leaderboard: [
+              { rank: 1, display_name: "Al***", qualified_count: 12, joins_count: 40, conversion_rate: 0.3 },
+              { rank: 2, display_name: "<b>Bo</b>", qualified_count: 7, joins_count: null, conversion_rate: null },
+              { rank: 3, display_name: null, qualified_count: 0, joins_count: 0, conversion_rate: null },
+            ],
+          }),
+      })
+    ),
+  });
+  await settle();
+
+  assert.equal(elements["campaign-activity-card"].classList.contains("hidden"), false);
+  const rows = elements["campaign-activity-list"].children;
+  assert.equal(rows.length, 3);
+  assert.equal(rows[0].textContent, "#1Al***12 qualified · 40 joins · 30.0%");
+  // Legacy manual entries (joins unknown) never render a fake 0 / 0%.
+  assert.equal(rows[1].textContent, "#2<b>Bo</b>7 qualified · — joins · —");
+  assert.equal(rows[2].textContent, "#3Anonymous0 qualified · 0 joins · —");
+
+  const activityCall = fetchCalls.find((c) => c.url.includes("/api/campaign/active/activity"));
+  assert.ok(activityCall, "the activity endpoint is fetched once access is confirmed");
+  assert.ok(!activityCall.url.includes("init_data"), "public endpoint: no Telegram initData is sent");
+});
+
+test("campaign leaderboard: only the top 5 rows are shown", async () => {
+  const leaderboard = Array.from({ length: 8 }, (_, i) => ({ rank: i + 1, display_name: `U${i + 1}`, qualified_count: 8 - i, joins_count: 10, conversion_rate: 0.5 }));
+  const { elements } = buildSandbox({
+    fetchImpl: activityRoute(() => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ state: "active", leaderboard }) })),
+  });
+  await settle();
+  assert.equal(elements["campaign-activity-list"].children.length, 5);
+});
+
+for (const [label, response] of [
+  ["no active campaign", () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ state: "none" }) })],
+  ["active but empty leaderboard", () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ state: "active", leaderboard: [] }) })],
+  ["network failure", () => Promise.reject(new Error("offline"))],
+  ["non-JSON body", () => Promise.resolve({ ok: false, status: 502, json: () => Promise.reject(new SyntaxError("bad json")) })],
+]) {
+  test(`campaign leaderboard: ${label} keeps the card hidden and never blocks Get My Share Post`, async () => {
+    const { elements } = buildSandbox({ fetchImpl: activityRoute(response) });
+    await settle();
+    assert.equal(elements["campaign-activity-card"].classList.contains("hidden"), true);
+    assert.equal(elements["campaign-activity-list"].children.length, 0);
+    assert.equal(elements["app-shell"].classList.contains("hidden"), false);
+    assert.equal(elements["btn-generate"].classList.contains("hidden"), false);
+  });
+}
+
+test("campaign leaderboard is not requested when creator access is denied", async () => {
+  const { fetchCalls } = buildSandbox({
+    fetchImpl: (url) => {
+      if (url.includes("/api/creator/share/status")) {
+        return Promise.resolve({ ok: false, status: 403, json: () => Promise.resolve({ status: "error", code: "not_creator" }) });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ state: "active", leaderboard: [{ rank: 1 }] }) });
+    },
+  });
+  await settle();
+  assert.equal(fetchCalls.filter((c) => c.url.includes("/api/campaign/active/activity")).length, 0);
 });

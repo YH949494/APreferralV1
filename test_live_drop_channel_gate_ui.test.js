@@ -19,6 +19,17 @@
  * in-flight promise, so opening the Mini App fires one /vouchers/visible
  * request and one check_only probe per Live Drop, not two.
  *
+ * Superseded in part by b2b1e45 ("Move channel-subscription verification
+ * off the voucher page-load path"): card render no longer fires a check_only
+ * probe at all. It reads the cache-only drop.channelSubscribed flag from
+ * /vouchers/visible, keeps Claim now enabled (unknown is not "not
+ * subscribed"), and the real POST /vouchers/claim is the sole authoritative
+ * gate. The render/recovery/P4 tests below pin that contract; the original
+ * invariant — a backend hiccup must never render a false "Join Official
+ * Channel" state or block a subscribed user — is unchanged and still
+ * asserted, now against the claim path. checkChannelSubscription()'s
+ * tri-state contract keeps its direct unit tests.
+ *
  * Same sandboxed-vm extraction approach as test_live_drop_voucher_ui.test.js
  * (no build step for the inline <script> in static/index.html).
  *
@@ -44,6 +55,32 @@ function loadSource() {
   const end = INDEX_HTML.indexOf(END_MARKER, start);
   assert.ok(end !== -1, "end-of-claim-handler marker not found in static/index.html");
   return INDEX_HTML.slice(start, end);
+}
+
+function parseSimpleSelector(sel) {
+  const m = /^([a-zA-Z]*)((?:\.[\w-]+)*)((?:\[[^\]]+\])*)$/.exec(sel.trim());
+  if (!m) return null;
+  const tag = m[1] ? m[1].toLowerCase() : null;
+  const classes = (m[2].match(/\.[\w-]+/g) || []).map((c) => c.slice(1));
+  const attrs = [];
+  const attrRe = /\[([^=\]]+)(?:=['"]?([^'"\]]*)['"]?)?\]/g;
+  let am;
+  while ((am = attrRe.exec(m[3]))) attrs.push({ name: am[1], value: am[2] });
+  return { tag, classes, attrs };
+}
+
+function nodeMatches(node, sel) {
+  const parsed = parseSimpleSelector(sel);
+  if (!parsed || !node.tagName) return false;
+  if (parsed.tag && node.tagName.toLowerCase() !== parsed.tag) return false;
+  for (const c of parsed.classes) {
+    if (!String(node.className || "").split(/\s+/).includes(c)) return false;
+  }
+  for (const a of parsed.attrs) {
+    if (!node.attrs || !(a.name in node.attrs)) return false;
+    if (a.value !== undefined && String(node.attrs[a.name]) !== a.value) return false;
+  }
+  return true;
 }
 
 function makeNode(tag) {
@@ -84,7 +121,12 @@ function makeNode(tag) {
     click() {
       (node._listeners.click || []).forEach((fn) => fn({ target: node }));
     },
+    // Walks up parentNode like the DOM, for the delegated claim handler's
+    // e.target.closest("button[data-dropid],...") lookup.
     closest(sel) {
+      for (let n = node; n; n = n.parentNode) {
+        if (String(sel).split(",").some((part) => nodeMatches(n, part))) return n;
+      }
       return null;
     },
     scrollIntoView() {},
@@ -160,6 +202,14 @@ function findByClass(node, cls) {
   return null;
 }
 
+function allText(node, out) {
+  out = out || [];
+  if (!node) return out;
+  if (node.textContent) out.push(node.textContent);
+  (node._children || []).forEach((c) => allText(c, out));
+  return out;
+}
+
 function findAllByClass(node, cls, out) {
   out = out || [];
   if (!node) return out;
@@ -218,6 +268,7 @@ function buildSandbox({ fetchImpl } = {}) {
   };
 
   const fetchLog = [];
+  const alerts = [];
   const defaultFetch = async () => ({ ok: true, status: 200, json: async () => ({ status: "ok" }) });
 
   const sandbox = {
@@ -249,7 +300,7 @@ function buildSandbox({ fetchImpl } = {}) {
     fmtKL: (d) => String(d || ""),
     OFFICIAL_CHANNEL_LINK: "https://t.me/advantplayofficial",
     tg: {},
-    tgAlert() {},
+    tgAlert: (msg) => alerts.push(msg),
     getLatestInitData: () => "init-data",
     API_V2: "/api/v2",
     userId: "u1",
@@ -274,7 +325,7 @@ function buildSandbox({ fetchImpl } = {}) {
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
 
-  return { sandbox, byId, fetchLog };
+  return { sandbox, byId, fetchLog, alerts };
 }
 
 function run(sandbox) {
@@ -414,169 +465,213 @@ test("checkChannelSubscription: persistent failure never exceeds the one bounded
 });
 
 // ---------------------------------------------------------------------
-// renderCompactVoucherRow: the 3 UI states
+// renderCompactVoucherRow + claim gate (post-b2b1e45 contract)
 // ---------------------------------------------------------------------
 
-test("UI state A: verified + subscribed -> '✓ Joined Official Channel', Claim now enabled", async () => {
-  const { sandbox, byId } = buildSandbox({
-    fetchImpl: async (url) => {
-      if (String(url).includes("/vouchers/visible")) return { ok: true, status: 200, json: async () => ({ status: "ok", drops: [] }) };
-      return { ok: true, status: 200, json: async () => ({ status: "ok" }) };
-    },
-  });
+function visibleWith(drops) {
+  return { ok: true, status: 200, json: async () => ({ status: "ok", drops }) };
+}
+
+function renderedRow(byId) {
+  const row = findByClass(byId["campaign-voucher-list"], "ap-reward-compact");
+  return {
+    row,
+    claimBtn: findByClass(row, "ap-reward-compact-claim"),
+    channelRow: findByClass(row, "ap-reward-compact-channel"),
+  };
+}
+
+// Dispatches like a real click: every delegated document click listener in
+// the extracted range runs; the ones whose selector doesn't match no-op.
+async function clickClaim(sandbox, target) {
+  for (const fn of sandbox.document._listeners.click || []) {
+    await fn({ target, preventDefault() {} });
+  }
+}
+
+// Countdown/cooldown UIs start 1s intervals; record and clear them so no
+// test leaves a live timer behind.
+function trackIntervals(sandbox) {
+  const ids = [];
+  sandbox.setInterval = (fn, ms) => {
+    const id = setInterval(fn, ms);
+    ids.push(id);
+    return id;
+  };
+  return () => ids.forEach((id) => clearInterval(id));
+}
+
+test("UI state A: cached subscribed (drop.channelSubscribed) -> '✓ Joined Official Channel', Claim now enabled, no probe", async () => {
+  const { sandbox, byId, fetchLog } = buildSandbox();
   run(sandbox);
-  sandbox.renderCampaignDrops(drop({ dropId: "d1" }), [], null);
+  sandbox.renderCampaignDrops(drop({ dropId: "d1", channelSubscribed: true }), [], null);
   await flush();
 
-  const row = findByClass(byId["campaign-voucher-list"], "ap-reward-compact");
-  const claimBtn = findByClass(row, "ap-reward-compact-claim");
-  const channelRow = findByClass(row, "ap-reward-compact-channel");
-
+  const { claimBtn, channelRow } = renderedRow(byId);
   assert.equal(channelRow.dataset.channelState, "subscribed");
   assert.match(channelRow.textContent, /Joined Official Channel/);
   assert.equal(claimBtn.disabled, false);
+  assert.equal(checkOnlyCallCount(fetchLog), 0, "render must never probe Telegram via check_only");
 });
 
-test("UI state B: verified + not subscribed -> 'Join Official Channel', Claim now disabled", async () => {
-  const { sandbox, byId } = buildSandbox({
-    fetchImpl: async (url) => {
-      if (String(url).includes("/vouchers/visible")) return { ok: true, status: 200, json: async () => ({ status: "ok", drops: [] }) };
+test("UI state B: cache not subscribed/unknown -> no guessed 'Join Official Channel', Claim now enabled; the claim's 403 not_subscribed gates", async () => {
+  const claimBodies = [];
+  const { sandbox, byId, fetchLog } = buildSandbox({
+    fetchImpl: async (url, init) => {
+      if (String(url).includes("/vouchers/visible")) return visibleWith([drop({ dropId: "d1", channelSubscribed: false })]);
+      claimBodies.push(JSON.parse((init && init.body) || "{}"));
       return { ok: false, status: 403, json: async () => ({ code: "not_subscribed", message: "join" }) };
     },
   });
   run(sandbox);
-  sandbox.renderCampaignDrops(drop({ dropId: "d1" }), [], null);
-  await flush();
+  await sandbox.loadVouchers();
 
-  const row = findByClass(byId["campaign-voucher-list"], "ap-reward-compact");
-  const claimBtn = findByClass(row, "ap-reward-compact-claim");
-  const channelRow = findByClass(row, "ap-reward-compact-channel");
+  const { claimBtn, channelRow } = renderedRow(byId);
+  assert.equal(channelRow.style.display, "none");
+  assert.doesNotMatch(channelRow.textContent, /Join Official Channel/);
+  assert.notEqual(channelRow.dataset.channelState, "subscribed");
+  assert.equal(claimBtn.disabled, false);
+  assert.equal(checkOnlyCallCount(fetchLog), 0);
 
-  assert.equal(channelRow.dataset.channelState, "not_subscribed");
-  assert.match(channelRow.textContent, /Join Official Channel/);
-  assert.equal(claimBtn.disabled, true);
+  await clickClaim(sandbox, claimBtn);
+  assert.equal(claimBodies.length, 1);
+  assert.ok(!claimBodies[0].check_only, "the authoritative gate is the real claim request");
+  const card = findByClass(byId["claim-error"], "claim-error-card");
+  assert.ok(card, "the server's not_subscribed rejection must be surfaced");
+  assert.equal(findByClass(card, "claim-error-title").textContent, "subscribe_required");
 });
 
-async function assertNeutralState(fetchImpl) {
-  const { sandbox, byId } = buildSandbox({ fetchImpl });
-  run(sandbox);
-  sandbox.renderCampaignDrops(drop({ dropId: "d1" }), [], null);
-  await flush();
+async function assertNeverFalseGate(claimResponse, { cooldown = false } = {}) {
+  const { sandbox, byId, fetchLog } = buildSandbox({
+    fetchImpl: async (url) => {
+      if (String(url).includes("/vouchers/visible")) return visibleWith([drop({ dropId: "d1" })]);
+      return claimResponse();
+    },
+  });
+  const clearIntervals = trackIntervals(sandbox);
+  try {
+    run(sandbox);
+    await sandbox.loadVouchers();
+    const { claimBtn, channelRow } = renderedRow(byId);
+    assert.equal(claimBtn.disabled, false, "a subscribed user is never blocked before the claim is submitted");
+    assert.equal(checkOnlyCallCount(fetchLog), 0);
 
-  const row = findByClass(byId["campaign-voucher-list"], "ap-reward-compact");
-  const claimBtn = findByClass(row, "ap-reward-compact-claim");
-  const channelRow = findByClass(row, "ap-reward-compact-channel");
+    await clickClaim(sandbox, claimBtn);
 
-  assert.equal(channelRow.dataset.channelState, "unverified");
-  assert.doesNotMatch(channelRow.textContent, /Join Official Channel/, "must never render the false not-subscribed state");
-  assert.match(channelRow.textContent, /Checking channel status|Retry/);
-  assert.equal(claimBtn.disabled, true);
+    assert.doesNotMatch(channelRow.textContent, /Join Official Channel/, "must never render the false not-subscribed state");
+    const card = findByClass(byId["claim-error"], "claim-error-card");
+    if (cooldown) {
+      // 429 busy: the button itself counts down (server retry hint, capped)
+      // instead of rendering an error card.
+      assert.equal(card, null);
+      assert.match(claimBtn.textContent, /^Claiming \(\d+s\)$/);
+      assert.equal(claimBtn.disabled, true, "no re-submission during the server-requested cooldown");
+    } else {
+      assert.ok(card, "the failure is surfaced to the user, not swallowed");
+      assert.doesNotMatch(allText(card).join(" "), /subscribe_required|join_official_channel_btn|Join Official Channel/);
+    }
+    const after = renderedRow(byId);
+    assert.equal(after.claimBtn.dataset.dropid, "d1", "the voucher stays in the slot for a safe retry");
+    assert.equal(sandbox.__claimInFlight, false);
+  } finally {
+    clearIntervals();
+  }
 }
 
-test("UI state C: verification_failed -> neutral Retry state, Claim now disabled (never 'Join Official Channel')", async () => {
-  await assertNeutralState(async (url) => {
-    if (String(url).includes("/vouchers/visible")) return { ok: true, status: 200, json: async () => ({ status: "ok", drops: [] }) };
-    return {
-      ok: false,
-      status: 503,
-      json: async () => ({ code: "verification_failed", subscribed: false, verified: false, reason: "network_error", retry_after_sec: 3 }),
-    };
-  });
+test("UI state C: claim verification_failed (503) -> neutral error, never 'Join Official Channel'", async () => {
+  await assertNeverFalseGate(async () => ({
+    ok: false,
+    status: 503,
+    json: async () => ({ code: "verification_failed", subscribed: false, verified: false, reason: "network_error", retry_after_sec: 3 }),
+  }));
 });
 
-test("UI state C: 401 -> neutral state, never 'Join Official Channel'", async () => {
-  await assertNeutralState(async (url) => {
-    if (String(url).includes("/vouchers/visible")) return { ok: true, status: 200, json: async () => ({ status: "ok", drops: [] }) };
-    return { ok: false, status: 401, json: async () => ({ code: "auth_failed" }) };
-  });
+test("UI state C: claim 401 -> neutral error, never 'Join Official Channel'", async () => {
+  await assertNeverFalseGate(async () => ({ ok: false, status: 401, json: async () => ({ code: "auth_failed" }) }));
 });
 
-test("UI state C: 429 -> neutral state, never 'Join Official Channel'", async () => {
-  await assertNeutralState(async (url) => {
-    if (String(url).includes("/vouchers/visible")) return { ok: true, status: 200, json: async () => ({ status: "ok", drops: [] }) };
-    return { ok: false, status: 429, json: async () => ({ code: "busy" }) };
-  });
+test("UI state C: claim 429 -> cooldown, never 'Join Official Channel'", async () => {
+  await assertNeverFalseGate(async () => ({ ok: false, status: 429, json: async () => ({ code: "busy" }) }), { cooldown: true });
 });
 
-test("UI state C: 500 -> neutral state, never 'Join Official Channel'", async () => {
-  await assertNeutralState(async (url) => {
-    if (String(url).includes("/vouchers/visible")) return { ok: true, status: 200, json: async () => ({ status: "ok", drops: [] }) };
-    return { ok: false, status: 500, json: async () => ({}) };
-  });
+test("UI state C: claim 500 -> neutral error, never 'Join Official Channel'", async () => {
+  await assertNeverFalseGate(async () => ({ ok: false, status: 500, json: async () => ({}) }));
 });
 
-test("UI state C: network failure -> neutral state, never 'Join Official Channel'", async () => {
-  await assertNeutralState(async (url) => {
-    if (String(url).includes("/vouchers/visible")) return { ok: true, status: 200, json: async () => ({ status: "ok", drops: [] }) };
+test("UI state C: claim network failure -> neutral error, never 'Join Official Channel'", async () => {
+  await assertNeverFalseGate(async () => {
     throw new Error("network down");
   });
 });
 
-test("transient failure then success -> row recovers to '✓ Joined Official Channel', Claim now enabled", async () => {
+test("transient claim failure then a manual retry succeeds (single request per tap, no automatic loop)", async () => {
   let claimCalls = 0;
-  const { sandbox, byId } = buildSandbox({
+  let visibleCalls = 0;
+  const { sandbox, byId, alerts } = buildSandbox({
     fetchImpl: async (url) => {
-      if (String(url).includes("/vouchers/visible")) return { ok: true, status: 200, json: async () => ({ status: "ok", drops: [] }) };
+      if (String(url).includes("/vouchers/visible")) {
+        visibleCalls += 1;
+        return visibleWith(visibleCalls === 1 ? [drop({ dropId: "d1" })] : []);
+      }
       claimCalls += 1;
-      if (claimCalls === 1) {
-        return { ok: false, status: 500, json: async () => ({}) };
+      if (claimCalls === 1) return { ok: false, status: 500, json: async () => ({}) };
+      return { ok: true, status: 200, json: async () => ({ ok: true, status: "ok", voucher: { code: "CODE1" } }) };
+    },
+  });
+  run(sandbox);
+  await sandbox.loadVouchers();
+
+  await clickClaim(sandbox, renderedRow(byId).claimBtn);
+  await flush();
+  assert.equal(claimCalls, 1, "a failed claim is not retried automatically");
+  const retryBtn = renderedRow(byId).claimBtn;
+  assert.equal(retryBtn.disabled, false, "Claim now is re-enabled for a manual retry");
+
+  await clickClaim(sandbox, retryBtn);
+  assert.equal(claimCalls, 2);
+  assert.ok(alerts.some((m) => m.includes("CODE1")), "the claimed code is shown to the user");
+});
+
+test("visibilitychange re-reads the cache-only /vouchers/visible, never re-probes Telegram", async () => {
+  let subscribed = false;
+  let visibleCalls = 0;
+  const { sandbox, byId, fetchLog } = buildSandbox({
+    fetchImpl: async (url) => {
+      if (String(url).includes("/vouchers/visible")) {
+        visibleCalls += 1;
+        return visibleWith([drop({ dropId: "d1", channelSubscribed: subscribed })]);
       }
       return { ok: true, status: 200, json: async () => ({ status: "ok" }) };
     },
   });
   run(sandbox);
-  sandbox.renderCampaignDrops(drop({ dropId: "d1" }), [], null);
-  await flush();
+  await sandbox.loadVouchers();
+  assert.notEqual(renderedRow(byId).channelRow.dataset.channelState, "subscribed");
 
-  const row = findByClass(byId["campaign-voucher-list"], "ap-reward-compact");
-  const claimBtn = findByClass(row, "ap-reward-compact-claim");
-  const channelRow = findByClass(row, "ap-reward-compact-channel");
-
-  assert.equal(channelRow.dataset.channelState, "subscribed");
-  assert.match(channelRow.textContent, /Joined Official Channel/);
-  assert.equal(claimBtn.disabled, false);
-});
-
-test("visibilitychange can recover a previously-failed verification once the backend is healthy again", async () => {
-  let healthy = false;
-  const { sandbox, byId } = buildSandbox({
-    fetchImpl: async (url) => {
-      if (String(url).includes("/vouchers/visible")) return { ok: true, status: 200, json: async () => ({ status: "ok", drops: [] }) };
-      if (!healthy) return { ok: false, status: 500, json: async () => ({}) };
-      return { ok: true, status: 200, json: async () => ({ status: "ok" }) };
-    },
-  });
-  run(sandbox);
-  sandbox.renderCampaignDrops(drop({ dropId: "d1" }), [], null);
-  await flush();
-
-  const row = findByClass(byId["campaign-voucher-list"], "ap-reward-compact");
-  const claimBtn = findByClass(row, "ap-reward-compact-claim");
-  const channelRow = findByClass(row, "ap-reward-compact-channel");
-  assert.equal(channelRow.dataset.channelState, "unverified");
-  assert.equal(claimBtn.disabled, true);
-
-  healthy = true;
+  subscribed = true;
   const listeners = sandbox.document._listeners.visibilitychange || [];
   assert.ok(listeners.length > 0, "a visibilitychange listener must be registered");
   listeners.forEach((fn) => fn());
   await flush();
 
+  assert.equal(visibleCalls, 2);
+  const { claimBtn, channelRow } = renderedRow(byId);
   assert.equal(channelRow.dataset.channelState, "subscribed");
   assert.equal(claimBtn.disabled, false);
+  assert.equal(checkOnlyCallCount(fetchLog), 0);
 });
 
 // ---------------------------------------------------------------------
 // P4: loadVouchers() collapses concurrent calls into one in-flight load
 // ---------------------------------------------------------------------
 
-test("P4: two concurrent loadVouchers() calls collapse into a single /vouchers/visible request and a single check_only probe per drop", async () => {
+test("P4: two concurrent loadVouchers() calls collapse into a single /vouchers/visible request and fire no check_only probe", async () => {
   let visibleCalls = 0;
   const { sandbox, fetchLog } = buildSandbox({
     fetchImpl: async (url) => {
       if (String(url).includes("/vouchers/visible")) {
         visibleCalls += 1;
-        return { ok: true, status: 200, json: async () => ({ status: "ok", drops: [drop({ dropId: "d1" })] }) };
+        return visibleWith([drop({ dropId: "d1" })]);
       }
       return { ok: true, status: 200, json: async () => ({ status: "ok" }) };
     },
@@ -591,7 +686,7 @@ test("P4: two concurrent loadVouchers() calls collapse into a single /vouchers/v
   await flush();
 
   assert.equal(visibleCalls, 1, "concurrent loadVouchers() calls must collapse into one /vouchers/visible request");
-  assert.equal(checkOnlyCallCount(fetchLog), 1, "only one check_only probe per live drop, not two duplicate getChatMember checks");
+  assert.equal(checkOnlyCallCount(fetchLog), 0, "page load triggers no getChatMember-backed check_only probe");
 });
 
 test("P4/Codex: reloadVouchersForUpdatedState() waits out an in-flight load then starts a guaranteed-fresh one (not a stale join)", async () => {
