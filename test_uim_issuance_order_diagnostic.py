@@ -51,6 +51,12 @@ def test_reports_gap_source_and_which_hypothesis_clears_which_records():
                                      "redemption_time_is_utc_not_kl": 1}
     gaps = sorted(s["gap_hours"] for s in out["samples"])
     assert gaps == [5.0, 48.0] and all("account" in s and "WELC" not in json.dumps(s) for s in out["samples"])
+    assert out["gap_hours_min_median_max"] == [5.0, 26.5, 48.0]
+    assert out["cleared_by_total_clock_offset_hours"] == {"8": 1, "16": 1, "24": 1}
+    five = next(s for s in out["samples"] if s["gap_hours"] == 5.0)
+    assert five["source_row"]["redeemed_at_wallclock"] == "2026-10-03T12:00:00"
+    assert five["redeemed_at_parsed_utc"].startswith("2026-10-03T04:00:00")
+    assert list(five["issuance_times_utc"]) == ["new_joiner_claims.claimed_at"] and "code_REVEALED" not in five
 
 
 def test_genuine_gaps_clear_under_no_hypothesis():
@@ -78,3 +84,69 @@ def test_cli_is_read_only_and_exits_zero(capsys):
     rc = admin_cli.main(["diagnose-issuance-order"], db_factory=lambda: (_ for _ in ()).throw(AssertionError("write db")),
                         read_only_db_factory=lambda: w.db, now_fn=lambda: NOW)
     assert rc == 0 and json.loads(capsys.readouterr().out)["before_issuance"] == 2 and _snapshot(w.db) == before
+
+
+def test_reveal_samples_is_opt_in_and_bounded(capsys):
+    w = _scenario()
+    assert all("code_REVEALED" not in x for x in dio.diagnose(w.db, config=DATABOT_CONFIG, now_utc=NOW)["samples"])
+    revealed = dio.diagnose(w.db, config=DATABOT_CONFIG, now_utc=NOW, reveal_samples=1)["samples"]
+    assert sum("code_REVEALED" in x for x in revealed) == 1
+    admin_cli.main(["diagnose-issuance-order", "--reveal-samples", "99"], read_only_db_factory=lambda: w.db, now_fn=lambda: NOW)
+    assert sum("code_REVEALED" in x for x in json.loads(capsys.readouterr().out)["samples"]) <= 10
+
+
+def test_tight_cluster_near_16h_is_visible_as_a_single_total_offset():
+    w = world(3, active=True)
+    w.db.voucher_pools.delete_many({})
+    w.db.affiliate_ledger.delete_many({})
+    for uid in (11, 12, 13):                                   # redeemed 2-8 minutes after issuance, clocks 16h apart
+        _pool(w, uid, f"WELC{uid}", R + timedelta(hours=16) - timedelta(minutes=2 * (uid - 9)))
+    feed = FakeFeed()
+    feed.add_batch([row(code=f"WELC{i}", account=f"a{i}") for i in (11, 12, 13)], coverage=final_cov())
+    sync(w, feed)
+    out = dio.diagnose(w.db, config=DATABOT_CONFIG, now_utc=NOW)
+    assert out["before_issuance"] == 3 and out["gap_issued_minus_redeemed"]["12-24h"] == 3
+    assert out["cleared_by_total_clock_offset_hours"] == {"8": 0, "16": 3, "24": 3}
+    assert out["would_clear_if"]["all_issuance_times_are_kl_wall_clock_stored_as_utc"] == 0
+
+
+def test_samples_span_the_whole_gap_range_including_both_ends():
+    w = world(15, active=True)
+    w.db.voucher_pools.delete_many({})
+    w.db.affiliate_ledger.delete_many({})
+    for n, uid in enumerate(range(11, 26)):                    # 15 candidates with gaps 1h..15h
+        _pool(w, uid, f"WELC{uid}", R + timedelta(hours=n + 1))
+    feed = FakeFeed()
+    feed.add_batch([row(code=f"WELC{u}", account=f"a{u}") for u in range(11, 26)], coverage=final_cov())
+    sync(w, feed)
+    gaps = [s["gap_hours"] for s in dio.diagnose(w.db, config=DATABOT_CONFIG, now_utc=NOW)["samples"]]
+    assert gaps == sorted(gaps) and len(gaps) == 10 and gaps[0] == 1.0 and gaps[-1] == 15.0
+
+
+def test_every_claim_time_of_the_same_source_is_reported():
+    w = world(1, active=True)
+    w.db.voucher_pools.delete_many({})
+    w.db.affiliate_ledger.delete_many({})
+    _pool(w, 11, "WELC11")
+    for hours in (30, 5):
+        w.db.new_joiner_claims.insert_one({"uid": 11, "code": "WELC11", "claimed_at": R + timedelta(hours=hours)})
+    feed = FakeFeed()
+    feed.add_batch([row()], coverage=final_cov())
+    sync(w, feed)
+    [sample] = dio.diagnose(w.db, config=DATABOT_CONFIG, now_utc=NOW)["samples"]
+    assert [t[:13] for t in sample["issuance_times_utc"]["new_joiner_claims.claimed_at"]] == ["2026-10-03T09", "2026-10-04T10"]
+    assert sample["gap_hours"] == 5.0
+
+
+def test_raw_fields_stay_with_the_folded_observation_when_a_later_row_conflicts():
+    w = world(1, active=True)
+    w.db.voucher_pools.delete_many({})
+    w.db.affiliate_ledger.delete_many({})
+    _pool(w, 11, "WELC11", R + timedelta(days=2))
+    feed = FakeFeed()
+    feed.add_batch([row()], coverage=final_cov())
+    feed.add_batch([row(wall="2026-10-03 13:30:00")], coverage=final_cov())      # disagrees on the redemption instant
+    sync(w, feed)
+    [sample] = dio.diagnose(w.db, config=DATABOT_CONFIG, now_utc=NOW)["samples"]
+    assert sample["redeemed_at_parsed_utc"].startswith("2026-10-03T04:00:00")
+    assert sample["source_row"]["redeemed_at_wallclock"] == "2026-10-03T12:00:00"

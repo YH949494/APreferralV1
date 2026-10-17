@@ -256,6 +256,8 @@ def main(argv=None, *, db_factory=None, read_only_db_factory=None, now_fn=_now) 
     dio = sub.add_parser("diagnose-issuance-order",
                          help="read-only: why do records look redeemed before their voucher was issued (clock-basis test)")
     dio.add_argument("--max-scan-rows", type=int, default=500_000, help="abort above this many source rows")
+    dio.add_argument("--reveal-samples", type=int, default=0,
+                     help="print the full voucher code for the first N samples (0 = masked only); look one up at the source")
     rec = sub.add_parser("reconcile-uim-evidence",
                          help="repair evidence superseded by a newer attested UIM batch (dry run by default)")
     rec.add_argument("--limit", type=int, default=500, help="max evidence documents examined this run (<=5000)")
@@ -292,7 +294,8 @@ def main(argv=None, *, db_factory=None, read_only_db_factory=None, now_fn=_now) 
 
         db = (read_only_db_factory or _read_only_db)()
         report = uim_issuance_order_diagnostic.diagnose(
-            db, config=(aq.get_control(db) or {}).get("source_config"), now_utc=now_utc, max_scan_rows=args.max_scan_rows)
+            db, config=(aq.get_control(db) or {}).get("source_config"), now_utc=now_utc, max_scan_rows=args.max_scan_rows,
+            reveal_samples=max(0, min(args.reveal_samples, 10)))
         print(json.dumps(report, indent=2, default=str))
         return 0 if report["ok"] else 1
 
