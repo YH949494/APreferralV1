@@ -1386,3 +1386,20 @@ class TestPhase7ATakeoverReadiness:
         assert readiness["high_value"] == "READY"
         assert readiness["unclassified"] == "NOT READY"
         assert readiness["active_community_player"] == "PARTIAL"
+
+
+# ---------------------------------------------------------------------------
+# Missing claim_risk_level is "unknown", never silently "normal"
+# ---------------------------------------------------------------------------
+
+def test_bse_panel_missing_claim_risk_level_is_unknown_not_normal():
+    col = FakeCollection([
+        {"account": "a", "backend_segment": "ghost", "snapshot_week": "2026-W24", "snapshot_month": "2026-06",
+         "claim_risk_level": "normal", "player_age_type": "old_player"},
+        {"account": "b", "backend_segment": "ghost", "snapshot_week": "2026-W24", "snapshot_month": "2026-06",
+         "player_age_type": "old_player"},
+        {"account": "c", "backend_segment": "ghost", "snapshot_week": "2026-W24", "snapshot_month": "2026-06",
+         "claim_risk_level": None, "player_age_type": "old_player"},
+    ])
+    out = dp.build_backend_segment_engine_panel(snapshots_col=col, snapshot_week="2026-W24")
+    assert out["claim_risk_distribution"] == {"normal": 1, "unknown": 2}
