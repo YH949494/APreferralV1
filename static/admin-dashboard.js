@@ -12608,7 +12608,8 @@
       { label: "Reactivation", view: "settings", settingsCategory: "reactivation" },
       { label: "Security", view: "settings", settingsCategory: "security" },
       { label: "Integrations", view: "settings", settingsCategory: "integrations" },
-      { label: "Segment Probability", view: "settings", settingsCategory: "segment_probability" }
+      { label: "Segment Probability", view: "settings", settingsCategory: "segment_probability" },
+      { label: "Segmentation & Sync", view: "settings", settingsCategory: "segmentation_sync" }
     ]}
   ];
 

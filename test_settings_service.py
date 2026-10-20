@@ -341,3 +341,77 @@ class SettingsCategorizationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DatabotPipelineAndEnforcementGroupsTests(unittest.TestCase):
+    """The Segmentation & Sync tab and the multi-account block switches are
+    ordinary schema groups: rendered by the generic Settings UI, validated on
+    save and written to the audit log like every other group."""
+
+    # Databot reads app_settings/databot_pipeline (app/services/runtime_settings.py); these names and defaults
+    # are its contract. Databot's tests/test_runtime_settings.py pins the same table from the other side.
+    DATABOT_CONTRACT = {
+        "segment_snapshot_schedule_enabled": ("bool", False),
+        "segment_recalc_dispatch_enabled": ("bool", False),
+        "segment_recalc_quiet_minutes": ("float", 30.0),
+        "segment_sync_enabled": ("bool", False),
+        "segment_sync_scheduled_max_updates": ("int", 2500),
+        "segment_sync_require_fresh_snapshot": ("bool", True),
+        "segment_sync_max_snapshot_age_days": ("int", 21),
+        "segment_freshness_alert_enabled": ("bool", True),
+        "pause_expensive_dashboard_calcs": ("bool", False),
+        "dashboard_analytics_refresh_enabled": ("bool", False),
+        "analytics_refresh_dispatch_enabled": ("bool", False),
+        "dashboard_analytics_stale_alert_enabled": ("bool", False),
+    }
+
+    def setUp(self):
+        self.db = _FakeDb()
+        svc.invalidate_cache()
+
+    def test_databot_pipeline_fields_match_the_databot_contract(self):
+        fields = svc.SETTINGS_SCHEMA["databot_pipeline"]["fields"]
+        self.assertEqual(set(fields), set(self.DATABOT_CONTRACT))
+        for name, (ftype, default) in self.DATABOT_CONTRACT.items():
+            self.assertEqual(fields[name]["type"], ftype, name)
+            self.assertEqual(fields[name]["default"], default, name)
+            # APReferral's own environment says nothing about Databot's switches.
+            self.assertIsNone(fields[name]["env"], name)
+
+    def test_databot_pipeline_renders_under_segmentation_sync_tab(self):
+        for field in svc.SETTINGS_SCHEMA["databot_pipeline"]["fields"]:
+            self.assertEqual(svc.field_category("databot_pipeline", field), "segmentation_sync")
+        for field in svc.SETTINGS_SCHEMA["public_voucher_enforcement"]["fields"]:
+            self.assertEqual(svc.field_category("public_voucher_enforcement", field), "segment_probability")
+
+    def test_defaults_keep_everything_as_today(self):
+        pipeline = svc.get_settings("databot_pipeline", db_ref=self.db)
+        self.assertFalse(pipeline["segment_sync_enabled"])
+        self.assertFalse(pipeline["segment_snapshot_schedule_enabled"])
+        self.assertTrue(pipeline["segment_sync_require_fresh_snapshot"])
+        enforcement = svc.get_settings("public_voucher_enforcement", db_ref=self.db)
+        self.assertTrue(enforcement["multi_account_block_enabled"])
+        self.assertFalse(enforcement["multi_account_block_include_vh"])
+
+    def test_enforcement_env_vars_remain_a_fallback(self):
+        os.environ["PUBLIC_VOUCHER_MULTI_ACCOUNT_BLOCK_ENABLED"] = "false"
+        try:
+            svc.invalidate_cache()
+            self.assertFalse(svc.get_settings("public_voucher_enforcement", db_ref=self.db)["multi_account_block_enabled"])
+            svc.update_settings("public_voucher_enforcement", {"multi_account_block_enabled": True}, db_ref=self.db)
+            self.assertTrue(svc.get_settings("public_voucher_enforcement", db_ref=self.db)["multi_account_block_enabled"])
+        finally:
+            del os.environ["PUBLIC_VOUCHER_MULTI_ACCOUNT_BLOCK_ENABLED"]
+            svc.invalidate_cache()
+
+    def test_save_validates_types_and_bounds_and_is_audited(self):
+        self.assertFalse(svc.update_settings("databot_pipeline", {"segment_sync_enabled": "true"}, db_ref=self.db)["success"])
+        self.assertFalse(svc.update_settings("databot_pipeline", {"segment_sync_scheduled_max_updates": 0}, db_ref=self.db)["success"])
+        self.assertFalse(svc.update_settings("databot_pipeline", {"segment_sync_max_snapshot_age_days": 91}, db_ref=self.db)["success"])
+        ok = svc.update_settings("databot_pipeline", {"segment_sync_enabled": True}, updated_by="admin:1", db_ref=self.db)
+        self.assertTrue(ok["success"])
+        stored = self.db[svc.COLLECTION_NAME].docs["databot_pipeline"]
+        self.assertIs(stored["segment_sync_enabled"], True)
+        self.assertEqual(stored["updated_by"], "admin:1")
+        audit = self.db[svc.AUDIT_COLLECTION_NAME].inserted[-1]
+        self.assertEqual(audit["changes"]["segment_sync_enabled"], {"old": False, "new": True})

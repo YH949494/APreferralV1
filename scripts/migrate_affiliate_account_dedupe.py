@@ -592,7 +592,10 @@ def run(db, *, apply: bool, seed_from_linkage: bool, now_utc: datetime,
                  "legacy_writer_token": {"$exists": False},
                  "legacy_award_inflight": {"$exists": False},
                  "$or": [{"migration_lease_until": {"$exists": False}}, {"migration_lease_until": {"$lt": now_utc}}]},
-                {"$set": {"migration_lease_token": token, "migration_lease_until": now_utc + timedelta(minutes=30)},
+                {"$set": {"migration_lease_token": token,
+                          # Expiry on the real clock: the completion CAS checks liveness against datetime.now(), so a
+                          # caller-supplied (possibly earlier) now_utc must not produce an already-expired lease.
+                          "migration_lease_until": max(now_utc, datetime.now(timezone.utc)) + timedelta(minutes=30)},
                  "$unset": {"seed_completed_at": "", "forward_only_marker": ""}}, return_document=ReturnDocument.AFTER,
             )
             if locked is None:

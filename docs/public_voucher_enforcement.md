@@ -40,7 +40,12 @@ pre-check and the allocation also bypassed it. (Regions with other regional pool
 
 ## Flags (defaults shown; none was changed in any environment)
 
-| Env var | Default | Meaning |
+Both are switches in **Admin Dashboard -> Settings -> Segment Probability -> Multi-Account Public Voucher Block**
+(`app_settings/public_voucher_enforcement`: `multi_account_block_enabled`, `multi_account_block_include_vh`), applied
+within ~45 s, audited, no redeploy. A saved dashboard value wins; the env vars below remain the fallback when nothing
+was saved (standard `settings_service` order: Mongo -> env -> default).
+
+| Env var (fallback) | Default | Meaning |
 |---|---|---|
 | `PUBLIC_VOUCHER_MULTI_ACCOUNT_BLOCK_ENABLED` | `true` | Kill switch for the multi-account hard block. `false` = probability-modifier-only behaviour. The region-bypass fix has no flag (it is a bug fix). |
 | `PUBLIC_VOUCHER_MULTI_ACCOUNT_BLOCK_INCLUDE_VH` | `false` | `true` also hard-blocks behavioral VH + multi-account. |
@@ -50,7 +55,7 @@ pre-check and the allocation also bypassed it. (Regions with other regional pool
 1. Deploy with `PUBLIC_VOUCHER_MULTI_ACCOUNT_BLOCK_ENABLED=false` first if you want to observe the region fix alone: grep
    `[PUBLIC_POOL][PROB_DECISION]` for Malaysia users (previously absent) and `[PUBLIC_POOL][ALLOCATION_GATE_DENY]`.
 2. Remove the override to enable the hard block; expect `multi_account_hard_block_applied=true` assignments only for flagged, non-boosted users.
-3. Rollback: set `PUBLIC_VOUCHER_MULTI_ACCOUNT_BLOCK_ENABLED=false` (no redeploy of code), or revert the PR. Assignment documents written while the block
+3. Rollback: switch the block off in the dashboard (or set `PUBLIC_VOUCHER_MULTI_ACCOUNT_BLOCK_ENABLED=false` while no dashboard value is saved), or revert the PR. Assignment documents written while the block
    was on keep their stored (zero-probability) decision for that drop; they are per-drop and do not affect later drops.
 
 Expect a visible effect: Malaysia users with an empty MY reserve now get the same denial rate as everyone else (VH ~90% denied), and MY users

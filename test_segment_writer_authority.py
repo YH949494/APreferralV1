@@ -176,3 +176,41 @@ class CanonicalEligibilityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LegacyWriterYieldsToCanonicalSyncTests(unittest.TestCase):
+    """Once Settings -> Segmentation & Sync turns the canonical Databot sync on,
+    the scheduled legacy sheet writer must not also write for_bot_segment."""
+
+    def _run(self, stored):
+        import mongomock
+        os.environ.setdefault("MONGO_URL", "mongodb://localhost:27017")
+        os.environ.setdefault("BOT_TOKEN", "123:ABC")
+        os.environ.setdefault("FLASK_SECRET_KEY", "test-secret")
+        if database._db is None:
+            with patch.object(database, "MongoClient", lambda url: mongomock.MongoClient()):
+                import main
+        else:  # pragma: no cover
+            import main
+
+        class _Col:
+            def find_one(self, filt):
+                if stored == "error":
+                    raise RuntimeError("mongo down")
+                return {"_id": "databot_pipeline", "segment_sync_enabled": stored} if stored is not None else None
+
+        calls = []
+        with patch.object(main, "db", {settings_service.COLLECTION_NAME: _Col()}), \
+             patch.object(main, "acquire_scheduler_lock", side_effect=lambda *a, **k: (calls.append("lock"), (False, {}))[1]):
+            main.bot_segment_sheet_sync_scheduled()
+        return calls
+
+    def test_skipped_when_canonical_sync_enabled(self):
+        self.assertEqual(self._run(True), [])
+
+    def test_skipped_when_the_switch_cannot_be_read(self):
+        self.assertEqual(self._run("error"), [])
+
+    def test_runs_as_before_when_canonical_sync_disabled_or_never_saved(self):
+        self.assertEqual(self._run(False), ["lock"])
+        self.assertEqual(self._run(None), ["lock"])
