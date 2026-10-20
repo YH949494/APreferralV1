@@ -750,13 +750,17 @@ def bot_segment_sheet_sync_scheduled() -> None:
     # Single automatic writer of users.for_bot_segment: once the canonical Databot sync is switched on in
     # Settings -> Segmentation & Sync, the legacy sheet writer stands down instead of racing it every Wednesday.
     # (The manual `python bot_segment_sync.py --commit` stays available for deliberate emergency use.)
+    # Read the stored switch directly (uncached): settings_service swallows read errors into the default (off),
+    # and an unknown authority state must never let the legacy writer race the canonical one -- fail closed.
     try:
-        canonical_on = settings_service.get_setting("databot_pipeline", "segment_sync_enabled") is True
+        stored = db[settings_service.COLLECTION_NAME].find_one({"_id": "databot_pipeline"}) or {}
+        canonical_state = "on" if stored.get("segment_sync_enabled") is True else "off"
     except Exception:
-        canonical_on = False
-    if canonical_on:
-        logger.warning("[SEGMENT_WRITER_AUTHORITY] legacy bot_segment_sheet_sync skipped: "
-                       "databot_pipeline.segment_sync_enabled is on (canonical Databot sync owns for_bot_segment)")
+        logger.exception("[SEGMENT_WRITER_AUTHORITY] could not read databot_pipeline.segment_sync_enabled")
+        canonical_state = "unknown"
+    if canonical_state != "off":
+        logger.warning("[SEGMENT_WRITER_AUTHORITY] legacy bot_segment_sheet_sync skipped: canonical Databot sync "
+                       "state=%s (databot_pipeline.segment_sync_enabled)", canonical_state)
         return
     acquired, lock_doc = acquire_scheduler_lock("bot_segment_sheet_sync", ttl_seconds=1800)
     if not acquired:
