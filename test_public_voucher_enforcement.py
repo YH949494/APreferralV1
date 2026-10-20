@@ -438,3 +438,77 @@ def test_affiliate_and_admin_flows_do_not_use_the_public_gate():
         text = (root / name).read_text()
         assert "evaluate_public_pool_gate" not in text
         assert "multi_account_risk_hard_block_applies" not in text
+
+
+# --- Review follow-up: the New Player definition is exactly what it was before this PR -----------------
+
+@pytest.mark.parametrize("label", ["new_user", "new_joiner"])
+@pytest.mark.parametrize("region", ["my", None])
+def test_both_existing_new_player_labels_keep_the_boost_and_the_exception_with_multi_account(env, label, region):
+    env.user(90, segment=label, region=region, multi=True)
+    drop = env.drop(public=1, my=0)
+    env.roll = 0.99
+    assert env.claimability(drop, 90, region=region)["claimable"] is True
+    a = env.assignment(drop, 90)
+    assert a["probability"] == 1.0 and a["probability_source"] == "for_bot_segment_new_user_svd_boost"
+    assert a["multi_account_hard_block_applied"] is False and a["new_user_svd_boost_applied"] is True
+    assert env.claim(drop, 90)["code"].startswith("PUB")
+
+
+def test_player_age_type_new_player_with_high_value_and_multi_account_is_restricted_as_before_the_boost_rule(env):
+    env.user(91, segment="high_value", region="my", age="new_player", multi=True)
+    drop = env.drop(public=1, my=0)
+    env.roll = 0.0
+    state = env.claimability(drop, 91, region="my")
+    assert state["claimable"] is False and state["reason"] == "multi_account_blocked"
+    a = env.assignment(drop, 91)
+    assert a["new_player_override_applied"] is False and a["new_user_svd_boost_applied"] is False
+    assert a["player_age_type_at_assignment"] is None            # not read on the live path, exactly as before the PR
+    # and without the multi-account flag the same user gets exactly the unboosted high_value probability
+    env.user(92, segment="high_value", region="my", age="new_player")
+    drop2 = env.drop(public=1, my=0)
+    env.claimability(drop2, 92, region="my")
+    assert env.assignment(drop2, 92)["probability"] == 0.5
+
+
+def test_new_player_boost_and_vh_probabilities_are_numerically_unchanged(env):
+    expected = {"new_user": 1.0, "new_joiner": 1.0, "voucher_hunter": 0.10, "high_value": 0.5, "ghost": 0.05,
+                "normal_actual": 0.7, "low_value": 0.1, "unclassified": 0.1}
+    for i, (seg, prob) in enumerate(expected.items()):
+        env.user(100 + i, segment=seg, region="my")
+        drop = env.drop(public=1, my=0)
+        env.claimability(drop, 100 + i, region="my")
+        assert env.assignment(drop, 100 + i)["probability"] == prob, seg
+
+
+# --- Review follow-up: true multi-claimant race on one MY voucher -------------------------------------
+
+def test_concurrent_claimants_on_the_last_my_voucher_each_get_the_right_pool_or_denial(env, monkeypatch):
+    """Three users pass the pre-check while one MY voucher is free. Whoever reaches allocation first takes it (the MY pool
+    is not restricted); the others fall through to public, where each is judged by the same gate."""
+    env.user(110, segment="high_value", region="my", multi=True)       # would be blocked on public
+    env.user(111, segment="new_user", region="my")                      # New Player exception
+    env.user(112, segment="voucher_hunter", region="my")               # VH, failing roll
+    drop = env.drop(public=3, my=1)
+    env.roll = VH_FAIL_ROLL
+    assert all(env.claimability(drop, u, region="my")["claimable"] for u in (110, 111, 112))
+    assert env.rolls == 0                                               # nobody was rolled: all were served-from-reserve candidates
+    assert env.claim(drop, 110)["code"] == "MY0"                        # first claimant takes the reserve voucher
+    assert env.claim(drop, 111)["code"].startswith("PUB")               # New Player: boost, passes the public gate
+    with pytest.raises(m.NotEligible):
+        env.claim(drop, 112)                                            # VH, failing roll
+    assert env.free(drop, "my") == 0 and env.free(drop, "public") == 2
+    assert env.assignment(drop, 110) is None                            # the reserve claimant was never gated or rolled
+    assert env.rolls == 1                                               # exactly one roll in total (VH), nothing re-rolled
+
+
+def test_fall_through_rolls_at_most_once_per_user_and_drop(env, monkeypatch):
+    env.user(113, segment="voucher_hunter", region="my")
+    drop = env.drop(public=2, my=1)
+    env.roll = VH_PASS_ROLL
+    assert env.claimability(drop, 113, region="my")["claimable"] is True      # reserve visible -> no roll yet
+    _drain_my_pool_before_first_my_attempt(env, monkeypatch, thief_uid=999)
+    assert env.claim(drop, 113)["code"].startswith("PUB")                      # gate evaluated once at allocation
+    assert env.rolls == 1
+    env.claimability(drop, 113, region="my")                                   # later look-ups reuse the stored decision
+    assert env.rolls == 1

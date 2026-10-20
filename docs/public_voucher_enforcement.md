@@ -55,3 +55,13 @@ pre-check and the allocation also bypassed it. (Regions with other regional pool
 
 Expect a visible effect: Malaysia users with an empty MY reserve now get the same denial rate as everyone else (VH ~90% denied), and MY users
 who previously always reached public inventory will see more `traffic_limited` responses. That is the fix, not a regression.
+
+## Review resolution
+
+* Codex P1 "honour `player_age_type`" -> **intended behaviour, owner-confirmed**: the New Player definition is unchanged (`for_bot_segment`
+  `new_user` / `new_joiner` with fewer than 3 assignments); `player_age_type` is deliberately not an exception. Pinned by
+  `test_player_age_type_new_player_with_high_value_and_multi_account_is_restricted_as_before_the_boost_rule` (Codex's exact scenario),
+  `test_both_existing_new_player_labels_keep_the_boost_and_the_exception_with_multi_account` and
+  `test_new_player_boost_and_vh_probabilities_are_numerically_unchanged`. Before this PR that user had no boost and no block; after it, no boost
+  and the multi-account block applies, exactly like any other existing player.
+* `PUBLIC_VOUCHER_MULTI_ACCOUNT_BLOCK_INCLUDE_VH` stays `false` (VH + multi-account keeps its configured 5-10 % band): intentional for this rollout.
