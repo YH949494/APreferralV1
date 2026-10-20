@@ -3,7 +3,7 @@
 Synthetic mongomock databases only; nothing here touches production.
 """
 from copy import deepcopy
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -870,7 +870,8 @@ def test_reopen_audit_is_serialized_with_activation_by_the_writer_barrier(monkey
     monkeypatch.undo()
     # a writer already holding the barrier makes the audit refuse without writing
     w.db.pending_referrals.update_one({"_id": pid}, {"$set": {"status": "revoked"}})
-    with aq.legacy_writer_guard(w.db, now_utc=NOW) as other:
+    # _reopen takes its lease on the real clock (by design), so the competing writer must be live on it too
+    with aq.legacy_writer_guard(w.db, now_utc=datetime.now(timezone.utc)) as other:
         assert other
         assert audit._reopen(w.db, [row], NOW)["refused"] == "legacy_writer_busy"
     assert w.db.pending_referrals.find_one({"_id": pid})["status"] == "revoked"
@@ -913,7 +914,8 @@ def test_reopen_commit_reports_the_actual_refusal_and_exits_nonzero(monkeypatch,
         "revoked_reason": "insufficient_engagement", "created_at_utc": OLD_JOIN}).inserted_id
     row = {"pending_id": str(pid), "invitee_user_id": 401, "inviter_user_id": 900, "chat_id": -100}
     report = {"eligible_rows": [row]}
-    with aq.legacy_writer_guard(w.db, now_utc=NOW) as other:                   # another legacy writer is active
+    # another legacy writer is active (on the real clock: _commit -> _reopen leases with a fresh timestamp)
+    with aq.legacy_writer_guard(w.db, now_utc=datetime.now(timezone.utc)) as other:
         assert other
         assert audit._commit(w.db, report, NOW) == 2
     err = capsys.readouterr().err
