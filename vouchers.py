@@ -7866,6 +7866,7 @@ def _admin_drop_summary(doc: dict, *, ref=None, skip_expired=False):
         "name": doc.get("name"),
         "type": _normalize_drop_type(doc.get("type", "pooled")),
         "status": status,
+        "availableOps": list(_DROP_OPS_BY_STATE.get(_drop_runtime_state(doc, ref), [])),
         "priority": doc.get("priority", 100),
         "startsAt": starts.isoformat() if starts else None,
         "endsAt": ends.isoformat() if ends else None,
@@ -8981,6 +8982,124 @@ def admin_add_codes(drop_id):
         db.drops.update_one({"_id": drop["_id"]}, {"$inc": {remaining_field: inserted}})
     return jsonify({"status": "ok", "dropId": str(drop["_id"]), "inserted": len(result.inserted_ids)}) 
 
+def _drop_runtime_state(drop: dict, ref=None) -> str:
+    """live | upcoming | paused | ended (| creating) -- the same status rules as
+    _admin_drop_summary, as a single source of truth for lifecycle ops."""
+    ref = ref or now_utc()
+    status = drop.get("status")
+    if drop.get("creation_state"):
+        return "creating"  # hidden while being created (see create_drop_from_spec); no ops apply
+    if status == "paused":
+        return "paused"
+    starts = _as_aware_utc(drop.get("startsAt"))
+    ends = _as_aware_utc(drop.get("endsAt"))
+    if status == "expired" or (ends is not None and ref >= ends):
+        return "ended"
+    if starts is not None and starts <= ref:
+        return "live"
+    return "upcoming"
+
+
+# Which lifecycle buttons make sense in each state (exposed to the dashboard as
+# ``availableOps`` so the UI never offers e.g. Start on a drop that is already live).
+_DROP_OPS_BY_STATE = {
+    "upcoming": ["start_now", "pause", "end_now"],
+    "live": ["pause", "end_now"],
+    "paused": ["resume", "end_now"],
+    "ended": [],
+    "creating": [],
+}
+
+
+def _drop_lifecycle_error(code: str, message: str, status: int = 409, **extra):
+    return jsonify({"status": "error", "code": code, "message": message, **extra}), status
+
+
+def _drop_lifecycle_op(drop: dict, op: str, data: dict):
+    """start_now / pause / resume / end_now.
+
+    The drop's schedule is never changed unless the admin asks for it:
+      * start_now  makes an upcoming/paused drop live now. startsAt moves to now
+                   only if it is still in the future; endsAt is KEPT (it used to be
+                   silently reset to now+24h). A drop whose end has passed needs an
+                   explicit ``endsAt`` (KL local time) -- otherwise 409. A drop that
+                   is already live is refused instead of having its expiry rewritten.
+      * pause      freezes a live/upcoming drop; dates untouched.
+      * resume     the inverse of pause: restores a paused drop to live (or back to
+                   upcoming if its start is still ahead) without touching any date.
+      * end_now    unchanged: ends the drop now.
+    Updates are conditional on the status that was read, so two concurrent admins
+    cannot overwrite each other (second gets 409 drop_changed).
+    Returns a dict of extra response fields, or a (response, status) error tuple.
+    """
+    now = now_utc()
+    state = _drop_runtime_state(drop, now)
+    starts = _as_aware_utc(drop.get("startsAt"))
+    ends = _as_aware_utc(drop.get("endsAt"))
+    # Conditional on everything the decision below was based on, not just status: a
+    # concurrent set_dates changes the schedule without touching status, and must not
+    # be overwritten by (or slip past the checks of) this operation.
+    where = {
+        "_id": drop["_id"],
+        "status": drop.get("status"),
+        "startsAt": drop.get("startsAt"),
+        "endsAt": drop.get("endsAt"),
+    }
+    fields: dict = {}
+
+    if op == "start_now":
+        if state == "live":
+            return _drop_lifecycle_error("already_live", "This drop is already live. Its schedule was not changed.")
+        new_end = ends
+        explicit_end = data.get("endsAt")
+        if explicit_end:
+            try:
+                new_end = parse_kl_local(explicit_end)
+            except (ValueError, TypeError):
+                return _drop_lifecycle_error("bad_end", "endsAt is not a valid date/time.", 400)
+            if new_end <= now:
+                return _drop_lifecycle_error("end_in_past", "endsAt must be in the future.", 400)
+        elif state == "ended" or new_end is None or new_end <= now:
+            return _drop_lifecycle_error(
+                "end_time_passed",
+                "This drop's end time has passed. Choose a new end time to start it again.",
+            )
+        new_start = starts if (starts is not None and starts <= now) else now
+        # Only write the dates this request actually changes.
+        update = {"status": "active"}
+        if starts is None or starts > now:
+            update["startsAt"] = new_start
+        if explicit_end:
+            update["endsAt"] = new_end
+    elif op == "pause":
+        if state == "paused":
+            return {"unchanged": True, "dropStatus": "paused"}
+        if state == "ended":
+            return _drop_lifecycle_error("drop_ended", "This drop has already ended.")
+        update = {"status": "paused"}
+    elif op == "resume":
+        if state != "paused":
+            return _drop_lifecycle_error("not_paused", "Only a paused drop can be resumed.")
+        if ends is not None and now >= ends:
+            return _drop_lifecycle_error("drop_ended", "This drop's end time has passed, so it cannot be resumed.")
+        update = {"status": "active" if (starts is not None and starts <= now) else "upcoming"}
+    else:  # end_now
+        if state == "ended" and drop.get("status") == "expired":
+            return {"unchanged": True, "dropStatus": "expired"}
+        update = {"endsAt": now, "status": "expired"}
+
+    result = db.drops.update_one(where, {"$set": update})
+    if getattr(result, "matched_count", 1) != 1:
+        return _drop_lifecycle_error("drop_changed", "Someone else changed this drop. Refresh and try again.")
+    fields["dropStatus"] = update["status"]
+    if op == "start_now":  # report the effective schedule even where it was left untouched
+        update = {"startsAt": update.get("startsAt", starts), "endsAt": update.get("endsAt", ends), **update}
+    for key in ("startsAt", "endsAt"):
+        if update.get(key) is not None:
+            fields[key] = _as_aware_utc(update[key]).isoformat()
+    return fields
+
+
 @vouchers_bp.route("/admin/drops/<drop_id>/actions", methods=["POST"])
 def admin_drop_actions(drop_id):
     user, err = require_admin()
@@ -9002,10 +9121,11 @@ def admin_drop_actions(drop_id):
         if guard:
             return guard
 
-    if op == "start_now":
-        now = now_utc()
-        db.drops.update_one({"_id": drop["_id"]}, {"$set": {"startsAt": now, "endsAt": now + timedelta(hours=24), "status": "active"}})
-        if _normalize_drop_type(drop.get("type", "pooled")) != PERSONALISED_TYPE_CANONICAL:
+    if op in ("start_now", "pause", "resume", "end_now"):
+        lifecycle = _drop_lifecycle_op(drop, op, data)
+        if isinstance(lifecycle, tuple):
+            return lifecycle
+        if op == "start_now" and _normalize_drop_type(drop.get("type", "pooled")) != PERSONALISED_TYPE_CANONICAL:
             try:
                 _recon = reconcile_pooled_remaining(str(drop["_id"]))
                 _persist_reconciled_pooled_remaining(
@@ -9015,10 +9135,7 @@ def admin_drop_actions(drop_id):
                 )
             except Exception:
                 pass
-    elif op == "pause":
-        db.drops.update_one({"_id": drop["_id"]}, {"$set": {"status": "paused"}})
-    elif op == "end_now":
-        db.drops.update_one({"_id": drop["_id"]}, {"$set": {"endsAt": now_utc(), "status": "expired"}})
+        return jsonify({"status": "ok", **lifecycle})
     elif op == "set_dates":
         starts_str = data.get("startsAt")
         ends_str = data.get("endsAt")
