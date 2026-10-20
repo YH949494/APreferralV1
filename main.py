@@ -747,6 +747,17 @@ def release_scheduler_lock(name: str, lock_doc: dict | None) -> bool:
 
 
 def bot_segment_sheet_sync_scheduled() -> None:
+    # Single automatic writer of users.for_bot_segment: once the canonical Databot sync is switched on in
+    # Settings -> Segmentation & Sync, the legacy sheet writer stands down instead of racing it every Wednesday.
+    # (The manual `python bot_segment_sync.py --commit` stays available for deliberate emergency use.)
+    try:
+        canonical_on = settings_service.get_setting("databot_pipeline", "segment_sync_enabled") is True
+    except Exception:
+        canonical_on = False
+    if canonical_on:
+        logger.warning("[SEGMENT_WRITER_AUTHORITY] legacy bot_segment_sheet_sync skipped: "
+                       "databot_pipeline.segment_sync_enabled is on (canonical Databot sync owns for_bot_segment)")
+        return
     acquired, lock_doc = acquire_scheduler_lock("bot_segment_sheet_sync", ttl_seconds=1800)
     if not acquired:
         logger.info(

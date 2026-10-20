@@ -3745,14 +3745,33 @@ def _env_flag(name: str, default: str) -> bool:
     return str(os.environ.get(name, default)).strip().lower() not in ("0", "false", "no", "off", "")
 
 
+def _public_enforcement_setting(field: str, env_name: str, default: bool) -> bool:
+    """Admin Dashboard value (Settings -> Segment Probability -> Multi-Account
+    Public Voucher Block), which itself falls back to the env var and then the
+    default; the bare env read is only used if the settings service is unusable."""
+    if _get_setting is not None:
+        try:
+            value = _get_setting("public_voucher_enforcement", field)
+            if isinstance(value, bool):
+                return value
+        except Exception:
+            pass
+    return _env_flag(env_name, "true" if default else "false")
+
+
 def multi_account_public_block_enabled() -> bool:
     """Kill switch for the multi-account public-voucher hard block.
 
-    On by default; set PUBLIC_VOUCHER_MULTI_ACCOUNT_BLOCK_ENABLED=false to
-    revert to the probability-modifier-only behaviour
+    On by default; switch it off in the Admin Dashboard (or, as before, set
+    PUBLIC_VOUCHER_MULTI_ACCOUNT_BLOCK_ENABLED=false) to revert to the
+    probability-modifier-only behaviour
     (voucher_risk_eligibility.apply_risk_modifier) without a code change.
     """
-    return _env_flag(MULTI_ACCOUNT_PUBLIC_BLOCK_ENV, "true")
+    return _public_enforcement_setting("multi_account_block_enabled", MULTI_ACCOUNT_PUBLIC_BLOCK_ENV, True)
+
+
+def multi_account_public_block_includes_vh() -> bool:
+    return _public_enforcement_setting("multi_account_block_include_vh", MULTI_ACCOUNT_PUBLIC_BLOCK_INCLUDE_VH_ENV, False)
 
 
 def multi_account_risk_hard_block_applies(
@@ -3768,13 +3787,13 @@ def multi_account_risk_hard_block_applies(
     * Behavioral Voucher Hunters keep their existing admin-configurable
       probability band (apply_risk_modifier: behavioral_and_multi_account_*)
       and are NOT hard-blocked, unless
-      PUBLIC_VOUCHER_MULTI_ACCOUNT_BLOCK_INCLUDE_VH is explicitly enabled.
+      the "include VH" setting (PUBLIC_VOUCHER_MULTI_ACCOUNT_BLOCK_INCLUDE_VH) is enabled.
     """
     if not (multi_account_risk and multi_account_public_block_enabled()):
         return False
     if new_player_exception_applied:
         return False
-    if behavioral_voucher_hunter and not _env_flag(MULTI_ACCOUNT_PUBLIC_BLOCK_INCLUDE_VH_ENV, "false"):
+    if behavioral_voucher_hunter and not multi_account_public_block_includes_vh():
         return False
     return True
 

@@ -206,6 +206,7 @@ test("Settings module tabs each declare exactly one settingsCategory (or none fo
   assert.equal(byLabel["Security"].settingsCategory, "security");
   assert.equal(byLabel["Integrations"].settingsCategory, "integrations");
   assert.equal(byLabel["Segment Probability"].settingsCategory, "segment_probability");
+  assert.equal(byLabel["Segmentation & Sync"].settingsCategory, "segmentation_sync");
 });
 
 test("Rewards tab was removed from Settings (had no backing schema group)", () => {
@@ -424,7 +425,7 @@ test("every real SETTINGS_SCHEMA field has exactly one valid category (python <-
   const validCategories = new Set([
     "general", "feature_flags", "xp", "rewards", "voucher_rules", "referral",
     "affiliate", "welcome_journey", "reactivation", "security", "integrations",
-    "segment_probability",
+    "segment_probability", "segmentation_sync",
   ]);
 
   Object.keys(schema).forEach((group) => {

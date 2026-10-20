@@ -176,3 +176,31 @@ class CanonicalEligibilityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LegacyWriterYieldsToCanonicalSyncTests(unittest.TestCase):
+    """Once Settings -> Segmentation & Sync turns the canonical Databot sync on,
+    the scheduled legacy sheet writer must not also write for_bot_segment."""
+
+    def _run(self, canonical_on):
+        import mongomock
+        os.environ.setdefault("MONGO_URL", "mongodb://localhost:27017")
+        os.environ.setdefault("BOT_TOKEN", "123:ABC")
+        os.environ.setdefault("FLASK_SECRET_KEY", "test-secret")
+        if database._db is None:
+            with patch.object(database, "MongoClient", lambda url: mongomock.MongoClient()):
+                import main
+        else:  # pragma: no cover
+            import main
+        calls = []
+        with patch.object(main.settings_service, "get_setting",
+                          side_effect=lambda g, f, **k: canonical_on if (g, f) == ("databot_pipeline", "segment_sync_enabled") else None), \
+             patch.object(main, "acquire_scheduler_lock", side_effect=lambda *a, **k: (calls.append("lock"), (False, {}))[1]):
+            main.bot_segment_sheet_sync_scheduled()
+        return calls
+
+    def test_skipped_when_canonical_sync_enabled(self):
+        self.assertEqual(self._run(True), [])
+
+    def test_runs_as_before_when_canonical_sync_disabled(self):
+        self.assertEqual(self._run(False), ["lock"])

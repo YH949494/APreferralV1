@@ -99,6 +99,7 @@ SETTINGS_CATEGORIES: list[str] = [
     "security",
     "integrations",
     "segment_probability",
+    "segmentation_sync",
 ]
 
 # ---------------------------------------------------------------------------
@@ -241,6 +242,47 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
             "behavioral_and_multi_account_modifier_pct": {"type": "float", "label": "Behavioral VH + Multi-Account Modifier (%)", "default": 100.0, "env": None, "min": 0, "max": 100},
             "behavioral_and_multi_account_min_pct": {"type": "float", "label": "Behavioral + Multi-Account Min Probability (%)", "default": 5.0, "env": None, "min": 0, "max": 100},
             "behavioral_and_multi_account_max_pct": {"type": "float", "label": "Behavioral + Multi-Account Max Probability (%)", "default": 10.0, "env": None, "min": 0, "max": 100},
+        },
+    },
+    "public_voucher_enforcement": {
+        "label": "Multi-Account Public Voucher Block",
+        "description": (
+            "Hard block on public-pool voucher claims for players carrying multi_account_risk "
+            "(vouchers.multi_account_risk_hard_block_applies). The New Player exception always wins. "
+            "Off = only the probability modifiers above apply. Takes effect within a minute, no redeploy."
+        ),
+        "category": "segment_probability",
+        "fields": {
+            "multi_account_block_enabled": {"type": "bool", "label": "Block Multi-Account Players From Public Vouchers", "default": True, "env": "PUBLIC_VOUCHER_MULTI_ACCOUNT_BLOCK_ENABLED"},
+            "multi_account_block_include_vh": {"type": "bool", "label": "Also Block Behavioral Voucher Hunters With Multi-Account Risk", "default": False, "env": "PUBLIC_VOUCHER_MULTI_ACCOUNT_BLOCK_INCLUDE_VH"},
+        },
+    },
+    # Read by Databot (app/services/runtime_settings.py) from this same document, app_settings/databot_pipeline;
+    # APReferral itself only reads segment_sync_enabled (legacy sheet-sync interlock). Field names and defaults must
+    # match Databot's RuntimeSetting table (asserted by Databot's tests/test_runtime_settings.py). A Databot Fly
+    # secret with the legacy name still WINS over the value saved here; unset it to manage the switch from this page.
+    "databot_pipeline": {
+        "label": "Databot Segmentation Pipeline",
+        "description": (
+            "On/off switches and limits for the Databot -> APReferral segmentation pipeline (weekly snapshot, "
+            "post-UIM recalculation, weekly sync into users.for_bot_segment, freshness alerts). Applied by Databot "
+            "within 30 seconds; no Fly secret or redeploy. A Databot environment variable with the old name "
+            "overrides the value here -- Databot's /api/v1/runtime-settings shows the effective value and its source."
+        ),
+        "category": "segmentation_sync",
+        "fields": {
+            "segment_snapshot_schedule_enabled": {"type": "bool", "label": "Weekly Segment Snapshot (Sun 17:00 UTC)", "default": False, "env": None},
+            "segment_recalc_dispatch_enabled": {"type": "bool", "label": "Recalculate Segments After UIM Commit/Rollback", "default": False, "env": None},
+            "segment_recalc_quiet_minutes": {"type": "float", "label": "Recalculation Coalescing Window (minutes)", "default": 30.0, "env": None, "min": 0, "max": 1440},
+            "segment_sync_enabled": {"type": "bool", "label": "Weekly Sync To APReferral users.for_bot_segment (Wed 08:00 KL)", "default": False, "env": None},
+            "segment_sync_scheduled_max_updates": {"type": "int", "label": "Scheduled Sync Max Updates (abort above)", "default": 2500, "env": None, "min": 1, "max": 1000000},
+            "segment_sync_require_fresh_snapshot": {"type": "bool", "label": "Sync Requires A Verified Fresh Snapshot", "default": True, "env": None},
+            "segment_sync_max_snapshot_age_days": {"type": "int", "label": "Per-User Snapshot Max Age (days)", "default": 21, "env": None, "min": 1, "max": 90},
+            "segment_freshness_alert_enabled": {"type": "bool", "label": "Telegram Alert When Segmentation Is Stale", "default": True, "env": None},
+            "pause_expensive_dashboard_calcs": {"type": "bool", "label": "Emergency Pause: Expensive Databot Dashboard Calculations", "default": False, "env": None},
+            "dashboard_analytics_refresh_enabled": {"type": "bool", "label": "Databot Saved Analytics Refresh", "default": False, "env": None},
+            "analytics_refresh_dispatch_enabled": {"type": "bool", "label": "Dispatch Analytics Refresh After UIM Commit", "default": False, "env": None},
+            "dashboard_analytics_stale_alert_enabled": {"type": "bool", "label": "Telegram Alert When Saved Analytics Are Stale", "default": False, "env": None},
         },
     },
     "referral_config": {

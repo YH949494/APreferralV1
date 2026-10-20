@@ -17,6 +17,7 @@ from bson import ObjectId
 from flask import Flask
 from pymongo.errors import DuplicateKeyError  # noqa: F401  (documents the index contract)
 
+import settings_service
 import vouchers as m
 
 NOW = datetime(2026, 10, 20, 12, 0, tzinfo=timezone.utc)
@@ -48,6 +49,9 @@ class _Env:
         monkeypatch.setattr(m.random, "random", _roll)
         monkeypatch.delenv(m.MULTI_ACCOUNT_PUBLIC_BLOCK_ENV, raising=False)
         monkeypatch.delenv(m.MULTI_ACCOUNT_PUBLIC_BLOCK_INCLUDE_VH_ENV, raising=False)
+        # The switches are read through the (cached) settings service; never let one test's env leak into the next.
+        monkeypatch.setattr(settings_service, "SETTINGS_CACHE_TTL_SECONDS", 0)
+        settings_service.invalidate_cache()
 
     def user(self, uid, *, segment="high_value", region=None, multi=False, age=None, backend=None):
         doc = {"user_id": uid, "for_bot_segment": segment, "multi_account_risk": multi}
@@ -198,6 +202,58 @@ def test_kill_switch_restores_probability_modifier_only(env, monkeypatch):
     assert assignment["multi_account_hard_block_applied"] is False
     assert assignment["probability"] == pytest.approx(0.5 * 0.25)
 
+
+
+# --- The switches are managed from the Admin Dashboard (app_settings) -------
+
+def _dashboard(monkeypatch, **values):
+    real = m._get_setting
+
+    def fake(group, field, **kw):
+        if group == "public_voucher_enforcement" and field in values:
+            return values[field]
+        return real(group, field, **kw)
+
+    monkeypatch.setattr(m, "_get_setting", fake)
+
+
+def test_dashboard_switch_turns_the_block_off_without_any_env(env, monkeypatch):
+    _dashboard(monkeypatch, multi_account_block_enabled=False)
+    env.user(25, segment="high_value", region="my", multi=True)
+    drop = env.drop(public=1, my=0)
+    env.roll = 0.0
+    assert env.claimability(drop, 25, region="my")["claimable"] is True
+    assert env.assignment(drop, 25)["multi_account_hard_block_applied"] is False
+
+
+def test_dashboard_value_wins_over_the_legacy_env_var(env, monkeypatch):
+    monkeypatch.setenv(m.MULTI_ACCOUNT_PUBLIC_BLOCK_ENV, "false")
+    _dashboard(monkeypatch, multi_account_block_enabled=True)
+    env.user(26, segment="high_value", region="my", multi=True)
+    drop = env.drop(public=1, my=0)
+    env.roll = 0.0
+    assert env.claimability(drop, 26, region="my")["reason"] == "multi_account_blocked"
+
+
+def test_dashboard_include_vh_switch(env, monkeypatch):
+    _dashboard(monkeypatch, multi_account_block_include_vh=True)
+    env.user(32, segment="voucher_hunter", region="my", multi=True)
+    drop = env.drop(public=1, my=0)
+    env.roll = 0.0
+    assert env.claimability(drop, 32, region="my")["reason"] == "multi_account_blocked"
+
+
+def test_settings_service_failure_falls_back_to_env_then_default(monkeypatch):
+    def broken(group, field, **kw):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(m, "_get_setting", broken)
+    monkeypatch.delenv(m.MULTI_ACCOUNT_PUBLIC_BLOCK_ENV, raising=False)
+    monkeypatch.delenv(m.MULTI_ACCOUNT_PUBLIC_BLOCK_INCLUDE_VH_ENV, raising=False)
+    assert m.multi_account_public_block_enabled() is True
+    assert m.multi_account_public_block_includes_vh() is False
+    monkeypatch.setenv(m.MULTI_ACCOUNT_PUBLIC_BLOCK_ENV, "false")
+    assert m.multi_account_public_block_enabled() is False
 
 # --- VH + multi-account keeps its configured band (no hard block for VH) ----
 
