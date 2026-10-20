@@ -780,7 +780,7 @@ def run_shadow_segment_engine(
         for doc in docs:
             seg = doc.get("backend_segment", "unclassified")
             summary["segment_distribution"][seg] = summary["segment_distribution"].get(seg, 0) + 1
-            risk = doc.get("claim_risk_level", "normal")
+            risk = doc.get("claim_risk_level") or "unknown"
             summary["claim_risk_distribution"][risk] = summary["claim_risk_distribution"].get(risk, 0) + 1
             comparison = doc.get("uim_comparison")
             if comparison is not None:

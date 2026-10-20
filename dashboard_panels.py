@@ -1742,7 +1742,7 @@ def build_backend_segment_engine_panel(
         seg = doc.get("backend_segment", "unclassified")
         segment_counts[seg] = segment_counts.get(seg, 0) + 1
 
-        risk = doc.get("claim_risk_level", "normal")
+        risk = doc.get("claim_risk_level") or "unknown"
         claim_risk_counts[risk] = claim_risk_counts.get(risk, 0) + 1
 
         age_type = doc.get("player_age_type")
@@ -2270,7 +2270,7 @@ def build_uim_comparison_panel(
     detail_all: list[dict] = []
     for doc in all_docs:
         b_seg   = doc.get("backend_segment") or "unclassified"
-        risk    = doc.get("claim_risk_level") or "normal"
+        risk    = doc.get("claim_risk_level") or "unknown"
         cmp     = doc.get("uim_comparison")
         u_seg   = (cmp.get("uim_segment") if cmp else None) or None
         is_match = bool(cmp.get("match")) if cmp is not None else None
@@ -2639,7 +2639,7 @@ def build_unclassified_audit(
     # --- Claim Risk Breakdown ---
     risk_acc: dict[str, int] = {}
     for doc in docs:
-        risk = doc.get("claim_risk_level") or "normal"
+        risk = doc.get("claim_risk_level") or "unknown"
         risk_acc[risk] = risk_acc.get(risk, 0) + 1
 
     claim_risk_breakdown = sorted(
@@ -3449,7 +3449,7 @@ def build_voucher_hunter_quality_analysis(
         elif age == "old_player":
             a["old_player"] += 1
 
-        risk = doc.get("claim_risk_level") or "normal"
+        risk = doc.get("claim_risk_level") or "unknown"
         a["claim_risk_counts"][risk] = a["claim_risk_counts"].get(risk, 0) + 1
 
     # Build group breakdown sorted by user_count desc
