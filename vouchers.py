@@ -3737,6 +3737,58 @@ def _count_public_pool_assignments_for_user(user_id_int) -> int:
     )
 
 
+MULTI_ACCOUNT_PUBLIC_BLOCK_ENV = "PUBLIC_VOUCHER_MULTI_ACCOUNT_BLOCK_ENABLED"
+MULTI_ACCOUNT_PUBLIC_BLOCK_INCLUDE_VH_ENV = "PUBLIC_VOUCHER_MULTI_ACCOUNT_BLOCK_INCLUDE_VH"
+
+
+def _env_flag(name: str, default: str) -> bool:
+    return str(os.environ.get(name, default)).strip().lower() not in ("0", "false", "no", "off", "")
+
+
+def multi_account_public_block_enabled() -> bool:
+    """Kill switch for the multi-account public-voucher hard block.
+
+    On by default; set PUBLIC_VOUCHER_MULTI_ACCOUNT_BLOCK_ENABLED=false to
+    revert to the probability-modifier-only behaviour
+    (voucher_risk_eligibility.apply_risk_modifier) without a code change.
+    """
+    return _env_flag(MULTI_ACCOUNT_PUBLIC_BLOCK_ENV, "true")
+
+
+def multi_account_risk_hard_block_applies(
+    multi_account_risk: bool,
+    new_player_exception_applied: bool,
+    behavioral_voucher_hunter: bool = False,
+) -> bool:
+    """True when a public-pool claim must be refused for multi-account risk.
+
+    * The New Player exception (new_player override or the legacy new_user SVD
+      boost -- i.e. ``boost_applied`` in assign_public_pool_access_once)
+      always wins and is never blocked here.
+    * Behavioral Voucher Hunters keep their existing admin-configurable
+      probability band (apply_risk_modifier: behavioral_and_multi_account_*)
+      and are NOT hard-blocked, unless
+      PUBLIC_VOUCHER_MULTI_ACCOUNT_BLOCK_INCLUDE_VH is explicitly enabled.
+    """
+    if not (multi_account_risk and multi_account_public_block_enabled()):
+        return False
+    if new_player_exception_applied:
+        return False
+    if behavioral_voucher_hunter and not _env_flag(MULTI_ACCOUNT_PUBLIC_BLOCK_INCLUDE_VH_ENV, "false"):
+        return False
+    return True
+
+
+def _assignment_is_behavioral_voucher_hunter(assignment: dict) -> bool:
+    """Re-derive, from a stored assignment, the same behavioral-VH decision
+    assign_public_pool_access_once made when it rolled (backend segment when it
+    drove the base probability, else for_bot_segment)."""
+    backend_seg = assignment.get("backend_segment_at_assignment")
+    if backend_seg and backend_seg in SEGMENT_PROBABILITY_CONFIG:
+        return backend_seg == "voucher_hunter"
+    return assignment.get("for_bot_segment_normalized") == "voucher_hunter"
+
+
 def _load_user_bot_segment(user_id_int) -> tuple[str | None, str, float, bool, bool]:
     try:
         user_doc = (
@@ -3836,6 +3888,7 @@ def assign_public_pool_access_once(
     risk_category = "none"
     risk_modifier = 1.0
     base_probability_pre_risk = None
+    multi_account_hard_block_applied = False
 
     if boost_applied:
         probability = 1.0
@@ -3881,6 +3934,18 @@ def assign_public_pool_access_once(
         risk_modifier = risk_result["risk_modifier"]
         if risk_category != "none":
             probability_source = f"{probability_source}+risk:{risk_category}"
+        # Hard restriction for multi-account-risk players OUTSIDE the New
+        # Player exception (this is the `else` of `boost_applied`, so the
+        # exception keeps its existing absolute priority) and outside the
+        # behavioral-VH band, which keeps its configured probability. The
+        # segment base probability and the configurable risk modifiers above
+        # are left untouched; this only caps the final result at zero.
+        if multi_account_risk_hard_block_applies(
+            multi_account_risk, boost_applied, behavioral_voucher_hunter
+        ):
+            multi_account_hard_block_applied = True
+            probability = 0.0
+            probability_source = f"{probability_source}+multi_account_hard_block"
         delay_seconds = 0 if probability >= 1.0 else random.randint(15, 45)
 
     if fallback:
@@ -3944,6 +4009,7 @@ def assign_public_pool_access_once(
         "risk_category": risk_category,
         "risk_modifier": risk_modifier,
         "base_probability_pre_risk": base_probability_pre_risk,
+        "multi_account_hard_block_applied": multi_account_hard_block_applied,
         "legacy_public_pool_segment": audit_segment,
         "access_allowed": bool(access_allowed),
         "eligible_after": eligible_after,
@@ -4002,6 +4068,51 @@ def check_public_pool_access(user_id: int | str, public_pool_id: str, drop_open_
         "segment": segment,
         "assignment": assignment,
     }
+
+
+def evaluate_public_pool_gate(*, drop: dict, drop_id: str, uid: int, ref: datetime) -> dict:
+    """Single public-pool eligibility decision, shared by the claimability
+    pre-check and the allocation point (claim_pooled).
+
+    Region-independent: a Malaysia user is gated by exactly the same
+    probability shaping and multi-account restriction as everyone else the
+    moment their claim can reach the public pool. Returns
+    ``{"allowed": bool, "reason": "ok"|"shaping_denied"|"shaping_too_early"|
+    "multi_account_blocked"}``.
+
+    The probability roll is persisted once per (user, drop) by
+    assign_public_pool_access_once, so calling this twice for one claim (pre-
+    check, then allocation) never re-rolls. The multi-account restriction is
+    additionally re-read live from ``users.multi_account_risk`` each call, so
+    a flag set after the assignment was stored still blocks; the New Player
+    exception is read from the stored assignment (``new_user_svd_boost_applied``)
+    and is therefore never overridden.
+    """
+    starts_at = _as_aware_utc(drop.get("startsAt")) or ref
+    elig_mode = str((drop.get("eligibility") or {}).get("mode") or "public").strip().lower()
+    access_result = check_public_pool_access(
+        user_id=uid,
+        public_pool_id=str(drop_id),
+        drop_open_time=starts_at,
+        now=ref,
+        eligibility_mode=elig_mode,
+    )
+    assignment = access_result.get("assignment") or {}
+    if assignment.get("multi_account_hard_block_applied"):
+        return {"allowed": False, "reason": "multi_account_blocked"}
+    if not assignment.get("access_allowed"):
+        return {"allowed": False, "reason": "shaping_denied"}
+    if multi_account_public_block_enabled() and not assignment.get("new_user_svd_boost_applied"):
+        _, _, _, _, live_multi_account_risk = _load_user_bot_segment(uid)
+        if multi_account_risk_hard_block_applies(
+            live_multi_account_risk,
+            bool(assignment.get("new_user_svd_boost_applied")),
+            _assignment_is_behavioral_voucher_hunter(assignment),
+        ):
+            return {"allowed": False, "reason": "multi_account_blocked"}
+    if access_result.get("status") == "too_early":
+        return {"allowed": False, "reason": "shaping_too_early"}
+    return {"allowed": True, "reason": "ok"}
 
 
 def update_public_pool_claim_state_on_success(user_id: int | str, claimed_at: datetime | None = None) -> None:
@@ -4902,21 +5013,23 @@ def _pooled_claimability_state(*, drop: dict, drop_id: str, user_region: str | N
     if claimable_count <= 0:
         return {"claimable": False, "sold_out": True, "remaining": 0, "reason": "pool_empty"}
 
-    if _is_probability_shaped_pooled_drop(drop) and pools == ["public"] and uid is not None:
-        starts_at = _as_aware_utc(drop.get("startsAt")) or ref
-        elig_mode = str((drop.get("eligibility") or {}).get("mode") or "public").strip().lower()
-        access_result = check_public_pool_access(
-            user_id=uid,
-            public_pool_id=str(drop_id),
-            drop_open_time=starts_at,
-            now=ref,
-            eligibility_mode=elig_mode,
-        )
-        assignment = access_result.get("assignment") or {}
-        if not assignment.get("access_allowed"):
-            return {"claimable": False, "sold_out": False, "remaining": 0, "reason": "shaping_denied"}
-        if access_result.get("status") == "too_early":
-            return {"claimable": False, "sold_out": False, "remaining": 0, "reason": "shaping_too_early"}
+    # The public gate applies whenever this claim can be served from the public
+    # pool. A user with a dedicated regional pool (e.g. Malaysia ["my","public"])
+    # that still has free inventory is served from it first and is not rolled
+    # here; once that pool is empty the claim falls through to public and the
+    # same gate applies. (Previously `pools == ["public"]` skipped the gate for
+    # every user with a regional pool, even after it was depleted.) The
+    # allocation point re-checks this -- see claim_pooled(public_gate=...).
+    served_from_regional_pool = my_free > 0
+    if (
+        _is_probability_shaped_pooled_drop(drop)
+        and "public" in pools
+        and not served_from_regional_pool
+        and uid is not None
+    ):
+        gate = evaluate_public_pool_gate(drop=drop, drop_id=drop_id, uid=uid, ref=ref)
+        if not gate["allowed"]:
+            return {"claimable": False, "sold_out": False, "remaining": 0, "reason": gate["reason"]}
 
     if (
         "public" in pools
@@ -5435,7 +5548,18 @@ def claim_pooled(
     pools: list[str] | None = None,
     retained_3d: bool = False,
     is_my_user: bool = False,
+    public_gate=None,
 ):
+    """Claim one pooled voucher, trying ``pools`` in order.
+
+    ``public_gate`` (optional zero-arg callable returning the dict from
+    evaluate_public_pool_gate) is the allocation-point enforcement of public
+    eligibility: it runs immediately before any attempt on the *public* pool,
+    for every region. A regional (e.g. MY) pool is attempted without it, so
+    vouchers allocated from the dedicated reserve are unrestricted; if that
+    pool is empty or is drained by a concurrent claim, the fall-through to
+    public is gated here rather than relying on the earlier pre-check.
+    """
     drop_id_variants = _drop_id_variants(drop_id)
     drop_obj_id = _coerce_id(drop_id)
 
@@ -5453,7 +5577,8 @@ def claim_pooled(
 
     pool_order = pools or ["public"]
     reconciled = False
- 
+    gate_denied_reason = None
+
     for pool in pool_order:
         if pool == "my":
             remaining_field = "my_remaining"
@@ -5461,6 +5586,20 @@ def claim_pooled(
             remaining_field = "public_remaining"
         else:
             continue
+
+        if pool == "public" and public_gate is not None:
+            gate = public_gate()
+            if not gate.get("allowed"):
+                gate_denied_reason = gate.get("reason") or "shaping_denied"
+                _safe_log(
+                    "info",
+                    "[PUBLIC_POOL][ALLOCATION_GATE_DENY] drop=%s uid_key=%s reason=%s pools=%s",
+                    drop_id,
+                    claim_key,
+                    gate_denied_reason,
+                    pool_order,
+                )
+                continue
 
         reserve_target = 0
         reserve_limited = False
@@ -5664,6 +5803,10 @@ def claim_pooled(
             )
         return {"ok": True, "code": doc["code"], "claimedAt": _isoformat_kl(doc.get("claimedAt"))}
 
+    if gate_denied_reason:
+        # Nothing was allocated and the public pool was refused by the gate:
+        # report an eligibility denial, not "sold out".
+        return {"ok": False, "err": "not_eligible", "reason": gate_denied_reason}
     return {"ok": False, "err": "sold_out"}
 
 
@@ -6266,12 +6409,25 @@ def claim_voucher_for_user(*, user_id: str, drop_id: str, username: str) -> dict
         retained_7d,
         is_my_user,
     )
-    res = claim_pooled(drop_id=drop_id, claim_key=claim_key, ref=ref, pools=pools, retained_3d=retained_3d, is_my_user=is_my_user)
+    public_gate = None
+    if uid_int is not None and _is_probability_shaped_pooled_drop(drop):
+        def public_gate():
+            return evaluate_public_pool_gate(drop=drop, drop_id=str(drop_id), uid=uid_int, ref=ref)
+
+    res = claim_pooled(
+        drop_id=drop_id,
+        claim_key=claim_key,
+        ref=ref,
+        pools=pools,
+        retained_3d=retained_3d,
+        is_my_user=is_my_user,
+        public_gate=public_gate,
+    )
     if res.get("ok"):
         return {"code": res["code"], "claimedAt": res["claimedAt"]}
     if res.get("err") == "sold_out":
         raise NoCodesLeft("sold_out")
-    raise NotEligible("not_eligible")
+    raise NotEligible(res.get("reason") or "not_eligible")
 
 
 @vouchers_bp.route("/vouchers/claim", methods=["POST"])
@@ -6647,7 +6803,7 @@ def api_claim():
             return jsonify(payload), 410     
         if not claimability.get("claimable"):
             claim_reason = str(claimability.get("reason") or "").strip().lower()
-            if claim_reason in ("shaping_denied", "shaping_too_early"):
+            if claim_reason in ("shaping_denied", "shaping_too_early", "multi_account_blocked"):
                 payload = {
                     "status": "error",
                     "code": "rate_limited",
