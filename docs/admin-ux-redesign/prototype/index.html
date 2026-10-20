@@ -1,0 +1,1092 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Admin Redesign Prototype</title>
+<meta name="robots" content="noindex, nofollow">
+<style>
+/* Layout concept: left task navigation (8 destinations), a persistent "what do you want to do" bar and search,
+   one working canvas. Staged flows keep a review step; consequence decides how strict each confirmation is. */
+:root {
+  --bg: #f4f5f7; --panel: #ffffff; --panel-2: #eef0f3; --ink: #14181f; --ink-2: #4a5361; --line: #dde1e7;
+  --brand: #2557d6; --brand-ink: #ffffff; --brand-soft: #e6edfc;
+  --ok: #1a7f4b; --ok-soft: #e3f4ea; --warn: #9a5b00; --warn-soft: #fdf0d9; --bad: #b42d26; --bad-soft: #fbe6e4;
+  --live: #c0322b; --shadow: 0 1px 2px rgba(20,24,31,.06), 0 8px 24px rgba(20,24,31,.08);
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #0f1216; --panel: #171b21; --panel-2: #1e242c; --ink: #e8ebf0; --ink-2: #a3adbb; --line: #2a313b;
+  --brand: #6f97ff; --brand-ink: #0b1020; --brand-soft: #1c2a4d;
+  --ok: #4cc38a; --ok-soft: #12301f; --warn: #f0b24a; --warn-soft: #3a2b0e; --bad: #ff8a80; --bad-soft: #3d1a18;
+  --live: #ff7b72; --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35); color-scheme: dark; } }
+:root[data-theme="dark"] {
+  --bg: #0f1216; --panel: #171b21; --panel-2: #1e242c; --ink: #e8ebf0; --ink-2: #a3adbb; --line: #2a313b;
+  --brand: #6f97ff; --brand-ink: #0b1020; --brand-soft: #1c2a4d;
+  --ok: #4cc38a; --ok-soft: #12301f; --warn: #f0b24a; --warn-soft: #3a2b0e; --bad: #ff8a80; --bad-soft: #3d1a18;
+  --live: #ff7b72; --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35); color-scheme: dark; }
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { background: var(--bg); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  margin: 0; }
+h1 { font-size: 22px; line-height: 1.2; margin: 0; text-wrap: balance; }
+h2 { font-size: 16px; margin: 0 0 4px; text-wrap: balance; }
+h3 { font-size: 13px; margin: 0; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-2); }
+p { margin: 0; }
+button, input, select, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; }
+:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+.shell { display: grid; grid-template-columns: 232px minmax(0, 1fr); min-height: 100vh; }
+.side { background: var(--panel); border-right: 1px solid var(--line); padding: 16px 12px; position: sticky; top: 0; height: 100vh; overflow-y: auto; }
+.brand { font-weight: 700; padding: 4px 10px 14px; font-size: 15px; }
+.brand small { display: block; font-weight: 400; color: var(--ink-2); font-size: 12px; }
+.nav { display: flex; flex-direction: column; gap: 2px; }
+.nav button { text-align: left; background: none; border: 0; border-radius: 8px; padding: 9px 10px; display: flex; gap: 10px; align-items: center; color: var(--ink-2); font-weight: 500; }
+.nav button:hover { background: var(--panel-2); color: var(--ink); }
+.nav button[aria-current="page"] { background: var(--brand-soft); color: var(--brand); font-weight: 650; }
+.nav svg { width: 18px; height: 18px; flex: none; }
+.mainwrap { min-width: 0; display: flex; flex-direction: column; }
+.proto-banner { background: var(--warn-soft); color: var(--warn); border-bottom: 1px solid var(--line); padding: 8px max(16px, env(safe-area-inset-right, 0px)) 8px 24px; font-size: 12.5px; }
+.top { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; padding: 14px max(16px, env(safe-area-inset-right, 0px)) 14px 24px; background: var(--panel); border-bottom: 1px solid var(--line); }
+.search { position: relative; flex: 1 1 260px; min-width: 0; max-width: 420px; }
+.search input { width: 100%; padding: 9px 12px 9px 34px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
+.search svg { position: absolute; left: 10px; top: 10px; width: 16px; height: 16px; color: var(--ink-2); }
+.search .hint { position: absolute; top: 100%; left: 0; right: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; margin-top: 4px; padding: 8px 12px; box-shadow: var(--shadow); z-index: 5; font-size: 13px; }
+.quick { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.quick-label { color: var(--ink-2); font-size: 12.5px; }
+main { padding: 24px max(16px, env(safe-area-inset-right, 0px)) 80px 24px; min-width: 0; }
+.page-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-end; gap: 12px; margin-bottom: 16px; }
+.page-head p { color: var(--ink-2); margin-top: 4px; max-width: 70ch; }
+.subnav { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 16px; }
+.btn { border: 1px solid var(--line); background: var(--panel); border-radius: 8px; padding: 8px 14px; font-weight: 550; }
+.btn:hover { background: var(--panel-2); }
+.btn.primary { background: var(--brand); color: var(--brand-ink); border-color: var(--brand); }
+.btn.primary:hover { filter: brightness(1.08); }
+.btn.danger { background: var(--bad); color: #fff; border-color: var(--bad); }
+.btn.small { padding: 4px 10px; font-size: 13px; }
+.btn.ghost { background: transparent; }
+.btn[disabled] { opacity: .45; cursor: not-allowed; filter: none; }
+.chip { border: 1px solid var(--line); background: var(--panel); border-radius: 999px; padding: 6px 12px; font-weight: 550; font-size: 13px; }
+.chip[aria-pressed="true"], .chip.on { background: var(--brand-soft); border-color: var(--brand); color: var(--brand); }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; min-width: 0; }
+.card + .card { margin-top: 16px; }
+.grid > .card + .card, .split > .card + .card { margin-top: 0; }
+.grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); }
+.tile { text-align: left; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; display: flex; gap: 12px; align-items: flex-start; }
+.tile:hover { border-color: var(--brand); }
+.tile .num { font-size: 28px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; min-width: 2ch; }
+.tile .txt { min-width: 0; }
+.tile .txt b { display: block; }
+.tile .txt span { color: var(--ink-2); font-size: 13px; }
+.tile .go { margin-top: 8px; color: var(--brand); font-weight: 600; font-size: 13px; }
+.tile.sev-red { border-left: 4px solid var(--bad); } .tile.sev-amber { border-left: 4px solid var(--warn); } .tile.sev-info { border-left: 4px solid var(--brand); }
+.pill { display: inline-flex; align-items: center; gap: 5px; border-radius: 999px; padding: 2px 9px; font-size: 12px; font-weight: 650; white-space: nowrap; background: var(--panel-2); color: var(--ink-2); }
+.pill.live { background: var(--bad-soft); color: var(--live); } .pill.scheduled { background: var(--brand-soft); color: var(--brand); }
+.pill.paused, .pill.waiting { background: var(--warn-soft); color: var(--warn); } .pill.ok { background: var(--ok-soft); color: var(--ok); }
+.pill.bad { background: var(--bad-soft); color: var(--bad); }
+.tablewrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+th { text-align: left; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--ink-2); padding: 8px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+td { padding: 10px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+tr:last-child td { border-bottom: 0; }
+.field { display: grid; gap: 4px; margin-bottom: 14px; max-width: 640px; }
+.field > label, .field > .lbl { font-weight: 650; }
+.field .help { color: var(--ink-2); font-size: 12.5px; }
+.field .err { color: var(--bad); font-size: 12.5px; font-weight: 550; }
+.field input[type=text], .field input[type=number], .field input[type=datetime-local], .field select, .field textarea { width: 100%; padding: 9px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+.field textarea { font-family: var(--mono); font-size: 13px; min-height: 130px; resize: vertical; }
+.field.bad input, .field.bad textarea, .field.bad select { border-color: var(--bad); }
+.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.split { display: grid; gap: 16px; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); align-items: start; }
+.stages { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; font-size: 13px; }
+.stages span { padding: 4px 12px; border-radius: 999px; background: var(--panel-2); color: var(--ink-2); font-weight: 600; }
+.stages span.on { background: var(--brand); color: var(--brand-ink); } .stages span.done { background: var(--ok-soft); color: var(--ok); }
+.notice { border-radius: 8px; padding: 10px 12px; font-size: 13.5px; margin: 10px 0; display: flex; gap: 8px; }
+.notice.ok { background: var(--ok-soft); color: var(--ok); } .notice.warn { background: var(--warn-soft); color: var(--warn); }
+.notice.bad { background: var(--bad-soft); color: var(--bad); } .notice.info { background: var(--brand-soft); color: var(--brand); }
+.notice ul { margin: 4px 0 0 18px; padding: 0; }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; }
+.kv dt { color: var(--ink-2); } .kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.mono { font-family: var(--mono); font-size: 12.5px; }
+.muted { color: var(--ink-2); }
+.bar { height: 8px; background: var(--panel-2); border-radius: 99px; overflow: hidden; }
+.bar > i { display: block; height: 100%; background: var(--ok); }
+.bar.low > i { background: var(--bad); }
+.menu { position: relative; display: inline-block; }
+.menu-pop { position: absolute; right: 0; top: 100%; z-index: 6; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow); min-width: 190px; padding: 4px; }
+.menu-pop button { display: block; width: 100%; text-align: left; background: none; border: 0; padding: 8px 10px; border-radius: 6px; }
+.menu-pop button:hover { background: var(--panel-2); }
+.menu-pop button.dng { color: var(--bad); }
+.cardgrid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
+.pick { text-align: left; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; display: grid; gap: 4px; }
+.pick:hover, .pick[aria-pressed="true"] { border-color: var(--brand); background: var(--brand-soft); }
+.pick span { color: var(--ink-2); font-size: 13px; }
+.modal-bg { position: fixed; inset: 0; background: rgba(8,10,14,.55); display: grid; place-items: center; padding: 16px; z-index: 50; }
+.modal { background: var(--panel); border-radius: 12px; max-width: 520px; width: 100%; padding: 20px; box-shadow: var(--shadow); max-height: 90vh; overflow-y: auto; }
+.modal h2 { font-size: 18px; margin-bottom: 8px; }
+.modal ul { margin: 8px 0 8px 18px; padding: 0; }
+.modal .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; flex-wrap: wrap; }
+.toasts { position: fixed; left: 0; right: 0; bottom: max(16px, env(safe-area-inset-bottom, 0px)); display: grid; justify-items: center; gap: 8px; pointer-events: none; z-index: 60; padding: 0 16px; }
+.toast { pointer-events: auto; background: var(--ink); color: var(--bg); border-radius: 10px; padding: 10px 14px; display: flex; gap: 12px; align-items: center; box-shadow: var(--shadow); max-width: 560px; }
+.toast button { background: none; border: 0; color: var(--brand); font-weight: 700; filter: brightness(1.3); }
+.demo-btn { position: fixed; right: max(16px, env(safe-area-inset-right, 0px)); bottom: max(16px, env(safe-area-inset-bottom, 0px)); z-index: 40; box-shadow: var(--shadow); }
+.demo-panel { position: fixed; right: max(16px, env(safe-area-inset-right, 0px)); bottom: calc(max(16px, env(safe-area-inset-bottom, 0px)) + 48px); z-index: 40; width: min(340px, calc(100vw - 32px)); background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px; box-shadow: var(--shadow); }
+.demo-panel label { display: flex; gap: 8px; align-items: flex-start; margin: 8px 0; font-size: 13px; }
+pre.req { background: var(--panel-2); border-radius: 8px; padding: 10px; overflow-x: auto; font-size: 12px; margin: 8px 0 0; }
+details > summary { cursor: pointer; font-weight: 600; color: var(--ink-2); margin: 8px 0; }
+.stub { border: 1px dashed var(--line); border-radius: 10px; padding: 16px; }
+.stub li { margin: 3px 0; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+@media (max-width: 860px) {
+  .shell { grid-template-columns: minmax(0, 1fr); }
+  .side { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--line); padding: 8px 12px; }
+  .brand { padding: 0 4px 6px; }
+  .nav { flex-direction: row; overflow-x: auto; gap: 4px; padding-bottom: 4px; }
+  .nav button { white-space: nowrap; }
+  .split { grid-template-columns: minmax(0, 1fr); }
+  main, .top, .proto-banner { padding-left: max(16px, env(safe-area-inset-left, 0px)); }
+}
+@media (prefers-reduced-motion: no-preference) { .toast { animation: rise .15s ease-out; } @keyframes rise { from { transform: translateY(8px); opacity: 0; } } }
+</style>
+
+<div class="shell">
+  <aside class="side">
+    <div class="brand">Admin <small>Redesign prototype</small></div>
+    <nav class="nav" id="nav" aria-label="Main"></nav>
+  </aside>
+  <div class="mainwrap">
+    <div class="proto-banner"><b>Prototype.</b> Mock data only. Nothing is sent anywhere; reloading resets everything. Open <b>Demo controls</b> (bottom right) to trigger error states.</div>
+    <header class="top">
+      <div class="search">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+        <input id="gsearch" type="text" placeholder="Find a player or affiliate: @username or ID" autocomplete="off" aria-label="Find a player or affiliate">
+        <div class="hint" id="ghint" hidden></div>
+      </div>
+      <div class="quick" id="quick"><span class="quick-label">What do you want to do?</span></div>
+    </header>
+    <main id="main" tabindex="-1"></main>
+  </div>
+</div>
+<div id="modal-root"></div>
+<div class="toasts" id="toasts" aria-live="polite"></div>
+<button class="btn demo-btn" id="demo-btn" aria-expanded="false" aria-controls="demo-panel">Demo controls</button>
+<div class="demo-panel" id="demo-panel" hidden>
+  <h2>Trigger a state</h2>
+  <p class="muted">These simulate what the server can answer. They are not part of the design.</p>
+  <label><input type="checkbox" id="d-check" checked> Duplicate pre-check endpoint exists (roadmap item A-1)</label>
+  <label><input type="checkbox" id="d-fail"> Make the next save fail (network error)</label>
+  <label><input type="checkbox" id="d-sess"> Session expired on the next save</label>
+  <label><input type="checkbox" id="d-other"> A colleague already handled the next reward</label>
+  <label><input type="checkbox" id="d-cool"> XP cooldown is active</label>
+  <button class="btn small" id="d-reset">Reset all mock data</button>
+</div>
+
+<script>
+"use strict";
+/* ---------- helpers ---------- */
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
+const esc = v => String(v == null ? "" : v).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const el = html => { const t = document.createElement("template"); t.innerHTML = html.trim(); return t.content.firstElementChild; };
+const delay = ms => new Promise(r => setTimeout(r, ms));
+const pad = n => String(n).padStart(2, "0");
+const fmt = n => Number(n).toLocaleString("en-US");
+const plural = (n, a, b) => n === 1 ? a : (b || a + "s");
+
+/* ---------- Malaysia-time helpers (fixed UTC+8, same as the app) ---------- */
+const KL = 8 * 3600e3;
+const klParts = d => { const k = new Date(d.getTime() + KL); return { y: k.getUTCFullYear(), m: k.getUTCMonth(), d: k.getUTCDate(), h: k.getUTCHours(), mi: k.getUTCMinutes() }; };
+const klWall = (y, m, d, h, mi) => new Date(Date.UTC(y, m, d, h, mi) - KL);
+const fmtKL = d => d.toLocaleString("en-GB", { timeZone: "Asia/Kuala_Lumpur", weekday: "short", day: "numeric", month: "short", hour: "numeric", minute: "2-digit", hour12: true }) + " (Malaysia time)";
+const klString = d => { const p = klParts(d); return `${p.y}-${pad(p.m + 1)}-${pad(p.d)} ${pad(p.h)}:${pad(p.mi)}:00`; };
+function presets() {
+  const now = new Date(), p = klParts(now);
+  let tonight = klWall(p.y, p.m, p.d, 20, 0); if (tonight <= now) tonight = klWall(p.y, p.m, p.d + 1, 20, 0);
+  return { now, tonight, tomorrow: klWall(p.y, p.m, p.d + 1, 9, 0) };
+}
+const monthLabel = ym => { const [y, m] = ym.split("-").map(Number); return new Date(Date.UTC(y, m - 1, 1)).toLocaleString("en-GB", { month: "long", year: "numeric", timeZone: "UTC" }); };
+function monthChoices() { const p = klParts(new Date()); return [-1, 0, 1].map(o => { const d = new Date(Date.UTC(p.y, p.m + o, 1)); return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}`; }); }
+
+/* ---------- the three real code-parsing rules (ported from the backend) ---------- */
+// vouchers.py _normalize_codes: per line, trim, strip leading/trailing commas, silent dedupe
+function parseDrop(text) {
+  const seen = new Set(), usable = [], repeated = []; const invalid = [];
+  String(text || "").split(/\r?\n/).forEach(raw => {
+    const c = raw.trim().replace(/^,+/, "").replace(/,+$/, "").trim(); if (!c) return;
+    if (seen.has(c)) { repeated.push(c); return; } seen.add(c); usable.push(c);
+  });
+  return { usable, repeated, invalid, rule: "Each line is one code. Spaces and stray commas at the ends are removed. Repeats are merged." };
+}
+// affiliate_voucher_batches.normalize_voucher_codes: split on newline AND comma, internal whitespace = invalid
+function parseBatch(text) {
+  const seen = new Set(), usable = [], repeated = [], invalid = [];
+  String(text || "").split(/[\r\n,]+/).forEach(raw => {
+    const c = raw.trim(); if (!c) return;
+    if (/\s/.test(c)) { invalid.push(c); return; }
+    if (seen.has(c)) { repeated.push(c); return; } seen.add(c); usable.push(c);
+  });
+  return { usable, repeated, invalid, rule: "Codes can be on separate lines or separated by commas. A code that contains a space is rejected." };
+}
+// reward pools / legacy pool upload: per line, trim; codes already stored are skipped by the database
+function parseTrim(text) {
+  const seen = new Set(), usable = [], repeated = [];
+  String(text || "").split(/\r?\n/).forEach(raw => { const c = raw.trim(); if (!c) return; if (seen.has(c)) { repeated.push(c); return; } seen.add(c); usable.push(c); });
+  return { usable, repeated, invalid: [], rule: "Each line is one code. Codes already stored are skipped." };
+}
+
+/* ---------- mock data ---------- */
+let S;
+const EXISTING_CODES = new Set(["WKND-0007", "WKND-0008", "OLD-1234", "AFF10-0001", "AFF10-0002", "SPIN-0001"]);
+function freshState() {
+  const pr = presets();
+  return {
+    view: "home", sub: "main",
+    demo: { check: true, fail: false, sess: false, other: false, cool: false },
+    drops: [
+      { id: "d1", name: "Weekend Surprise", status: "live", type: "pooled", total: 480, left: 312, starts: new Date(pr.now.getTime() - 5 * 3600e3), ends: new Date(pr.now.getTime() + 19 * 3600e3) },
+      { id: "d2", name: "Welcome Voucher", status: "live", type: "pooled", total: 600, left: 4, starts: new Date(pr.now.getTime() - 9 * 86400e3), ends: new Date(pr.now.getTime() + 21 * 86400e3) },
+      { id: "d3", name: "VIP October Boost", status: "scheduled", type: "pooled", total: 150, left: 150, starts: pr.tomorrow, ends: new Date(pr.tomorrow.getTime() + 24 * 3600e3) },
+      { id: "d4", name: "Friday Flash", status: "paused", type: "pooled", total: 200, left: 120, starts: new Date(pr.now.getTime() - 2 * 86400e3), ends: new Date(pr.now.getTime() + 86400e3) },
+      { id: "d5", name: "Personal thank-you codes", status: "live", type: "personalised", total: 40, left: 22, starts: new Date(pr.now.getTime() - 86400e3), ends: new Date(pr.now.getTime() + 6 * 86400e3) },
+    ],
+    stock: { AFFILIATE_5: 142, AFFILIATE_10: 8, AFFILIATE_50: 3, WELCOME: 220, "OCT-TOURNEY-10": 30, "SEP-MISSION-5": 60 },
+    shortage: { pool: "AFFILIATE_10", month: monthChoices()[1], waiting: 14 },
+    queue: buildQueue(),
+    campaigns: [
+      { id: "c1", name: "October Lucky Draw", kind: "Registration", status: "live" },
+      { id: "c2", name: "Arena Weekly Cup", kind: "Tournament", status: "scheduled" },
+      { id: "c3", name: "Feedback Mission", kind: "Mission", status: "paused" },
+      { id: "c4", name: "Weekend Surprise", kind: "Voucher", status: "live" },
+    ],
+    results: [
+      { id: "r1", campaign: "Arena Weekly Cup", winners: 10, pool: "OCT-TOURNEY-10", need: 10 },
+      { id: "r2", campaign: "Spin Cup (week 41)", winners: 25, pool: "OCT-TOURNEY-10", need: 25 },
+    ],
+    people: buildPeople(),
+    xp: { 7001234501: 5120, 7001234502: 1240, 7001234503: 310, 7001234504: 860, 7001234505: 90 },
+    lastUpload: null,
+  };
+}
+function buildQueue() {
+  const M = monthChoices();
+  // [name, uid, tier, qualified this month, flagged]; the first three match the full affiliate pages below
+  const base = [["mei_lin", 7001234501, "T3", 56, false], ["arif_k", 7001234502, "T2", 27, true], ["nur_aisyah", 7001234504, "T1", 12, false],
+    ["jason_ho", 7001234510, "T3", 52, false], ["devi_r", 7001234511, "T1", 14, false], ["kai_wen", 7001234512, "T2", 30, false], ["farah_s", 7001234513, "T2", 26, true],
+    ["ming_yu", 7001234514, "T1", 11, false], ["hana_b", 7001234515, "T3", 55, false], ["raj_p", 7001234516, "T1", 13, false], ["lily_t", 7001234517, "T1", 10, false], ["omar_z", 7001234518, "T2", 29, false]];
+  const rows = base.map((b, i) => ({ id: "L" + (100 + i), user: b[0], uid: b[1], tier: b[2], status: "PENDING_REVIEW", month: M[1], qualifiedMonth: b[3], risk: b[4] ? ["voucher hunter segment", "linked accounts"] : [] }));
+  for (let i = 0; i < 14; i++) rows.push({ id: "M" + (200 + i), user: "player_" + (31 + i), uid: 7001234600 + i, tier: "T1", status: "PENDING_MANUAL", month: M[1], qualifiedMonth: 12 + i, risk: [] });
+  rows.push({ id: "O300", user: "bao_chen", uid: 7001234700, tier: "T3", status: "OUT_OF_STOCK", month: M[0], qualifiedMonth: 51, risk: [] });
+  rows.push({ id: "O301", user: "ana_ruiz", uid: 7001234701, tier: "T3", status: "OUT_OF_STOCK", month: M[0], qualifiedMonth: 53, risk: [] });
+  return rows;
+}
+function buildPeople() {
+  const M0 = monthChoices()[1], M1 = monthChoices()[0];
+  const inv = (arr) => arr.map((a, i) => ({ name: a[0], joined: a[1], status: a[2], checkin: a[3], welcome: a[4], reason: a[5] || "" }));
+  return [
+    { id: 7001234501, user: "mei_lin", name: "Mei Lin", segment: "High value", effective: "High value", risk: [], voucherHunterReasons: [], joins: 140, recQualified: 112, evTotal: 112, evMonth: 56, evWeek: 9,
+      ledgers: [{ id: "LX1", month: M0, tier: "T3", status: "PENDING_REVIEW", expected: ["$10", "$50"], issued: [], note: "" }, { id: "LX0", month: M1, tier: "T2", status: "ISSUED", expected: ["$10"], issued: ["AF10-****-71K2"], note: "" }],
+      invitees: inv([["farah_s", "3 Oct", "Qualified", true, true], ["kai_wen", "2 Oct", "Qualified", true, true], ["jun_hao", "2 Oct", "Pending", false, true], ["lee_ann", "30 Sep", "Revoked", false, false, "left the channel within 48 h"], ["tomas_w", "29 Sep", "Qualified", true, true]]) },
+    { id: 7001234502, user: "arif_k", name: "Arif K.", segment: "Voucher hunter", effective: "Voucher hunter", risk: ["Segment: voucher hunter", "Linked to multiple accounts"], voucherHunterReasons: ["claims within seconds of release", "3 accounts share one device"], joins: 40, recQualified: 31, evTotal: 24, evMonth: 27, evWeek: 4,
+      ledgers: [{ id: "LX2", month: M0, tier: "T2", status: "PENDING_REVIEW", expected: ["$10"], issued: [], note: "Flagged: risk signals present" }],
+      invitees: inv([["aiman_d", "4 Oct", "Qualified", true, true], ["ben_k", "4 Oct", "Qualified", true, true], ["cho_li", "3 Oct", "Pending", false, false], ["dan_t", "1 Oct", "Revoked", false, false, "invite used by a linked account"]]) },
+    { id: 7001234503, user: "sam_tan", name: "Sam Tan", segment: "Normal", effective: "Normal", risk: [], voucherHunterReasons: [], joins: 12, recQualified: 7, evTotal: 7, evMonth: 6, evWeek: 2,
+      ledgers: [], invitees: inv([["x1_user", "5 Oct", "Qualified", true, true], ["x2_user", "5 Oct", "Pending", false, true]]) },
+    { id: 7001234504, user: "nur_aisyah", name: "Nur Aisyah", segment: "Active community", effective: "Active community", risk: [], voucherHunterReasons: [], joins: 33, recQualified: 24, evTotal: 24, evMonth: 12, evWeek: 3,
+      ledgers: [{ id: "LX4", month: M0, tier: "T1", status: "PENDING_REVIEW", expected: ["$10"], issued: [], note: "" }], invitees: inv([["y1_user", "6 Oct", "Qualified", true, true]]) },
+    { id: 7001234505, user: "jun_wei", name: "Jun Wei", segment: "Ghost", effective: "Ghost", risk: [], voucherHunterReasons: [], joins: 0, recQualified: 0, evTotal: 0, evMonth: 0, evWeek: 0, ledgers: [], invitees: [] },
+  ];
+}
+
+/* ---------- confirmation component (T2 / T3) ---------- */
+const ERR = {
+  network: "The connection dropped, so we can't tell whether this was saved. It may or may not have gone through. Check the list this belongs to before you try again. Your entries are still here.",
+  unauthorized: "Your session expired. Sign in again. Your entries are kept.",
+  not_pending_review: "A colleague already handled this reward. Nothing was changed.",
+  insufficient_stock: "Not enough vouchers for this. Nothing was changed.",
+  cooldown: "You can adjust XP again in 42 seconds.",
+  unknown: "Something went wrong and we can't confirm the result. Check the list this belongs to before you try again. Support code: E-4821.",
+};
+function modal(o) {
+  // o: {title, body (html), tier: 2|3, phrase, primary, danger, run: async()=>result, needReason:[...]}
+  return new Promise(resolve => {
+    const root = $("#modal-root");
+    const m = el(`<div class="modal-bg"><div class="modal" role="dialog" aria-modal="true" aria-labelledby="mt">
+      <h2 id="mt">${esc(o.title)}</h2><div class="mbody">${o.body || ""}</div>
+      ${o.reasons ? `<div class="field" style="margin-top:12px"><label for="m-reason">Reason (required)</label><select id="m-reason"><option value="">Choose a reason…</option>${o.reasons.map(r => `<option>${esc(r)}</option>`).join("")}</select></div>` : ""}
+      ${o.tier === 3 ? `<div class="field" style="margin-top:12px"><label for="m-phrase">Type <b class="mono">${esc(o.phrase)}</b> to confirm</label><input id="m-phrase" type="text" autocomplete="off"></div>` : ""}
+      <div class="notice bad" id="m-err" hidden></div>
+      <div class="actions"><button class="btn" id="m-cancel">${esc(o.cancel || "Cancel")}</button><button class="btn ${o.danger ? "danger" : "primary"}" id="m-ok" disabled>${esc(o.primary)}</button></div></div></div>`);
+    root.appendChild(m);
+    const ok = $("#m-ok", m), phrase = $("#m-phrase", m), reason = $("#m-reason", m), errBox = $("#m-err", m);
+    let busy = false;
+    const valid = () => (!phrase || phrase.value.trim() === o.phrase) && (!reason || reason.value);
+    const sync = () => { ok.disabled = busy || !valid(); };
+    [phrase, reason].forEach(x => x && x.addEventListener("input", sync));
+    sync();
+    const close = v => { m.remove(); document.removeEventListener("keydown", esc2); resolve(v); };
+    const esc2 = e => { if (e.key === "Escape" && !busy) close(null); };
+    document.addEventListener("keydown", esc2);
+    $("#m-cancel", m).onclick = () => { if (!busy) close(null); };
+    ok.onclick = async () => {
+      busy = true; sync(); errBox.hidden = true; const label = ok.textContent; ok.textContent = "Working…";
+      try { const res = o.run ? await o.run(reason ? reason.value : null) : null; close({ res, reason: reason ? reason.value : null }); }
+      catch (e) { busy = false; ok.textContent = label; sync(); errBox.hidden = false;
+        errBox.innerHTML = `<div>${esc(ERR[e.code] || ERR.unknown)}</div>`; if (e.code === "unauthorized") errBox.innerHTML += `<div><button class="btn small" id="m-sign">Sign in again</button></div>`;
+        const sb = $("#m-sign", m); if (sb) sb.onclick = () => { S.demo.sess = false; $("#d-sess").checked = false; errBox.innerHTML = "<div>Signed back in. Press the button again.</div>"; };
+      }
+    };
+    (phrase || reason || ok).focus();
+  });
+}
+function toast(msg, undo) {
+  const t = el(`<div class="toast"><span>${esc(msg)}</span>${undo ? `<button>Undo</button>` : ""}</div>`);
+  $("#toasts").appendChild(t);
+  const kill = setTimeout(() => t.remove(), undo ? 8000 : 4000);
+  if (undo) $("button", t).onclick = () => { clearTimeout(kill); t.remove(); undo(); };
+}
+async function server(fn) { // simulated server round trip with the demo failure switches
+  await delay(450);
+  if (S.demo.sess) { const e = new Error("u"); e.code = "unauthorized"; throw e; }
+  if (S.demo.fail) { S.demo.fail = false; $("#d-fail").checked = false; const e = new Error("n"); e.code = "network"; throw e; }
+  return fn();
+}
+
+/* ---------- navigation ---------- */
+const ICONS = {
+  home: '<path d="M3 11 12 3l9 8M5 10v10h14V10"/>', camp: '<path d="M4 5h16v10H8l-4 4z"/>', vouch: '<path d="M3 8h18v3a2 2 0 0 0 0 4v3H3v-3a2 2 0 0 0 0-4zM9 8v10" stroke-dasharray="2 2"/>',
+  aff: '<circle cx="8" cy="9" r="3"/><circle cx="17" cy="10" r="2.5"/><path d="M2 20c0-3 3-5 6-5s6 2 6 5M14 20c0-2 2-4 4-4s4 1 4 3"/>', play: '<circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-7 8-7s8 3 8 7"/>',
+  cont: '<path d="M4 4h16v12H9l-5 4z"/><path d="M8 9h8M8 12h5"/>', rep: '<path d="M4 20V10M10 20V4M16 20v-8M22 20H2"/>', set: '<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/>',
+};
+const NAV = [
+  { key: "home", label: "Home", icon: "home" },
+  { key: "campaigns", label: "Campaigns", icon: "camp", subs: [["all", "All campaigns"], ["create", "Create campaign"], ["results", "Results & rewards"]], stub: ["Sign-ups & links (from Registrations, Deep Links)", "Partners (from Providers, Verification)", "Saved audiences (from “Legacy Targeting”)", "Insights (from Performance, Intelligence, Activity Log)", "Win-back messages (from Reactivation)"] },
+  { key: "vouchers", label: "Vouchers", icon: "vouch", subs: [["upload", "Upload codes"], ["drops", "Drops"], ["create", "Create drop"], ["stock", "Stock & pools"]], stub: ["Code usage (from Voucher Codes)", "Batches history (from Affiliate Voucher Batches)"] },
+  { key: "affiliates", label: "Affiliates", icon: "aff", subs: [["find", "Find an affiliate"], ["review", "Review rewards"], ["stock", "Voucher stock"]], stub: ["Check qualification rules (from Qualification Preview)", "Leaderboard display (from Campaign Display)"] },
+  { key: "players", label: "Players", icon: "play", subs: [["find", "Find a player"], ["xp", "Add or remove XP"]], stub: ["Join requests", "Player groups (Segments)", "Suspicious accounts (the six “VH:” tabs)", "Referrals (Referral Performance)", "New-player journey (Welcome Journey, Funnel)"] },
+  { key: "content", label: "Content & Community", icon: "cont", subs: [], stub: ["Write a post · Calendar · All posts · Poll results", "Media library · Destinations", "Share messages & creators (Referral Share Content, Creator Access, Share Engagement)", "Home-screen banners · Lucky games"] },
+  { key: "reports", label: "Reports", icon: "rep", subs: [], stub: ["Business summary (Overview cards)", "Return on rewards (Segment ROI)", "Player cohorts", "Data checks (Validation, KPI gap report)", "Retention & exports (retention KPIs, CSV, past leaderboards: today only in the legacy Mini App panel)"] },
+  { key: "tools", label: "Settings & Tools", icon: "set", subs: [], stub: ["Settings (grouped by task, default vs current shown)", "Data imports (Upload Player Performance, UIM import, Raw Explorer)", "Engine runs (Backend Segment Engine)", "System health · Admin activity", "Maintenance (collapsed, typed confirmation): issue current month, rebuild affiliate leaderboard snapshot, rebuild weekly history, reconcile drop deletions, bonus voucher, legacy pool upload/replace"] },
+];
+function go(view, sub, ctx) { S.view = view; S.sub = sub || (NAV.find(n => n.key === view).subs?.[0]?.[0]) || "main"; S.ctx = ctx || {}; render(); $("#main").focus({ preventScroll: true }); window.scrollTo(0, 0); }
+function renderNav() {
+  $("#nav").innerHTML = NAV.map(n => `<button data-nav="${n.key}" ${S.view === n.key ? 'aria-current="page"' : ""}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[n.icon]}</svg>${esc(n.label)}</button>`).join("");
+  $$("#nav button").forEach(b => b.onclick = () => go(b.dataset.nav));
+}
+function renderQuick() {
+  const q = $("#quick"); $$("button", q).forEach(b => b.remove());
+  [["Create campaign", () => go("campaigns", "create")], ["Upload voucher codes", () => go("vouchers", "upload")], ["Create voucher drop", () => go("vouchers", "create")],
+   ["Review rewards", () => go("affiliates", "review")], ["Add or remove XP", () => go("players", "xp")]].forEach(([l, f]) => { const b = el(`<button class="btn small">${esc(l)}</button>`); b.onclick = f; q.appendChild(b); });
+}
+function subnav(view) {
+  const n = NAV.find(x => x.key === view); if (!n.subs || !n.subs.length) return "";
+  return `<div class="subnav" role="tablist">${n.subs.map(([k, l]) => `<button class="chip" role="tab" data-sub="${k}" aria-pressed="${S.sub === k}">${esc(l)}</button>`).join("")}</div>`;
+}
+function render() {
+  renderNav();
+  const main = $("#main"); main.innerHTML = "";
+  const n = NAV.find(x => x.key === S.view);
+  const v = VIEWS[S.view + ":" + S.sub];
+  const wrap = el(`<div></div>`);
+  const sn = subnav(S.view); if (sn) { const s = el(sn); wrap.appendChild(s); $$("[data-sub]", s).forEach(b => b.onclick = () => go(S.view, b.dataset.sub)); }
+  if (v) wrap.appendChild(v()); else wrap.appendChild(stubView(n));
+  main.appendChild(wrap);
+}
+function stubView(n) {
+  return el(`<div><div class="page-head"><div><h1>${esc(n.label)}</h1><p>Not prototyped. These sections are where today's tabs land (full map in <span class="mono">04-navigation-and-design-system.md</span>).</p></div></div>
+    <div class="stub"><ul>${(n.stub || []).map(s => `<li>${esc(s)}</li>`).join("")}</ul></div></div>`);
+}
+
+/* ---------- shared widgets ---------- */
+function dateField(label, st, key, opts = {}) {
+  // st[key] is a Date or null. Presets write the same "YYYY-MM-DD HH:MM:SS" Malaysia string the API expects.
+  const f = el(`<div class="field"><span class="lbl">${esc(label)}</span><div class="chips"></div><div class="help"></div><div class="err" hidden></div></div>`);
+  const chips = $(".chips", f), help = $(".help", f);
+  const P = presets();
+  const options = [];
+  if (opts.none) options.push(["none", opts.none, null]);
+  if (!opts.noNow) options.push(["now", "Now", P.now]);
+  options.push(["tonight", "Tonight 8 pm", P.tonight], ["tomorrow", "Tomorrow 9 am", P.tomorrow], ["pick", "Pick…", undefined]);
+  let sel = st[key + "Mode"] || (st[key] ? "pick" : opts.none ? "none" : "now");
+  function draw() {
+    chips.innerHTML = options.map(([k, l]) => `<button type="button" class="chip" data-k="${k}" aria-pressed="${sel === k}">${esc(l)}</button>`).join("") +
+      (sel === "pick" ? `<input type="datetime-local" id="dt-${key}" aria-label="${esc(label)} date and time" value="${st[key] ? inputVal(st[key]) : ""}">` : "");
+    help.textContent = st[key] ? fmtKL(st[key]) : (opts.none && sel === "none" ? (opts.noneHelp || "") : "Choose a time");
+    $$(".chip", chips).forEach(b => b.onclick = () => { sel = b.dataset.k; st[key + "Mode"] = sel; const o = options.find(x => x[0] === sel); if (sel !== "pick") st[key] = o[2]; else if (!st[key]) st[key] = null; draw(); opts.onChange && opts.onChange(); });
+    const inp = $("input", chips); if (inp) inp.onchange = () => { const v = inp.value; st[key] = v ? klWall(+v.slice(0, 4), +v.slice(5, 7) - 1, +v.slice(8, 10), +v.slice(11, 13), +v.slice(14, 16)) : null; draw(); opts.onChange && opts.onChange(); };
+  }
+  function inputVal(d) { const p = klParts(d); return `${p.y}-${pad(p.m + 1)}-${pad(p.d)}T${pad(p.h)}:${pad(p.mi)}`; }
+  st[key + "Mode"] = sel; if (sel !== "pick" && sel !== "none") { const o = options.find(x => x[0] === sel); if (o && st[key] == null) st[key] = o[2]; }
+  draw();
+  f.setError = m => { const e = $(".err", f); e.hidden = !m; e.textContent = m || ""; f.classList.toggle("bad", !!m); };
+  return f;
+}
+function codeBox(st, key, getParser, opts = {}) {
+  const wrap = el(`<div class="field"><label for="cb-${key}">${esc(opts.label || "Voucher codes")}</label>
+    <textarea id="cb-${key}" spellcheck="false" placeholder="${esc(opts.placeholder || "Paste one code per line")}"></textarea>
+    <div class="help" id="cb-rule-${key}"></div><div class="parse" id="cb-parse-${key}"></div>
+    <div class="row"><label class="btn small ghost" for="cb-file-${key}">Choose a CSV or TXT file</label><input class="sr" type="file" id="cb-file-${key}" accept=".csv,.txt"><button class="btn small ghost" type="button" id="cb-sample-${key}">Fill with sample codes</button></div></div>`);
+  const ta = $("textarea", wrap);
+  ta.value = st[key] || "";
+  const upd = () => {
+    st[key] = ta.value; const P = getParser(); const r = P.parse(ta.value);
+    $(`#cb-rule-${key}`, wrap).textContent = "How this destination reads your codes: " + r.rule;
+    const dup = (opts.checkExisting && S.demo.check) ? r.usable.filter(c => EXISTING_CODES.has(c)) : [];
+    const box = $(`#cb-parse-${key}`, wrap);
+    if (!ta.value.trim()) { box.innerHTML = ""; } else {
+      let h = `<div class="row" style="margin-top:6px"><span class="pill ok">${fmt(r.usable.length - (P.skipsExisting ? dup.length : 0))} will be added</span>`;
+      if (r.repeated.length) h += `<span class="pill waiting">${r.repeated.length} repeated in your list, merged</span>`;
+      if (r.invalid.length) h += `<span class="pill bad">${r.invalid.length} not valid</span>`;
+      if (dup.length) h += `<span class="pill ${P.skipsExisting ? "waiting" : "bad"}">${dup.length} already in the system</span>`;
+      h += "</div>";
+      if (r.invalid.length) h += `<div class="notice bad"><div>Rejected (contain spaces): <span class="mono">${r.invalid.slice(0, 5).map(esc).join(", ")}${r.invalid.length > 5 ? " …" : ""}</span></div></div>`;
+      if (dup.length) h += `<div class="notice ${P.skipsExisting ? "warn" : "bad"}"><div>${P.skipsExisting ? "These codes already exist and will be skipped" : "These codes are already used in another drop. Remove them to continue"}: <span class="mono">${dup.slice(0, 5).map(esc).join(", ")}${dup.length > 5 ? " …" : ""}</span></div></div>`;
+      else if (opts.checkExisting && !S.demo.check) h += `<div class="notice info"><div>Codes already in the system can't be checked yet. You'll see how many were skipped after the upload.</div></div>`;
+      box.innerHTML = h;
+    }
+    opts.onChange && opts.onChange(r, dup);
+  };
+  ta.oninput = upd;
+  $("input[type=file]", wrap).onchange = e => { const f = e.target.files[0]; if (!f) return; const rd = new FileReader(); rd.onload = () => { ta.value = String(rd.result || ""); upd(); }; rd.readAsText(f); };
+  $(`#cb-sample-${key}`, wrap).onclick = () => { ta.value = (opts.sample || ["WKND-0001", "WKND-0002", "WKND-0003", "WKND-0007", "WKND-0003", "WKND 0009"]).join("\n"); upd(); };
+  wrap.refresh = upd; setTimeout(upd, 0);
+  return wrap;
+}
+function statusPill(s) {
+  const map = { live: ["live", "● Live"], scheduled: ["scheduled", "Scheduled"], paused: ["paused", "Paused"], ended: ["", "Ended"], draft: ["", "Draft"],
+    PENDING_REVIEW: ["waiting", "Needs your review"], PENDING_MANUAL: ["waiting", "Waiting for vouchers"], OUT_OF_STOCK: ["bad", "Ran out of vouchers"], SIMULATED_PENDING: ["", "Simulated (no reward paid)"], ISSUED: ["ok", "Issued"], REJECTED: ["bad", "Rejected"] };
+  const [c, t] = map[s] || ["", s]; return `<span class="pill ${c}">${esc(t)}</span>`;
+}
+function stockBar(left, total) { const pct = Math.max(0, Math.min(100, total ? left / total * 100 : 0)); return `<div class="bar ${left < 10 ? "low" : ""}" title="${left} of ${total}"><i style="width:${pct}%"></i></div>`; }
+const poolName = p => ({ AFFILIATE_5: "Affiliate $5", AFFILIATE_10: "Affiliate $10", AFFILIATE_50: "Affiliate $50", WELCOME: "Welcome voucher" }[p] || p);
+
+/* ---------- HOME ---------- */
+function attention() {
+  const out = [];
+  const review = S.queue.filter(q => q.status === "PENDING_REVIEW").length;
+  const waiting = S.queue.filter(q => q.status === "PENDING_MANUAL").length;
+  if (review) out.push({ sev: "amber", n: review, t: "rewards need your review", s: "Affiliate rewards waiting for approval", a: "Review rewards", f: () => go("affiliates", "review") });
+  if (waiting) out.push({ sev: "red", n: waiting, t: `rewards waiting for ${poolName(S.shortage.pool).replace("Affiliate ", "")} vouchers`, s: `${monthLabel(S.shortage.month)}. Upload codes, then release them`, a: "Upload codes and release them", f: () => go("vouchers", "upload", { dest: S.shortage.pool, month: S.shortage.month }) });
+  const res = S.results.length; if (res) out.push({ sev: "amber", n: res, t: "tournament results to approve", s: "Approving gives winners their vouchers", a: "Open results", f: () => go("campaigns", "results") });
+  Object.entries(S.stock).filter(([p, n]) => n < 10 && p !== "OCT-TOURNEY-10").forEach(([p, n]) => out.push({ sev: "red", n, t: `${poolName(p)} codes left`, s: "Players may start seeing “out of stock”", a: "Upload codes", f: () => go("vouchers", "upload", { dest: p }) }));
+  S.drops.filter(d => d.status === "live" && d.left < 10).forEach(d => out.push({ sev: "red", n: d.left, t: `codes left in “${d.name}”`, s: "Drop is live and nearly empty", a: "Add codes", f: () => go("vouchers", "upload", { dest: "drop", dropId: d.id }) }));
+  return out;
+}
+const VIEWS = {};
+VIEWS["home:main"] = function () {
+  const w = el(`<div><div class="page-head"><div><h1>Home</h1><p>What needs you today, what is live for players right now, and the next sensible action.</p></div></div>
+    <h3 style="margin-bottom:8px">Needs your attention</h3><div class="grid" id="att"></div>
+    <div class="card" style="margin-top:20px"><div class="page-head" style="margin-bottom:8px"><div><h2>Live now &amp; coming up</h2><p class="muted">Players can see or claim anything marked Live.</p></div></div><div id="live"></div></div></div>`);
+  const att = attention(), g = $("#att", w);
+  if (!att.length) g.innerHTML = `<div class="notice ok" style="grid-column:1/-1">Nothing needs attention right now.</div>`;
+  att.forEach(a => { const t = el(`<button class="tile sev-${a.sev}"><div class="num">${fmt(a.n)}</div><div class="txt"><b>${esc(a.t)}</b><span>${esc(a.s)}</span><div class="go">${esc(a.a)} →</div></div></button>`); t.onclick = a.f; g.appendChild(t); });
+  $("#live", w).appendChild(dropsTable(true));
+  return w;
+};
+
+/* ---------- DROPS: table + manage menu with tiered confirmations ---------- */
+function dropsTable(compact) {
+  const rows = S.drops.filter(d => d.status !== "ended");
+  const w = el(`<div class="tablewrap"><table><thead><tr><th>Drop</th><th>Status</th><th>When (Malaysia time)</th><th>Codes left</th><th></th></tr></thead><tbody></tbody></table></div>`);
+  const tb = $("tbody", w);
+  rows.forEach(d => {
+    const claimed = d.total - d.left;
+    const tr = el(`<tr><td><b>${esc(d.name)}</b><div class="muted">${d.type === "personalised" ? "One code per named player" : "Open pool"}</div></td><td>${statusPill(d.status)}</td>
+      <td class="muted">${esc(fmtKL(d.starts).replace(" (Malaysia time)", ""))} → ${esc(fmtKL(d.ends).replace(" (Malaysia time)", ""))}</td>
+      <td style="min-width:150px"><b>${fmt(d.left)}</b> <span class="muted">of ${fmt(d.total)} · ${fmt(claimed)} claimed</span>${stockBar(d.left, d.total)}</td><td></td></tr>`);
+    const cell = tr.lastElementChild; const menu = el(`<div class="menu"><button class="btn small" aria-haspopup="menu">Manage ▾</button></div>`);
+    const items = dropMenu(d);
+    menu.firstElementChild.onclick = e => { e.stopPropagation(); const open = $(".menu-pop", menu); $$(".menu-pop").forEach(p => p.remove()); if (open) return;
+      const pop = el(`<div class="menu-pop" role="menu">${items.map((i, ix) => `<button role="menuitem" data-i="${ix}" class="${i.danger ? "dng" : ""}">${esc(i.label)}</button>`).join("")}</div>`);
+      $$("button", pop).forEach(b => b.onclick = () => { pop.remove(); items[+b.dataset.i].run(); }); menu.appendChild(pop); };
+    if (d.type === "pooled" && d.status !== "ended") { const ac = el(`<button class="btn small" style="margin-right:6px">Add codes</button>`); ac.onclick = () => go("vouchers", "upload", { dest: "drop", dropId: d.id }); cell.appendChild(ac); }
+    cell.appendChild(menu); tb.appendChild(tr);
+  });
+  if (!rows.length) tb.innerHTML = `<tr><td colspan="5" class="muted">No drops yet. Create one to get started.</td></tr>`;
+  return w;
+}
+document.addEventListener("click", () => $$(".menu-pop").forEach(p => p.remove()));
+function dropMenu(d) {
+  const add = { label: "Add codes", run: () => go("vouchers", "upload", { dest: "drop", dropId: d.id }) };
+  const dates = { label: "Edit name or dates", run: () => editDates(d) };
+  const startNow = { label: d.status === "paused" ? "Resume (starts now)" : "Start now", run: () => startDrop(d) };
+  const pause = { label: "Pause", run: () => pauseDrop(d) };
+  const end = { label: "End now", danger: true, run: () => endDrop(d) };
+  const del = { label: "Delete…", danger: true, run: () => deleteDrop(d) };
+  if (d.status === "scheduled") return [startNow, add, dates, del];
+  if (d.status === "live") return [pause, end, add, dates];
+  if (d.status === "paused") return [startNow, end, add, dates, del];
+  return [del];
+}
+function startDrop(d) {
+  const newEnd = new Date(Date.now() + 24 * 3600e3);
+  modal({ title: `${d.status === "paused" ? "Resume" : "Start"} “${d.name}” now?`, tier: 2, primary: "Start now",
+    body: `<p>Players can claim immediately.</p><div class="notice warn"><div><b>The end time is reset to 24 hours from now</b> (${esc(fmtKL(newEnd))}). It is currently ${esc(fmtKL(d.ends))}. Use “Edit name or dates” afterwards if you need a different end.</div></div>`,
+    run: () => server(() => { d.status = "live"; d.starts = new Date(); d.ends = newEnd; }) }).then(r => { if (r) { toast(`“${d.name}” is live. It ends ${fmtKL(d.ends)}.`); render(); } });
+}
+function pauseDrop(d) { // T2, not an Undo toast: the live API has no plain "resume". Resuming uses Start, which resets the dates.
+  modal({ title: `Pause “${d.name}”?`, tier: 2, primary: "Pause drop",
+    body: `<p>Players can't claim from this drop while it is paused.</p><div class="notice warn"><div><b>Resuming later uses Start, which sets a new 24-hour window</b> from the moment you press it. The current end time (${esc(fmtKL(d.ends))}) is not kept.</div></div>`,
+    run: () => server(() => { d.status = "paused"; }) }).then(r => { if (r) { toast(`Paused “${d.name}”.`); render(); } });
+}
+function endDrop(d) {
+  const claimed = d.total - d.left;
+  modal({ title: `End “${d.name}” now?`, tier: claimed ? 3 : 2, phrase: "END", danger: true, primary: "End drop now",
+    body: `<p>${fmt(claimed)} of ${fmt(d.total)} codes have been claimed. Players can't claim after this and it can't be restarted with the same end time.</p>`,
+    run: () => server(() => { d.status = "ended"; d.ends = new Date(); }) }).then(r => { if (r) { toast(`Ended “${d.name}”.`); render(); } });
+}
+function deleteDrop(d) {
+  const claimed = d.total - d.left;
+  if (claimed || d.type === "personalised") {
+    modal({ title: "This drop can't be deleted", tier: 2, primary: "OK", cancel: "Close", body: `<div class="notice warn"><div>${claimed ? `${fmt(claimed)} codes are already claimed.` : "It contains codes assigned to named players."} Drops with claimed or assigned codes are protected. End it instead.</div></div>` });
+    return;
+  }
+  modal({ title: `Delete “${d.name}”?`, tier: 3, phrase: "DELETE", danger: true, primary: "Delete drop", body: `<p>Removes the drop and its ${fmt(d.total)} unclaimed codes. This can't be undone.</p>`,
+    run: () => server(() => { S.drops = S.drops.filter(x => x !== d); }) }).then(r => { if (r) { toast("Drop deleted."); render(); } });
+}
+function editDates(d) {
+  const st = { name: d.name, starts: d.starts, ends: d.ends, startsMode: "pick", endsMode: "pick" };
+  const body = el(`<div></div>`);
+  body.appendChild(el(`<div class="field"><label for="ed-name">Name</label><input type="text" id="ed-name" value="${esc(d.name)}"></div>`));
+  body.appendChild(dateField("Starts", st, "starts", { noNow: false })); body.appendChild(dateField("Ends", st, "ends", { noNow: true }));
+  modal({ title: "Edit name or dates", tier: 2, primary: "Save changes", body: body.innerHTML }).then(() => {});
+  // modal body is static HTML; mount the live controls into it
+  const mb = $(".modal .mbody"); mb.innerHTML = ""; mb.appendChild(body);
+  const ok = $("#m-ok"); ok.disabled = false; ok.onclick = async () => {
+    const nm = $("#ed-name", body).value.trim(); const eb = $("#m-err");
+    if (!nm) { eb.hidden = false; eb.textContent = "A drop needs a name."; return; }
+    if (!st.starts || !st.ends) { eb.hidden = false; eb.textContent = "Pick both a start and an end."; return; }
+    if (st.ends <= st.starts) { eb.hidden = false; eb.textContent = "The end must be after the start."; return; }
+    ok.disabled = true; ok.textContent = "Working…";
+    try { await server(() => { d.name = nm; d.starts = st.starts; d.ends = st.ends; }); $("#m-cancel").click(); toast("Saved."); render(); }
+    catch (e) { ok.disabled = false; ok.textContent = "Save changes"; eb.hidden = false; eb.textContent = ERR[e.code] || ERR.unknown; }
+  };
+}
+VIEWS["vouchers:drops"] = function () {
+  const w = el(`<div><div class="page-head"><div><h1>Drops</h1><p>Everything players can claim now or soon. The Manage menu only offers what makes sense for each state.</p></div><button class="btn primary" id="nd">Create voucher drop</button></div><div class="card"></div></div>`);
+  $("#nd", w).onclick = () => go("vouchers", "create"); $(".card", w).appendChild(dropsTable()); return w;
+};
+VIEWS["vouchers:stock"] = function () {
+  const w = el(`<div><div class="page-head"><div><h1>Stock &amp; pools</h1><p>Codes players can claim right now, per destination. Low stock is highlighted.</p></div><button class="btn primary" id="up">Upload codes</button></div><div class="card"><div class="tablewrap"><table><thead><tr><th>Destination</th><th class="num">Claimable now</th><th>Level</th><th></th></tr></thead><tbody></tbody></table></div></div></div>`);
+  $("#up", w).onclick = () => go("vouchers", "upload");
+  const tb = $("tbody", w);
+  Object.entries(S.stock).forEach(([p, n]) => { const tr = el(`<tr><td><b>${esc(poolName(p))}</b></td><td class="num">${fmt(n)}</td><td style="min-width:160px">${stockBar(n, Math.max(n, 100))}</td><td>${n < 10 ? '<span class="pill bad">Low</span> ' : ""}<button class="btn small">Upload codes</button></td></tr>`); $("button", tr).onclick = () => go("vouchers", "upload", { dest: p }); tb.appendChild(tr); });
+  return w;
+};
+
+/* ---------- UPLOAD VOUCHER CODES (one front door) ---------- */
+const DESTS = [
+  ["drop", "A live or upcoming drop"], ["AFFILIATE_5", "Affiliate $5"], ["AFFILIATE_10", "Affiliate $10"], ["AFFILIATE_50", "Affiliate $50"], ["WELCOME", "Welcome voucher"], ["OCT-TOURNEY-10", "Campaign reward pool"],
+];
+VIEWS["vouchers:upload"] = function () {
+  const ctx = S.ctx || {};
+  const U = { dest: ctx.dest || null, dropId: ctx.dropId || "", audience: "public", month: ctx.month || null, text: "", welcomeStart: null, welcomeEnd: null, r: null, dup: [] };
+  const w = el(`<div><div class="page-head"><div><h1>Upload voucher codes</h1><p>One place for every kind of code. The preview reads your codes with the same rules the server uses for the destination you choose.</p></div></div>
+    <div class="split"><div class="card" id="up-form"></div><div class="card" id="up-side"><h3>Summary</h3><div id="up-sum" style="margin-top:8px"></div></div></div></div>`);
+  const form = $("#up-form", w), sum = $("#up-sum", w);
+  let boxEl = null;
+  function parserFor() {
+    if (U.dest === "drop") return { parse: parseDrop, skipsExisting: false };
+    if (U.dest && U.dest.startsWith("AFFILIATE") || U.dest === "WELCOME") return { parse: parseBatch, skipsExisting: true };
+    return { parse: parseTrim, skipsExisting: true };
+  }
+  function renderForm() {
+    form.innerHTML = `<div class="field"><span class="lbl">Where do these codes go?</span><div class="chips" id="dchips">${DESTS.map(([k, l]) => `<button class="chip" data-d="${k}" aria-pressed="${U.dest === k}">${esc(l)}<span class="muted"> · ${k === "drop" ? S.drops.filter(d => d.type === "pooled" && d.status !== "ended").length + " open" : fmt(S.stock[k] ?? 0) + " left"}</span></button>`).join("")}</div></div><div id="ctxf"></div><div id="boxhost"></div>`;
+    $$("#dchips .chip", form).forEach(b => b.onclick = () => { U.dest = b.dataset.d; U.month = null; renderForm(); });
+    const c = $("#ctxf", form);
+    if (!U.dest) { c.innerHTML = `<div class="notice info"><div>Choose a destination to continue.</div></div>`; return; }
+    if (U.dest === "drop") {
+      const open = S.drops.filter(d => d.type === "pooled" && d.status !== "ended");
+      c.appendChild(el(`<div class="field"><label for="u-drop">Which drop?</label><select id="u-drop"><option value="">Choose a drop…</option>${open.map(d => `<option value="${d.id}" ${U.dropId === d.id ? "selected" : ""}>${esc(d.name)} (${esc(d.status)})</option>`).join("")}</select><div class="err" id="u-drop-err" hidden></div></div>`));
+      c.appendChild(el(`<div class="field"><span class="lbl">Who can claim these codes?</span><div class="chips"><button class="chip" data-a="public" aria-pressed="${U.audience === "public"}">Everyone</button><button class="chip" data-a="my" aria-pressed="${U.audience === "my"}">Malaysia reserve</button></div></div>`));
+      $("#u-drop", c).onchange = e => { U.dropId = e.target.value; refresh(); };
+      $$("[data-a]", c).forEach(b => b.onclick = () => { U.audience = b.dataset.a; $$("[data-a]", c).forEach(x => x.setAttribute("aria-pressed", x === b)); refresh(); });
+    } else if (U.dest.startsWith("AFFILIATE")) {
+      const opts = monthChoices();
+      c.appendChild(el(`<div class="field"><span class="lbl">Reward month</span><div class="chips" id="mchips">${opts.map(m => `<button class="chip" data-m="${m}" aria-pressed="${U.month === m}">${esc(monthLabel(m))}</button>`).join("")}</div>
+        <div class="help">The month the affiliates earned the reward. Choose carefully: codes uploaded for the wrong month can't be claimed.</div><div class="err" id="u-month-err" hidden></div></div>`));
+      $$("#mchips .chip", c).forEach(b => b.onclick = () => { U.month = b.dataset.m; $$("#mchips .chip", c).forEach(x => x.setAttribute("aria-pressed", x === b)); refresh(); });
+    } else if (U.dest === "WELCOME") {
+      c.appendChild(dateField("Available from", U, "welcomeStart", { onChange: refresh })); c.appendChild(dateField("Available until", U, "welcomeEnd", { noNow: true, onChange: refresh }));
+    }
+    if (U.dest) {
+      boxEl = codeBox(U, "text", parserFor, { checkExisting: true, onChange: (r, dup) => { U.r = r; U.dup = dup; refresh(); },
+        sample: U.dest.startsWith("AFFILIATE") ? ["AFF10-0001", "AFF10-0002", "AFF10-0101", "AFF10-0102", "AFF10-0103", "AFF10-0103", "AFF 10 0104", "AFF10-0105", "AFF10-0106", "AFF10-0107", "AFF10-0108"] : undefined });
+      $("#boxhost", form).appendChild(boxEl);
+      $("#boxhost", form).appendChild(el(`<div class="row"><button class="btn primary" id="u-go" disabled>Upload</button><span class="muted" id="u-why"></span></div>`));
+      $("#u-go", form).onclick = go2;
+    }
+    refresh();
+  }
+  function blockers() {
+    const b = []; if (!U.dest) return ["Choose where the codes go."];
+    if (U.dest === "drop" && !U.dropId) b.push("Choose a drop.");
+    if (U.dest.startsWith("AFFILIATE") && !U.month) b.push("Choose the reward month.");
+    if (U.dest === "WELCOME" && (!U.welcomeStart || !U.welcomeEnd)) b.push("Choose when the codes are available.");
+    if (U.dest === "WELCOME" && U.welcomeStart && U.welcomeEnd && U.welcomeEnd <= U.welcomeStart) b.push("The end must be after the start.");
+    const usable = U.r ? U.r.usable.length : 0;
+    if (!usable) b.push("Paste at least one code.");
+    if (U.dest === "drop" && U.dup.length) b.push(`Remove the ${U.dup.length} code(s) already used in another drop.`);
+    return b;
+  }
+  function counts() { const P = parserFor(); const u = U.r ? U.r.usable.length : 0; const skip = P.skipsExisting && S.demo.check ? U.dup.length : 0; return { add: u - skip, skip, rep: U.r ? U.r.repeated.length : 0, inv: U.r ? U.r.invalid.length : 0 }; }
+  function target() {
+    if (U.dest === "drop") { const d = S.drops.find(x => x.id === U.dropId); return d ? `“${d.name}” (${U.audience === "public" ? "everyone" : "Malaysia reserve"})` : "—"; }
+    if (U.dest.startsWith("AFFILIATE")) return U.month ? `${poolName(U.dest)}, ${monthLabel(U.month)}` : poolName(U.dest);
+    return poolName(U.dest);
+  }
+  function refresh() {
+    if (!U.dest) { sum.innerHTML = `<p class="muted">Nothing selected yet.</p>`; return; }
+    const c = counts(), bl = blockers();
+    sum.innerHTML = `<dl class="kv"><dt>Destination</dt><dd>${esc(target())}</dd><dt>Will be added</dt><dd><b>${fmt(Math.max(0, c.add))}</b></dd>
+      ${c.rep ? `<dt>Repeats merged</dt><dd>${c.rep}</dd>` : ""}${c.skip ? `<dt>Skipped (exist)</dt><dd>${c.skip}</dd>` : ""}${c.inv ? `<dt>Not valid</dt><dd>${c.inv}</dd>` : ""}</dl>
+      ${U.dest.startsWith("AFFILIATE") ? `<div class="notice info"><div>Uploading does not release rewards. Rewards waiting for vouchers are released in a separate step afterwards.</div></div>` : ""}
+      ${bl.length ? `<div class="notice warn"><div>Before you can upload:<ul>${bl.map(x => `<li>${esc(x)}</li>`).join("")}</ul></div></div>` : `<div class="notice ok"><div>Ready to upload.</div></div>`}`;
+    const go = $("#u-go", form); if (go) { const n = Math.max(0, c.add); go.disabled = bl.length > 0; go.textContent = n ? `Upload ${fmt(n)} ${plural(n, "code")}` : "Upload"; $("#u-why", form).textContent = ""; }
+  }
+  function go2() {
+    const c = counts(); const n = c.add;
+    const skipLine = [c.rep ? `${c.rep} repeated ${plural(c.rep, "code")} merged` : "", c.inv ? `${c.inv} invalid skipped` : "", c.skip ? `${c.skip} already in the system skipped` : ""].filter(Boolean).join(", ");
+    const body = `<p>Upload <b>${fmt(n)}</b> ${plural(n, "code")} to <b>${esc(target())}</b>?</p>${skipLine ? `<p class="muted">${esc(skipLine)}.</p>` : ""}${U.dest.startsWith("AFFILIATE") ? `<p class="muted">This does not release any waiting rewards.</p>` : ""}${U.dest === "drop" ? `<p class="muted">These codes become claimable as soon as the drop is live.</p>` : ""}`;
+    modal({ title: "Upload these codes?", tier: 2, primary: `Upload ${fmt(n)} ${plural(n, "code")}`, body,
+      run: () => server(() => {
+        if (U.dest === "drop") { const d = S.drops.find(x => x.id === U.dropId); d.total += n; d.left += n; }
+        else { S.stock[U.dest] = (S.stock[U.dest] || 0) + n; }
+        return n;
+      }) }).then(r => { if (!r) return; showResult(r.res, c); });
+  }
+  function showResult(n, c) {
+    S.lastUpload = { dest: U.dest, month: U.month, n };
+    form.innerHTML = `<div class="notice ok"><div><b>${fmt(n)} ${plural(n, "code")} uploaded</b> to ${esc(target())}.</div></div>
+      <dl class="kv"><dt>Added</dt><dd>${fmt(n)}</dd>${c.rep ? `<dt>Repeats merged</dt><dd>${c.rep}</dd>` : ""}${c.skip ? `<dt>Skipped</dt><dd>${c.skip} already existed</dd>` : ""}${c.inv ? `<dt>Not valid</dt><dd>${c.inv}</dd>` : ""}
+      <dt>Stock now</dt><dd>${U.dest === "drop" ? fmt(S.drops.find(x => x.id === U.dropId).left) + " codes left in this drop" : fmt(S.stock[U.dest]) + " claimable"}</dd></dl>
+      <div class="row" style="margin-top:12px" id="next"></div>`;
+    const nx = $("#next", form);
+    if (U.dest === S.shortage.pool && U.month === S.shortage.month && S.queue.some(q => q.status === "PENDING_MANUAL")) {
+      const b = el(`<button class="btn primary">Release the ${S.queue.filter(q => q.status === "PENDING_MANUAL").length} waiting rewards</button>`); b.onclick = () => releaseWaiting(); nx.appendChild(b);
+    }
+    const again = el(`<button class="btn">Upload more codes</button>`); again.onclick = () => go("vouchers", "upload"); nx.appendChild(again);
+    const home = el(`<button class="btn ghost">Back to Home</button>`); home.onclick = () => go("home"); nx.appendChild(home);
+    sum.innerHTML = `<p class="muted">Done. Nothing else to do unless a next step is shown.</p>`;
+  }
+  renderForm(); return w;
+};
+function releaseWaiting() {
+  const wait = S.queue.filter(q => q.status === "PENDING_MANUAL"); const can = Math.min(wait.length, S.stock[S.shortage.pool] || 0);
+  modal({ title: `Release ${wait.length} waiting rewards?`, tier: 2, primary: `Release up to ${wait.length}`,
+    body: `<p>${wait.length} affiliates are waiting for ${esc(poolName(S.shortage.pool))} vouchers for ${esc(monthLabel(S.shortage.month))}. Current stock covers <b>${can}</b>.</p><div class="notice info"><div>Only rewards that can be completed in full are issued. The rest stay waiting, untouched.</div></div>`,
+    run: () => server(() => { let n = 0; for (const q of wait) { if (S.stock[S.shortage.pool] > 0) { S.stock[S.shortage.pool]--; q.status = "ISSUED"; n++; } } return n; }) })
+    .then(r => { if (!r) return; const left = S.queue.filter(q => q.status === "PENDING_MANUAL").length; toast(`Released ${r.res}. ${left ? left + " still waiting for more codes." : "All waiting rewards were released."}`); S.queue = S.queue.filter(q => q.status !== "ISSUED" || q.id[0] !== "M"); render(); });
+}
+
+/* ---------- CREATE VOUCHER DROP (3 stages) ---------- */
+VIEWS["vouchers:create"] = function () {
+  const D = { stage: 1, name: "", who: "public", tier: "", ids: "", usernames: "", regions: [], heroTitle: "", heroSubtitle: "", heroImage: "", priority: 100, codes: "", pool: "public", starts: presets().now, startsMode: "now", ends: null, endsMode: "none", r: null, dup: [], pairs: "" };
+  const w = el(`<div><div class="page-head"><div><h1>Create voucher drop</h1><p>A drop is a batch of codes players can claim during a time window. You review everything before it is created.</p></div></div><div class="stages" id="stg"></div><div id="body"></div></div>`);
+  const body = $("#body", w);
+  const stg = () => $("#stg", w).innerHTML = ["Details", "Review"].map((l, i) => `<span class="${D.stage === i + 1 ? "on" : D.stage > i + 1 ? "done" : ""}">Step ${i + 1} of 2 · ${l}</span>`).join("");
+  function stage1() {
+    stg(); body.innerHTML = ""; const c = el(`<div class="card"></div>`); body.appendChild(c);
+    c.appendChild(el(`<div class="field" id="f-name"><label for="dn">Drop name</label><input type="text" id="dn" value="${esc(D.name)}" placeholder="e.g. Weekend Surprise"><div class="help">Players see this name. It is also the default headline.</div><div class="err" hidden></div></div>`));
+    const who = [["public", "Everyone"], ["new_joiner", "New joiners (welcome)"], ["tier", "A VIP tier"], ["user_id", "Specific player IDs"], ["admin_only", "Admins only (test)"], ["personalised", "Specific usernames, one code each"]];
+    c.appendChild(el(`<div class="field"><span class="lbl">Who can claim?</span><div class="chips" id="who">${who.map(([k, l]) => `<button class="chip" data-w="${k}" aria-pressed="${D.who === k}">${esc(l)}</button>`).join("")}</div><div id="whoext"></div></div>`));
+    const ext = () => { const e = $("#whoext", c); e.innerHTML = D.who === "tier" ? `<div class="field" style="margin-top:8px"><label for="dt">VIP tier(s)</label><input type="text" id="dt" value="${esc(D.tier)}" placeholder="VIP1, VIP2"><div class="help">Separate with commas.</div><div class="err" id="e-tier" hidden></div></div>`
+        : D.who === "user_id" ? `<div class="field" style="margin-top:8px"><label for="di">Player IDs</label><textarea id="di" style="min-height:70px">${esc(D.ids)}</textarea><div class="help">Numbers only, separated by commas or new lines.</div><div class="err" id="e-ids" hidden></div></div>`
+        : D.who === "new_joiner" ? `<div class="notice info"><div>Welcome drops are always an open pool. This is set for you.</div></div>`
+        : D.who === "admin_only" ? `<div class="notice info"><div>Only admins can see and claim this drop. Use it to test a real claim.</div></div>` : "";
+      const t = $("#dt", e); if (t) t.oninput = () => D.tier = t.value; const i = $("#di", e); if (i) i.oninput = () => D.ids = i.value; };
+    ext();
+    const codesHost = el(`<div id="codeshost"></div>`); c.appendChild(codesHost);
+    const drawCodes = () => { codesHost.innerHTML = "";
+      if (D.who === "personalised") {
+        codesHost.appendChild(el(`<div class="field"><label for="dpairs">Usernames and codes</label><textarea id="dpairs" placeholder="@mei_lin, CODE-0001">${esc(D.pairs)}</textarea><div class="help">One <span class="mono">@username, code</span> per line. Each player gets their own code.</div><div class="err" id="e-pairs" hidden></div></div>`));
+        $("#dpairs", codesHost).oninput = e => D.pairs = e.target.value;
+      } else {
+        codesHost.appendChild(el(`<div class="field"><span class="lbl">Which pool are these codes for?</span><div class="chips"><button class="chip" data-p="public" aria-pressed="${D.pool === "public"}">Everyone</button><button class="chip" data-p="my" aria-pressed="${D.pool === "my"}">Malaysia reserve</button></div></div>`));
+        $$("[data-p]", codesHost).forEach(b => b.onclick = () => { D.pool = b.dataset.p; $$("[data-p]", codesHost).forEach(x => x.setAttribute("aria-pressed", x === b)); });
+        codesHost.appendChild(codeBox(D, "codes", () => ({ parse: parseDrop, skipsExisting: false }), { checkExisting: true, onChange: (r, dup) => { D.r = r; D.dup = dup; } }));
+      } };
+    drawCodes();
+    $$("#who .chip", c).forEach(b => b.onclick = () => { const was = D.who; D.who = b.dataset.w; $$("#who .chip", c).forEach(x => x.setAttribute("aria-pressed", x === b)); ext(); if ((was === "personalised") !== (D.who === "personalised")) drawCodes(); });
+    const sf = dateField("When does it start?", D, "starts"); c.appendChild(sf);
+    const ef = dateField("When does it end?", D, "ends", { none: "24 hours after start", noNow: true, noneHelp: "Ends 24 hours after it starts (the standard setting)." }); c.appendChild(ef);
+    c.appendChild(el(`<details><summary>More options (regions, headline, order)</summary><div class="field"><span class="lbl">Only show in these regions</span><div class="chips" id="reg">${["Malaysia", "Thailand", "Indonesia", "Other"].map(r => `<button class="chip" data-r="${r}" aria-pressed="${D.regions.includes(r)}">${r}</button>`).join("")}</div><div class="help">Leave empty to show in every region.</div></div>
+      <div class="field"><label for="dh">Headline (optional)</label><input type="text" id="dh" value="${esc(D.heroTitle)}"></div><div class="field"><label for="dp">Display order</label><input type="number" id="dp" value="${D.priority}"><div class="help">Higher numbers show first. Default 100.</div></div></details>`));
+    $$("#reg .chip", c).forEach(b => b.onclick = () => { const r = b.dataset.r; D.regions = D.regions.includes(r) ? D.regions.filter(x => x !== r) : D.regions.concat(r); b.setAttribute("aria-pressed", D.regions.includes(r)); });
+    $("#dh", c).oninput = e => D.heroTitle = e.target.value; $("#dp", c).oninput = e => D.priority = parseInt(e.target.value, 10) || 100;
+    c.appendChild(el(`<div class="row"><button class="btn primary" id="n1">Next: review</button></div>`));
+    $("#dn", c).oninput = e => { D.name = e.target.value; $("#f-name .err", c).hidden = true; $("#f-name", c).classList.remove("bad"); };
+    $("#n1", c).onclick = () => {
+      let ok = true;
+      if (!D.name.trim()) { const f = $("#f-name", c); f.classList.add("bad"); $(".err", f).hidden = false; $(".err", f).textContent = "Give the drop a name."; ok = false; }
+      if (D.who === "tier" && !D.tier.trim()) { const e = $("#e-tier", c); e.hidden = false; e.textContent = "Enter at least one tier, for example VIP1."; ok = false; }
+      if (D.who === "user_id" && !D.ids.split(/[\n,]/).map(x => x.trim()).filter(Boolean).some(x => /^\d+$/.test(x))) { const e = $("#e-ids", c); e.hidden = false; e.textContent = "Enter at least one numeric player ID."; ok = false; }
+      if (D.who === "personalised") { const lines = D.pairs.split(/\r?\n/).map(x => x.trim()).filter(Boolean); if (!lines.length || lines.some(l => l.split(/[,\t]/).map(s => s.trim()).filter(Boolean).length < 2)) { const e = $("#e-pairs", c); e.hidden = false; e.textContent = "Each line needs a username and a code, separated by a comma."; ok = false; } }
+      else if (!D.r || !D.r.usable.length) { ok = false; toast("Paste at least one code first."); $("#cb-codes", c).focus(); }
+      else if (D.dup.length) { ok = false; toast(`Remove the ${D.dup.length} code(s) already used in another drop.`); }
+      if (!D.starts) { sf.setError("Choose when it starts."); ok = false; } else sf.setError(null);
+      if (D.endsMode === "pick" && !D.ends) { ef.setError("Pick an end time or choose “24 hours after start”."); ok = false; }
+      else if (D.ends && D.ends <= D.starts) { ef.setError("The end must be after the start."); ok = false; } else ef.setError(null);
+      if (ok) { D.stage = 2; stage3(); }
+    };
+  }
+  function buildPreview() {
+    const errors = [], warnings = []; const now = new Date();
+    const personalised = D.who === "personalised";
+    const ends = D.ends || new Date(D.starts.getTime() + 24 * 3600e3);
+    const count = personalised ? D.pairs.split(/\r?\n/).filter(l => l.trim()).length : D.r.usable.length;
+    if (D.starts < new Date(now.getTime() - 60e3) && D.startsMode !== "now") warnings.push("The start time is already in the past, so the drop goes live immediately.");
+    if (!D.regions.length) warnings.push("No region restriction: every region can see this drop.");
+    if (D.who === "public") warnings.push("Open to everyone: any eligible player can claim.");
+    if (count < 5) warnings.push(`Very small inventory (${count} ${plural(count, "code")}).`);
+    if (ends - now > 0 && ends - now < 3600e3) warnings.push("The drop ends in under an hour.");
+    const live = D.starts <= new Date(now.getTime() + 60e3);
+    const payload = { type: personalised ? "personalised" : "pooled", name: D.name.trim(), startsAtLocal: klString(D.starts), priority: D.priority };
+    if (D.ends) payload.endsAtLocal = klString(D.ends);
+    if (D.who === "new_joiner") { payload.type = "pooled"; payload.eligibility = { mode: "new_joiner" }; payload.audience = { type: "new_joiner" }; payload.campaign_type = "welcome_voucher"; }
+    if (D.who === "tier") payload.eligibility = { mode: "tier", allow: D.tier.split(/[\n,]/).map(s => s.trim()).filter(Boolean) };
+    if (D.who === "user_id") payload.eligibility = { mode: "user_id", allow: D.ids.split(/[\n,]/).map(Number).filter(Number.isFinite) };
+    if (D.who === "admin_only") payload.eligibility = { mode: "admin_only" };
+    if (D.regions.length) payload.audience = Object.assign(payload.audience || {}, { regions: D.regions });
+    if (D.heroTitle.trim()) payload.hero_title = D.heroTitle.trim();
+    if (personalised) payload.assignments = D.pairs.split(/\r?\n/).filter(l => l.trim()).map(l => { const p = l.split(/[,\t]/).map(s => s.trim()); return { username: p[0], code: p[1] }; });
+    else { payload.codes = D.r.usable; payload.pool = D.pool; }
+    return { errors, warnings, live, ends, count, payload };
+  }
+  function stage3() {
+    stg(); body.innerHTML = ""; const P = buildPreview();
+    const whoLabel = { public: "Everyone", new_joiner: "New joiners", tier: "VIP tier: " + D.tier, user_id: "Specific player IDs", admin_only: "Admins only (test)", personalised: "Named players, one code each" }[D.who];
+    const c = el(`<div class="card"><h2>Review</h2><p class="muted">Nothing exists until you press the button below.</p>
+      <dl class="kv" style="margin-top:12px"><dt>Name</dt><dd><b>${esc(D.name)}</b></dd><dt>Who can claim</dt><dd>${esc(whoLabel)}${D.who === "personalised" ? "" : `, ${D.pool === "public" ? "everyone's pool" : "Malaysia reserve"}`}</dd>
+      <dt>Regions</dt><dd>${D.regions.length ? esc(D.regions.join(", ")) : "All regions"}</dd><dt>Codes</dt><dd><b>${fmt(P.count)}</b></dd>
+      <dt>Starts</dt><dd>${esc(fmtKL(D.starts))} ${P.live ? '<span class="pill live">● Live immediately</span>' : '<span class="pill scheduled">Scheduled</span>'}</dd><dt>Ends</dt><dd>${esc(fmtKL(P.ends))}${D.ends ? "" : ' <span class="muted">(24 hours after start)</span>'}</dd></dl>
+      ${P.warnings.length ? `<div class="notice warn"><div><b>Check these</b><ul>${P.warnings.map(x => `<li>${esc(x)}</li>`).join("")}</ul></div></div>` : ""}
+      <div id="cerr"></div>
+      <details><summary>Show the request that will be sent</summary><pre class="req mono">${esc(JSON.stringify(P.payload, null, 2).slice(0, 1400))}${JSON.stringify(P.payload).length > 1400 ? "\n…" : ""}</pre></details>
+      <div class="row" style="margin-top:14px"><button class="btn" id="b3">Back</button><button class="btn primary" id="create">${P.live ? "Create drop and go live" : "Create drop (starts " + esc(fmtKL(D.starts).replace(" (Malaysia time)", "")) + ")"}</button></div></div>`);
+    body.appendChild(c);
+    $("#b3", c).onclick = () => { D.stage = 1; stage1(); };
+    const btn = $("#create", c); let busy = false;
+    btn.onclick = async () => {
+      if (busy) return; busy = true; btn.disabled = true; const label = btn.textContent; btn.textContent = "Creating…"; $("#cerr", c).innerHTML = "";
+      try {
+        await server(() => { S.drops.unshift({ id: "n" + Date.now(), name: D.name.trim(), status: P.live ? "live" : "scheduled", type: P.payload.type, total: P.count, left: P.count, starts: D.starts, ends: P.ends }); });
+        body.innerHTML = `<div class="card"><div class="notice ok"><div><b>“${esc(D.name)}” was created</b> with ${fmt(P.count)} ${plural(P.count, "code")}. ${P.live ? "It is live now." : "It goes live " + esc(fmtKL(D.starts)) + "."}</div></div>
+          <div class="row" style="margin-top:12px"><button class="btn primary" id="vd">View drops</button><button class="btn" id="ac">Add more codes</button><button class="btn ghost" id="nw">Create another</button></div></div>`;
+        $("#vd", body).onclick = () => go("vouchers", "drops"); $("#ac", body).onclick = () => go("vouchers", "upload", { dest: "drop", dropId: S.drops[0].id }); $("#nw", body).onclick = () => go("vouchers", "create");
+      } catch (e) {
+        busy = false; btn.disabled = false; btn.textContent = label;
+        const unsure = e.code === "network" || !ERR[e.code];
+        $("#cerr", c).innerHTML = `<div class="notice bad"><div>${esc(ERR[e.code] || ERR.unknown)}${unsure ? `<br><b>Before you press the button again:</b> open Drops and look for “${esc(D.name)}”. If it is there, don't create it twice.` : ""}</div></div>`;
+      }
+    };
+  }
+  stage1(); return w;
+};
+
+/* ---------- AFFILIATES: 360 ---------- */
+function lookup(q) {
+  q = String(q || "").trim(); if (!q) return null; const u = q.replace(/^@/, "").toLowerCase();
+  return S.people.find(p => String(p.id) === q || p.user.toLowerCase() === u) || null;
+}
+function affiliate360(p) {
+  const rate = p.joins ? Math.round(p.recQualified / p.joins * 100) : 0, rateEv = p.joins ? Math.round(p.evTotal / p.joins * 100) : 0;
+  const diverge = p.recQualified !== p.evTotal;
+  const thr = [["T1", 10], ["T2", 25], ["T3", 50], ["T4", 150], ["T5", 250]]; let elig = null; thr.forEach(([t, n]) => { if (p.evMonth >= n) elig = t; });
+  const w = el(`<div><div class="page-head"><div><h1>${esc(p.name)} <span class="muted mono">@${esc(p.user)} · ${p.id}</span></h1>
+    <div class="chips" style="margin-top:8px">${p.risk.length ? p.risk.map(r => `<span class="pill bad">⚠ ${esc(r)}</span>`).join("") : '<span class="pill ok">No risk signals</span>'}<span class="pill">Segment: ${esc(p.effective)}</span></div></div>
+    <div class="row"><button class="btn" id="xp">Add or remove XP</button></div></div>
+    ${p.voucherHunterReasons.length ? `<div class="notice warn"><div><b>Why flagged:</b> ${p.voucherHunterReasons.map(esc).join("; ")}</div></div>` : ""}
+    <div class="grid"><div class="card"><h3>Joined</h3><div class="num" style="font-size:28px;font-weight:700">${p.joins}</div><div class="muted">people joined through their link</div></div>
+      <div class="card"><h3>Qualified</h3><div style="font-size:28px;font-weight:700">${p.recQualified}</div><div class="muted">referral records marked qualified</div></div>
+      <div class="card"><h3>Qualification rate</h3><div style="font-size:28px;font-weight:700">${rate}%</div><div class="muted">${p.recQualified} of ${p.joins} joins${diverge ? ` · ${rateEv}% by reward events` : ""}</div></div></div>
+    ${diverge ? `<div class="notice warn"><div><b>Two counts differ.</b> ${p.recQualified} referral records are marked qualified, but only ${p.evTotal} qualification events count towards rewards (revoked after qualifying, or outside the reward window). Rewards use the second number. Nothing about the rules was changed.</div></div>` : ""}
+    <div class="split" style="margin-top:16px"><div class="card"><h2>Reward eligibility</h2>
+      <dl class="kv" style="margin-top:8px"><dt>Qualified this week</dt><dd>${p.evWeek}</dd><dt>Qualified this month</dt><dd>${p.evMonth}</dd><dt>Qualified, all time</dt><dd>${p.evTotal}</dd>
+      <dt>Tier reached this month</dt><dd>${elig ? `<b>${elig}</b>` : "None yet (first tier starts at 10)"}</dd></dl>
+      ${!elig ? `<div class="notice info"><div>Below the first tier this month, so no reward is expected.</div></div>` : p.ledgers.some(l => l.month === monthChoices()[1] && l.tier === elig) ? `<div class="notice ok"><div>A reward entry exists for this month.</div></div>` : `<div class="notice warn"><div>Reached ${elig}, but the entry on file is for a lower tier.</div></div>`}</div>
+      <div class="card"><h2>Rewards</h2><div id="led" style="margin-top:8px"></div></div></div>
+    <div class="card"><h2>People they invited</h2><div class="tablewrap"><table><thead><tr><th>Player</th><th>Joined</th><th>Status</th><th>Check-in</th><th>Welcome</th></tr></thead><tbody>
+      ${p.invitees.length ? p.invitees.map(i => `<tr><td>@${esc(i.name)}</td><td>${esc(i.joined)}</td><td><span class="pill ${i.status === "Qualified" ? "ok" : i.status === "Revoked" ? "bad" : "waiting"}">${esc(i.status)}</span>${i.reason ? `<div class="muted">${esc(i.reason)}</div>` : ""}</td><td>${i.checkin ? "✓" : "–"}</td><td>${i.welcome ? "✓" : "–"}</td></tr>`).join("") : `<tr><td colspan="5" class="muted">No invitees yet.</td></tr>`}</tbody></table></div></div></div>`);
+  $("#xp", w).onclick = () => go("players", "xp", { q: "@" + p.user });
+  const led = $("#led", w);
+  if (!p.ledgers.length) led.innerHTML = `<p class="muted">No reward entries yet.</p>`;
+  p.ledgers.forEach(l => {
+    const row = el(`<div style="border-top:1px solid var(--line);padding:10px 0"><div class="row" style="justify-content:space-between"><div><b>${esc(monthLabel(l.month))} · ${esc(l.tier)}</b> ${statusPill(l.status)}</div><div class="row" id="act"></div></div>
+      <div class="muted">Expected: ${l.expected.join(" + ")}${l.issued.length ? ` · Issued: <span class="mono">${l.issued.map(esc).join(", ")}</span>` : ""}</div>${l.note ? `<div class="notice warn" style="margin:6px 0 0"><div>${esc(l.note)}</div></div>` : ""}</div>`);
+    if (l.status === "PENDING_REVIEW") {
+      const a = el(`<button class="btn small primary">Approve</button>`), r = el(`<button class="btn small">Reject</button>`);
+      a.onclick = () => approveOne(l, p, () => render()); r.onclick = () => rejectOne(l, p, () => render()); $("#act", row).append(a, r);
+    }
+    led.appendChild(row);
+  });
+  return w;
+}
+function approveOne(l, p, done) {
+  modal({ title: `Approve ${l.tier} reward for @${p.user}?`, tier: 2, primary: "Approve and issue", body: `<p>This issues <b>${l.expected.join(" + ")}</b> in voucher codes to <b>@${esc(p.user)}</b> for ${esc(monthLabel(l.month))}, immediately.</p>${p.risk.length ? `<div class="notice warn"><div>Risk signals present: ${p.risk.map(esc).join("; ")}.</div></div>` : ""}<p class="muted">Issued codes can't be taken back.</p>`,
+    run: () => server(() => { if (S.demo.other) { S.demo.other = false; $("#d-other").checked = false; const e = new Error("x"); e.code = "not_pending_review"; throw e; } l.status = "ISSUED"; l.issued = ["AF-****-" + Math.floor(Math.random() * 9000 + 1000)]; const q = S.queue.find(x => x.uid === p.id && x.status === "PENDING_REVIEW"); if (q) S.queue = S.queue.filter(x => x !== q); }) })
+    .then(r => { if (r) { toast(`Approved. Codes issued to @${p.user}.`); done(); } });
+}
+const REJECT_REASONS = ["Suspected fake referrals", "Linked to multiple accounts", "Does not meet the programme rules", "Duplicate request", "Other (explain to the team)"];
+function rejectOne(l, p, done) {
+  modal({ title: `Reject reward for @${p.user}?`, tier: 2, danger: true, primary: "Reject reward", reasons: REJECT_REASONS, body: `<p>The ${esc(l.tier)} reward for ${esc(monthLabel(l.month))} will be rejected. This can't be undone.</p>`,
+    run: () => server(() => { if (S.demo.other) { S.demo.other = false; $("#d-other").checked = false; const e = new Error("x"); e.code = "not_pending_review"; throw e; } l.status = "REJECTED"; S.queue = S.queue.filter(x => !(x.uid === p.id && x.status === "PENDING_REVIEW")); }) })
+    .then(r => { if (r) { toast(`Rejected. Reason saved: ${r.reason}.`); done(); } });
+}
+VIEWS["affiliates:find"] = function () {
+  const w = el(`<div><div class="page-head"><div><h1>Find an affiliate</h1><p>One page shows joins, qualified referrals, risk, reward eligibility and reward status. Search by exact @username or ID.</p></div></div>
+    <div class="card"><div class="field" style="margin:0"><label for="aff-q">@username or ID</label><div class="row"><input type="text" id="aff-q" placeholder="@arif_k or 7001234502" style="max-width:320px;padding:9px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel)"><button class="btn primary" id="aff-go">Open</button></div>
+    <div class="help">Try <span class="mono">@arif_k</span> (risk flags, two counts differ), <span class="mono">@mei_lin</span> (clean, ready to approve) or <span class="mono">@sam_tan</span> (below threshold).</div><div class="err" id="aff-err" hidden></div></div></div><div id="aff-out" style="margin-top:16px"></div></div>`);
+  const open = q => { const p = lookup(q); const out = $("#aff-out", w), err = $("#aff-err", w); out.innerHTML = ""; err.hidden = true;
+    if (!p) { err.hidden = false; err.textContent = "No player found for that ID or @username. Search matches the exact @username or ID."; return; }
+    out.innerHTML = '<div class="muted">Loading…</div>'; delay(300).then(() => { out.innerHTML = ""; out.appendChild(affiliate360(p)); }); };
+  $("#aff-go", w).onclick = () => open($("#aff-q", w).value); $("#aff-q", w).onkeydown = e => { if (e.key === "Enter") open(e.target.value); };
+  if (S.ctx && S.ctx.q) { $("#aff-q", w).value = S.ctx.q; setTimeout(() => open(S.ctx.q), 0); }
+  return w;
+};
+
+/* ---------- AFFILIATES: Review rewards ---------- */
+VIEWS["affiliates:review"] = function () {
+  let status = "PENDING_REVIEW"; const sel = new Set();
+  const w = el(`<div><div class="page-head"><div><h1>Review rewards</h1><p>Affiliate rewards waiting on a decision. Names, risk and the reason each one is waiting are shown here.</p></div></div><div class="subnav" id="sf"></div><div class="card" id="qc"></div></div>`);
+  const filters = [["PENDING_REVIEW", "Needs your review"], ["PENDING_MANUAL", "Waiting for vouchers"], ["OUT_OF_STOCK", "Ran out of vouchers"]];
+  function draw() {
+    $("#sf", w).innerHTML = filters.map(([k, l]) => `<button class="chip" data-f="${k}" aria-pressed="${status === k}">${esc(l)} · ${S.queue.filter(q => q.status === k).length}</button>`).join("");
+    $$("#sf .chip", w).forEach(b => b.onclick = () => { status = b.dataset.f; sel.clear(); draw(); });
+    const rows = S.queue.filter(q => q.status === status); const qc = $("#qc", w);
+    if (!rows.length) { qc.innerHTML = `<div class="notice ok"><div>Nothing here. All caught up.</div></div>`; return; }
+    const safe = rows.filter(r => !r.risk.length);
+    qc.innerHTML = `${status === "PENDING_REVIEW" ? `<div class="row" style="margin-bottom:10px"><button class="btn primary" id="appr-safe">Approve ${safe.length} without risk flags</button><button class="btn danger" id="rej-sel" ${sel.size ? "" : "disabled"}>Reject ${sel.size || ""} selected</button><span class="muted">${rows.length - safe.length} flagged ${plural(rows.length - safe.length, "reward")} stay here for individual review.</span></div>` : ""}
+      ${status === "PENDING_MANUAL" ? `<div class="notice warn"><div>${rows.length} rewards are waiting for ${esc(poolName(S.shortage.pool))} vouchers. <button class="btn small" id="fix">Fix the shortage</button></div></div>` : ""}
+      <div class="tablewrap"><table><thead><tr>${status === "PENDING_REVIEW" ? '<th><input type="checkbox" id="selall" aria-label="Select all" ${sel.size === rows.length ? "checked" : ""}></th>' : ""}<th>Affiliate</th><th>Month · tier</th><th class="num">Qualified this month</th><th>Why it's here</th><th></th></tr></thead><tbody></tbody></table></div>`;
+    const sa = $("#selall", qc); if (sa) sa.onchange = () => { if (sa.checked) rows.forEach(r => sel.add(r.id)); else sel.clear(); draw(); };
+    const tb = $("tbody", qc);
+    rows.forEach(q => {
+      const why = q.status === "PENDING_REVIEW" ? (q.risk.length ? "Risk flags: " + q.risk.join(", ") : "Standard review") : q.status === "PENDING_MANUAL" ? "Not enough vouchers in stock" : "Stock ran out in the reward month";
+      const tr = el(`<tr>${status === "PENDING_REVIEW" ? `<td><input type="checkbox" aria-label="Select @${esc(q.user)}" ${sel.has(q.id) ? "checked" : ""}></td>` : ""}<td><b>@${esc(q.user)}</b><div class="muted mono">${q.uid}</div></td><td>${esc(monthLabel(q.month))} · ${esc(q.tier)}</td><td class="num">${q.qualifiedMonth}</td><td>${q.risk.length ? `<span class="pill bad">⚠ ${esc(why)}</span>` : esc(why)}</td><td class="row"></td></tr>`);
+      const cb = $("input", tr); if (cb) cb.onchange = () => { cb.checked ? sel.add(q.id) : sel.delete(q.id); draw(); };
+      const act = tr.lastElementChild;
+      const open = el(`<button class="btn small">Open</button>`); open.onclick = () => { const p = S.people.find(x => x.id === q.uid); if (p) go("affiliates", "find", { q: "@" + p.user }); else toast("Mock data: only a few affiliates have a full page in this prototype."); }; act.appendChild(open);
+      if (q.status === "PENDING_REVIEW") { const a = el(`<button class="btn small primary">Approve</button>`), r = el(`<button class="btn small">Reject</button>`);
+        const person = S.people.find(x => x.id === q.uid); const led = person && person.ledgers.find(l => l.status === "PENDING_REVIEW");
+          const fake = led || { tier: q.tier, month: q.month, expected: [q.tier === "T3" ? "$10 + $50" : "$10"], status: "PENDING_REVIEW" }; const pp = person || { user: q.user, id: q.uid, risk: q.risk };
+        a.onclick = () => approveOne(fake, pp, () => { S.queue = S.queue.filter(x => x !== q); draw(); }); r.onclick = () => rejectOne(fake, pp, () => { S.queue = S.queue.filter(x => x !== q); draw(); }); act.append(a, r); }
+      tb.appendChild(tr);
+    });
+    const as = $("#appr-safe", qc); if (as) as.onclick = () => {
+      if (!safe.length) { toast("Every reward here is flagged, so none can be approved in bulk."); return; }
+      modal({ title: `Approve ${safe.length} rewards?`, tier: 3, phrase: `APPROVE ${safe.length}`, primary: `Approve ${safe.length}`,
+        body: `<p>This issues vouchers to <b>${safe.length}</b> affiliates now.</p><ul><li>Will approve: ${safe.length}</li><li>Stay for individual review (risk flagged): ${rows.length - safe.length}</li></ul><p class="muted">Issued codes can't be taken back.</p>`,
+        run: () => server(() => { if (S.demo.other) { S.demo.other = false; $("#d-other").checked = false; const e = new Error("x"); e.code = "not_pending_review"; throw e; } safe.forEach(q => { q.status = "ISSUED"; }); S.queue = S.queue.filter(q => q.status !== "ISSUED" || q.id[0] === "M"); return safe.length; }) })
+        .then(r => { if (r) { toast(`Approved ${r.res}. ${rows.length - safe.length} flagged ${plural(rows.length - safe.length, "reward")} still need a decision.`); draw(); } }); };
+    const rs = $("#rej-sel", qc); if (rs) rs.onclick = () => { const ids = rows.filter(r => sel.has(r.id)); if (!ids.length) return;
+      modal({ title: `Reject ${ids.length} rewards?`, tier: 3, phrase: `REJECT ${ids.length}`, danger: true, primary: `Reject ${ids.length}`, reasons: REJECT_REASONS, body: `<p>These ${ids.length} rewards will be rejected. This can't be undone.</p><p class="muted">${ids.map(i => "@" + esc(i.user)).slice(0, 6).join(", ")}${ids.length > 6 ? " …" : ""}</p>`,
+        run: () => server(() => { S.queue = S.queue.filter(q => !sel.has(q.id)); }) }).then(r => { if (r) { toast(`Rejected ${ids.length}. Reason saved: ${r.reason}.`); sel.clear(); draw(); } }); };
+    const fx = $("#fix", qc); if (fx) fx.onclick = () => go("affiliates", "stock");
+  }
+  draw(); return w;
+};
+VIEWS["affiliates:stock"] = function () {
+  const waiting = S.queue.filter(q => q.status === "PENDING_MANUAL").length, sh = S.shortage;
+  const w = el(`<div><div class="page-head"><div><h1>Voucher stock</h1><p>Claimable codes for affiliate rewards, and what is waiting on them.</p></div></div>
+    <div class="grid">${["AFFILIATE_5", "AFFILIATE_10", "AFFILIATE_50"].map(p => `<div class="card"><h3>${esc(poolName(p))}</h3><div style="font-size:28px;font-weight:700">${fmt(S.stock[p])}</div><div class="muted">claimable now</div>${stockBar(S.stock[p], Math.max(100, S.stock[p]))}</div>`).join("")}</div>
+    <div class="card" style="margin-top:16px" id="short"></div></div>`);
+  const s = $("#short", w);
+  if (!waiting) s.innerHTML = `<div class="notice ok"><div>No rewards are waiting for vouchers.</div></div>`;
+  else { const need = Math.max(0, waiting - S.stock[sh.pool]);
+    s.innerHTML = `<h2>${waiting} rewards waiting for ${esc(poolName(sh.pool))} vouchers</h2><p class="muted">${esc(monthLabel(sh.month))}. Stock covers ${S.stock[sh.pool]}; <b>${need} more ${plural(need, "code")}</b> needed to release all of them.</p>
+      <div class="row" style="margin-top:12px"><button class="btn primary" id="up">Upload ${esc(poolName(sh.pool))} codes</button><button class="btn" id="rel">Release waiting rewards now</button></div>`;
+    $("#up", s).onclick = () => go("vouchers", "upload", { dest: sh.pool, month: sh.month }); $("#rel", s).onclick = () => releaseWaiting(); }
+  return w;
+};
+
+/* ---------- CAMPAIGNS ---------- */
+VIEWS["campaigns:all"] = function () {
+  const w = el(`<div><div class="page-head"><div><h1>All campaigns</h1><p>Tournaments, sign-ups, missions, links and voucher campaigns in one list.</p></div><button class="btn primary" id="nc">Create campaign</button></div><div class="card"><div class="tablewrap"><table><thead><tr><th>Campaign</th><th>Type</th><th>Status</th></tr></thead><tbody></tbody></table></div></div></div>`);
+  $("#nc", w).onclick = () => go("campaigns", "create");
+  S.campaigns.forEach(c => $("tbody", w).appendChild(el(`<tr><td><b>${esc(c.name)}</b></td><td>${esc(c.kind)}</td><td>${statusPill(c.status)}</td></tr>`)));
+  return w;
+};
+VIEWS["campaigns:results"] = function () {
+  const w = el(`<div><div class="page-head"><div><h1>Results &amp; rewards</h1><p>Tournament results waiting for approval. Approving gives winners their vouchers, so stock is shown first.</p></div></div><div class="card" id="rc"></div></div>`);
+  const draw = () => { const rc = $("#rc", w); if (!S.results.length) { rc.innerHTML = `<div class="notice ok"><div>No results waiting.</div></div>`; return; }
+    rc.innerHTML = `<div class="tablewrap"><table><thead><tr><th>Campaign</th><th class="num">Winners</th><th>Voucher stock</th><th></th></tr></thead><tbody></tbody></table></div>`;
+    S.results.forEach(r => { const have = S.stock[r.pool], short = have < r.need; const tr = el(`<tr><td><b>${esc(r.campaign)}</b></td><td class="num">${r.winners}</td><td>${short ? `<span class="pill bad">Need ${r.need}, have ${have}</span>` : `<span class="pill ok">Need ${r.need}, have ${have}</span>`}</td><td class="row"><button class="btn small primary">Approve</button><button class="btn small">Reject</button></td></tr>`);
+      const [a, rj] = $$("button", tr);
+      a.onclick = () => modal({ title: `Approve “${r.campaign}”?`, tier: 2, primary: `Approve and give ${r.need} vouchers`, body: `<p>Winners receive <b>${r.need}</b> codes from ${esc(r.pool)} now.</p>${short ? `<div class="notice bad"><div>Not enough vouchers: need ${r.need}, have ${have}. Upload codes first.</div></div>` : ""}`,
+        run: () => server(() => { if (short) { const e = new Error("s"); e.code = "insufficient_stock"; throw e; } S.stock[r.pool] -= r.need; S.results = S.results.filter(x => x !== r); }) }).then(x => { if (x) { toast("Approved. Winners are being issued their vouchers."); draw(); } });
+      rj.onclick = () => modal({ title: `Reject “${r.campaign}”?`, tier: 2, danger: true, primary: "Reject results", reasons: ["Results look wrong", "Duplicate submission", "Other (explain to the team)"], body: "<p>The partner will need to resubmit. This can't be undone.</p>", run: () => server(() => { S.results = S.results.filter(x => x !== r); }) }).then(x => { if (x) { toast("Rejected."); draw(); } });
+      $("tbody", rc).appendChild(tr); }); };
+  draw(); return w;
+};
+
+/* Create campaign: picker -> details -> review & publish, with a readiness checklist */
+const PROVIDERS = [["", "No partner yet"], ["arena", "Arena Partner (active)"], ["spin", "Spin Partner (inactive)"]];
+const VOUCHER_TEMPLATES = [["smart", "Recommended mix by player type", "Higher-value players get better odds. Uses today's settings."], ["public", "Open to everyone", "A plain public drop."], ["welcome", "New joiners", "The welcome voucher shortcut."], ["segment", "Chosen player types", "Only the player types you pick."],
+  ["whitelist", "Named list of players", "Only the usernames you paste."], ["fcfs", "First come first served", "A plain pooled drop."], ["surprise", "Scheduled surprise", "Appears at the start time."], ["test", "Admin-only test", "Hidden from players."]];
+VIEWS["campaigns:create"] = function () {
+  const C = { kind: null, stage: 1, name: "", starts: null, startsMode: null, ends: null, endsMode: "none", provider: "", path: "", rewards: false, regFields: ["Full name", "Phone", "Country", "Delivery address"], sub: false, channel: "", prompt: "", options: "", correct: "", pool: "SEP-MISSION-5", winners: 10, template: "smart", codes: "", release: "now", r: null, dup: [] };
+  const w = el(`<div><div class="page-head"><div><h1>Create campaign</h1><p>Pick what you want to run. You review a plain-language summary and a readiness check before anything is published.</p></div></div><div class="stages" id="stg"></div><div id="body"></div></div>`);
+  const body = $("#body", w);
+  const stageLabels = () => C.kind === "voucher" ? ["Type", "Details", "Review & launch"] : ["Type", "Details", "Review & publish"];
+  const stg = () => $("#stg", w).innerHTML = stageLabels().map((l, i) => `<span class="${C.stage === i + 1 ? "on" : C.stage > i + 1 ? "done" : ""}">Step ${i + 1} of ${stageLabels().length} · ${l}</span>`).join("");
+  function pick() {
+    C.stage = 1; stg(); body.innerHTML = `<div class="cardgrid" id="cards"></div>`;
+    [["tournament", "Tournament", "Run a competition with winners and rewards."], ["registration", "Registration / giveaway", "Collect sign-ups for a draw or giveaway."], ["mission", "Mission", "Players answer a question and win rewards."], ["link", "Link to an outside page", "Send players to a partner or subscription page."], ["voucher", "Voucher campaign", "Release vouchers to the right players."]].forEach(([k, t, d]) => {
+      const b = el(`<button class="pick"><b>${esc(t)}</b><span>${esc(d)}</span></button>`); b.onclick = () => { C.kind = k; C.stage = 2; details(); }; $("#cards", body).appendChild(b); });
+  }
+  function details() {
+    stg(); body.innerHTML = ""; const c = el(`<div class="card"></div>`); body.appendChild(c); const k = C.kind;
+    c.appendChild(el(`<div class="field" id="f-name"><label for="cn">Campaign name</label><input type="text" id="cn" value="${esc(C.name)}" placeholder="e.g. October Lucky Draw"><div class="help">Players see this name. Its internal ID is created for you.</div><div class="err" hidden></div></div>`));
+    $("#cn", c).oninput = e => { C.name = e.target.value; $("#f-name", c).classList.remove("bad"); $("#f-name .err", c).hidden = true; };
+    let sf = null, ef = null;
+    if (k !== "voucher") { sf = dateField("When does it start?", C, "starts", { noNow: false }); if (!C.startsMode) {} c.appendChild(sf); ef = dateField("When does it end?", C, "ends", { none: "No end date", noNow: true, noneHelp: "Runs until you end it." }); c.appendChild(ef); }
+    if (k === "registration") {
+      c.appendChild(el(`<div class="field"><span class="lbl">What do players fill in?</span><div class="chips" id="rf">${["Full name", "Phone", "Country", "Delivery address"].map(f => `<button class="chip" data-f="${f}" aria-pressed="${C.regFields.includes(f)}">${f}</button>`).join("")}</div><div class="err" id="e-rf" hidden></div></div>`));
+      $$("#rf .chip", c).forEach(b => b.onclick = () => { const f = b.dataset.f; C.regFields = C.regFields.includes(f) ? C.regFields.filter(x => x !== f) : C.regFields.concat(f); b.setAttribute("aria-pressed", C.regFields.includes(f)); });
+      c.appendChild(el(`<div class="field"><label><input type="checkbox" id="rs" ${C.sub ? "checked" : ""}> Players must join a Telegram channel first</label><div id="rch" ${C.sub ? "" : "hidden"}><input type="text" id="rchi" value="${esc(C.channel)}" placeholder="channel_username" style="margin-top:6px"></div><div class="err" id="e-ch" hidden></div></div>`));
+      $("#rs", c).onchange = e => { C.sub = e.target.checked; $("#rch", c).hidden = !C.sub; }; $("#rchi", c).oninput = e => C.channel = e.target.value;
+    }
+    if (k === "tournament" || k === "link") {
+      c.appendChild(el(`<div class="field"><label for="cp">Where do players go?</label><select id="cp">${PROVIDERS.map(([v, l]) => `<option value="${v}" ${C.provider === v ? "selected" : ""}>${esc(l)}</option>`).join("")}</select><div class="help">You can publish only when the partner is active.</div></div>`));
+      c.appendChild(el(`<div class="field"><label for="cpath">Page path</label><input type="text" id="cpath" value="${esc(C.path)}" placeholder="/october-cup"></div>`));
+      $("#cp", c).onchange = e => C.provider = e.target.value; $("#cpath", c).oninput = e => C.path = e.target.value;
+      if (k === "tournament") { c.appendChild(el(`<div class="field"><label><input type="checkbox" id="crw" ${C.rewards ? "checked" : ""}> Add the standard rewards for the top 3</label><div class="help">A tournament needs at least one reward rule to be published.</div></div>`)); $("#crw", c).onchange = e => C.rewards = e.target.checked; }
+    }
+    if (k === "mission") {
+      c.appendChild(el(`<div class="field" id="f-prompt"><label for="mp">Question</label><input type="text" id="mp" value="${esc(C.prompt)}" placeholder="Which feature do you prefer?"><div class="err" hidden></div></div>`));
+      c.appendChild(el(`<div class="field" id="f-opt"><label for="mo">Answer options</label><textarea id="mo" style="min-height:90px" placeholder="red | Red Team&#10;blue | Blue Team">${esc(C.options)}</textarea><div class="help">One per line. Write <span class="mono">id | label</span> when they differ.</div><div class="help" id="mparsed"></div><div class="err" hidden></div></div>`));
+      c.appendChild(el(`<div class="field"><label for="mpool">Reward pool</label><select id="mpool">${["SEP-MISSION-5", "OCT-TOURNEY-10"].map(p => `<option value="${p}" ${C.pool === p ? "selected" : ""}>${p} · ${S.stock[p]} left</option>`).join("")}</select></div>`));
+      c.appendChild(el(`<div class="field" id="f-win"><label for="mw">How many winners?</label><input type="number" id="mw" value="${C.winners}" min="1" style="max-width:140px"><div id="mgate" style="margin-top:6px"></div></div>`));
+      const gate = () => { const have = S.stock[C.pool], ok = have >= C.winners; $("#mgate", c).innerHTML = `<div class="bar ${ok ? "" : "low"}"><i style="width:${Math.min(100, have / Math.max(1, C.winners) * 100)}%"></i></div><div class="${ok ? "muted" : ""}" style="${ok ? "" : "color:var(--bad);font-weight:600"}">${ok ? `Enough codes: ${have} available for ${C.winners} winners.` : `Not enough codes: need ${C.winners}, have ${have}. Publishing is blocked until the pool covers the winners.`}</div>`; };
+      const parse = () => { const o = C.options.split(/\r?\n/).map(s => s.trim()).filter(Boolean).map(s => { const p = s.split("|").map(x => x.trim()); return { id: p[0], label: p[1] || p[0] }; }); $("#mparsed", c).textContent = o.length ? "Players will see: " + o.map(x => x.label).join(" · ") : ""; return o; };
+      $("#mp", c).oninput = e => { C.prompt = e.target.value; }; $("#mo", c).oninput = e => { C.options = e.target.value; parse(); }; $("#mpool", c).onchange = e => { C.pool = e.target.value; gate(); }; $("#mw", c).oninput = e => { C.winners = parseInt(e.target.value, 10) || 0; gate(); }; parse(); gate();
+    }
+    if (k === "voucher") { voucherDetails(c); return; }
+    const row = el(`<div class="row"><button class="btn" id="bk">Back</button><button class="btn primary" id="nx">Next: review</button></div>`); c.appendChild(row);
+    $("#bk", c).onclick = pick;
+    $("#nx", c).onclick = () => {
+      let ok = true; const bad = (id, m) => { const f = $(id, c); f.classList.add("bad"); const e = $(".err", f); e.hidden = false; e.textContent = m; ok = false; };
+      if (!C.name.trim()) bad("#f-name", "Give the campaign a name.");
+      if (!C.starts) { sf.setError("Choose when it starts."); ok = false; } else sf.setError(null);
+      if (C.endsMode === "pick" && !C.ends) { ef.setError("Pick an end time or choose “No end date”."); ok = false; } else if (C.ends && C.ends <= C.starts) { ef.setError("The end must be after the start."); ok = false; } else ef.setError(null);
+      if (k === "registration") { if (!C.regFields.length) { const e = $("#e-rf", c); e.hidden = false; e.textContent = "Choose at least one thing players fill in."; ok = false; } if (C.sub && !C.channel.trim()) { const e = $("#e-ch", c); e.hidden = false; e.textContent = "Enter the channel username."; ok = false; } }
+      if (k === "mission") { if (!C.prompt.trim()) bad("#f-prompt", "Write the question."); if (C.options.split(/\r?\n/).filter(s => s.trim()).length < 2) bad("#f-opt", "Add at least two answer options."); }
+      if (ok) { C.stage = 3; review(); }
+    };
+    $("#cn", c).focus();
+  }
+  function voucherDetails(c) {
+    c.appendChild(el(`<div class="field"><span class="lbl">What kind of voucher campaign?</span><div class="cardgrid" id="vt"></div></div>`));
+    VOUCHER_TEMPLATES.forEach(([k, t, d]) => { const b = el(`<button class="pick" aria-pressed="${C.template === k}"><b>${esc(t)}</b><span>${esc(d)}</span></button>`); b.onclick = () => { C.template = k; $$("#vt .pick", c).forEach(x => x.setAttribute("aria-pressed", x === b)); }; $("#vt", c).appendChild(b); });
+    c.appendChild(codeBox(C, "codes", () => ({ parse: parseDrop, skipsExisting: false }), { checkExisting: true, onChange: (r, dup) => { C.r = r; C.dup = dup; } }));
+    c.appendChild(el(`<div class="field"><span class="lbl">How are vouchers released?</span><div class="chips" id="rel"><button class="chip" data-r="now" aria-pressed="${C.release === "now"}">All at once</button><button class="chip" data-r="spread" aria-pressed="${C.release === "spread"}">Spread out over time</button></div></div>`));
+    $$("#rel .chip", c).forEach(b => b.onclick = () => { C.release = b.dataset.r; $$("#rel .chip", c).forEach(x => x.setAttribute("aria-pressed", x === b)); $("#sp", c).hidden = C.release !== "spread"; });
+    c.appendChild(el(`<div id="sp" ${C.release === "spread" ? "" : "hidden"}><div class="field"><label for="bs">Vouchers per release</label><input type="number" id="bs" value="${C.batch || 50}" style="max-width:140px"></div><div class="help" style="margin-bottom:14px">Released once an hour after the start time.</div></div>`));
+    $("#bs", c).oninput = e => C.batch = parseInt(e.target.value, 10) || 0;
+    const sf = dateField("When does it start?", C, "starts", {}); c.appendChild(sf);
+    c.appendChild(el(`<div class="row"><button class="btn" id="bk">Back</button><button class="btn primary" id="nx">Next: review & launch</button></div>`));
+    $("#bk", c).onclick = pick;
+    $("#nx", c).onclick = () => {
+      if (!C.name.trim()) { const f = $("#f-name", c); f.classList.add("bad"); const e = $(".err", f); e.hidden = false; e.textContent = "Give the campaign a name."; $("#cn", c).focus(); return; }
+      if (!C.r || !C.r.usable.length) { toast("Paste at least one code first."); return; }
+      if (C.dup.length) { toast(`Remove the ${C.dup.length} code(s) already used in another drop.`); return; }
+      if (!C.starts) { sf.setError("Choose when it starts."); return; }
+      C.stage = 3; voucherReview();
+    };
+  }
+  function readiness() {
+    const k = C.kind, items = [];
+    if (k === "tournament") { items.push([C.rewards, "At least one reward rule", "Tick “Add the standard rewards for the top 3”."]); }
+    if (k === "tournament" || k === "link") { items.push([!!C.provider, "A partner is chosen", "Pick a partner under “Where do players go?”."]); items.push([C.provider !== "spin", "The partner is active", "Spin Partner is inactive. Activate it under Partners or choose another."]); items.push([!!C.path.trim(), "The page path is set", "Enter the page path."]); }
+    if (k === "mission") items.push([S.stock[C.pool] >= C.winners, "The reward pool covers all winners", `Need ${C.winners}, have ${S.stock[C.pool]}. Upload codes or lower the winners.`]);
+    if (k === "registration") items.push([C.regFields.length > 0, "Registration fields are chosen", "Choose what players fill in."]);
+    items.push([!!C.name.trim(), "The campaign has a name", ""]);
+    return items;
+  }
+  function review() {
+    stg(); body.innerHTML = ""; const items = readiness(), blocked = items.filter(i => !i[0]);
+    const label = { tournament: "Tournament", registration: "Registration / giveaway", mission: "Mission", link: "Link to an outside page" }[C.kind];
+    const when = `${fmtKL(C.starts)}${C.ends ? " until " + fmtKL(C.ends) : ", no end date"}`;
+    const sentence = C.kind === "registration" ? `Players in every region will see “${C.name}” from ${fmtKL(C.starts)}. They register with: ${C.regFields.join(", ")}${C.sub ? `, after joining @${C.channel}` : ""}.`
+      : C.kind === "mission" ? `Players answer “${C.prompt}” and ${C.winners} winners get a voucher from ${C.pool}.` : `Players are sent to ${C.path || "the chosen page"} on ${(PROVIDERS.find(p => p[0] === C.provider) || [])[1] || "the partner"}.`;
+    const c = el(`<div class="card"><h2>${esc(C.name)} <span class="pill">${esc(label)}</span></h2><p style="margin:6px 0 12px">${esc(sentence)}</p><dl class="kv"><dt>When</dt><dd>${esc(when)}</dd></dl>
+      <h3 style="margin-top:16px">Readiness</h3><div id="ready" style="margin-top:6px"></div><div id="rerr"></div>
+      <div class="row" style="margin-top:14px"><button class="btn" id="bk">Back</button><button class="btn" id="draft">Save as draft</button><button class="btn primary" id="pub" ${blocked.length ? "disabled" : ""}>${C.starts <= new Date(Date.now() + 60e3) ? "Publish now" : "Publish (goes live " + esc(fmtKL(C.starts).replace(" (Malaysia time)", "")) + ")"}</button></div>${blocked.length ? `<p class="muted" style="margin-top:6px">Fix the items marked ✖ to publish. You can still save a draft.</p>` : ""}</div>`);
+    $("#ready", c).innerHTML = items.map(([ok, t, fix]) => `<div style="display:flex;gap:8px;margin:4px 0"><span class="pill ${ok ? "ok" : "bad"}" style="min-width:3.2em;justify-content:center">${ok ? "✔ OK" : "✖ Fix"}</span><span>${esc(t)}${ok ? "" : ` <span class="muted">· ${esc(fix)}</span>`}</span></div>`).join("");
+    body.appendChild(c);
+    $("#bk", c).onclick = () => { C.stage = 2; details(); };
+    const finish = async (publish) => {
+      const b = publish ? $("#pub", c) : $("#draft", c); const lbl = b.textContent; b.disabled = true; b.textContent = "Saving…"; $("#rerr", c).innerHTML = "";
+      try { await server(() => { S.campaigns.unshift({ id: "c" + Date.now(), name: C.name, kind: label, status: publish ? (C.starts <= new Date(Date.now() + 60e3) ? "live" : "scheduled") : "draft" }); });
+        body.innerHTML = `<div class="card"><div class="notice ok"><div><b>${publish ? "Published" : "Saved as a draft"}: “${esc(C.name)}”.</b> ${publish ? "Players can see it " + (C.starts <= new Date(Date.now() + 60e3) ? "now." : "from " + esc(fmtKL(C.starts)) + ".") : "Players can't see it until you publish."}</div></div><div class="row" style="margin-top:12px"><button class="btn primary" id="al">View all campaigns</button><button class="btn" id="an">Create another</button></div></div>`;
+        $("#al", body).onclick = () => go("campaigns", "all"); $("#an", body).onclick = () => go("campaigns", "create");
+      } catch (e) { b.disabled = false; b.textContent = lbl; $("#rerr", c).innerHTML = `<div class="notice bad"><div>${esc(ERR[e.code] || ERR.unknown)}</div></div>`; }
+    };
+    $("#draft", c).onclick = () => finish(false); $("#pub", c).onclick = () => finish(true);
+  }
+  function voucherReview() {
+    stg(); body.innerHTML = `<div class="card"><div class="muted">Running preview…</div></div>`;
+    delay(500).then(() => { // preview runs automatically on entering the step
+      const n = C.r.usable.length, drops = 1, batches = C.release === "spread" ? Math.max(1, Math.ceil(n / (C.batch || 50))) : 1;
+      const c = el(`<div class="card"><h2>${esc(C.name)} <span class="pill">Voucher campaign</span></h2><p class="muted">${esc((VOUCHER_TEMPLATES.find(t => t[0] === C.template) || [])[1])}</p>
+        <div class="grid" style="margin:12px 0"><div class="card"><h3>Vouchers</h3><div style="font-size:26px;font-weight:700">${fmt(n)}</div></div><div class="card"><h3>Drops created</h3><div style="font-size:26px;font-weight:700">${batches}</div></div><div class="card"><h3>Starts</h3><div>${esc(fmtKL(C.starts))}</div></div></div>
+        ${C.release === "spread" ? `<div class="notice info"><div>Released in ${batches} ${plural(batches, "batch", "batches")} of up to ${C.batch || 50}. Batch 1 at the start time, then every hour.</div></div>` : ""}
+        <div class="notice warn"><div><b>Launching creates real drops.</b> If you remove the campaign afterwards, the drops it created keep running.</div></div>
+        <div class="field" style="margin-top:12px"><label for="lc">Type <b class="mono">LAUNCH</b> to confirm</label><input type="text" id="lc" autocomplete="off" style="max-width:240px"></div><div id="lerr"></div>
+        <div class="row"><button class="btn" id="bk">Back</button><button class="btn primary" id="go" disabled>Launch campaign</button></div></div>`);
+      body.innerHTML = ""; body.appendChild(c);
+      $("#lc", c).oninput = e => { $("#go", c).disabled = e.target.value.trim() !== "LAUNCH"; }; $("#bk", c).onclick = () => { C.stage = 2; details(); };
+      $("#go", c).onclick = async () => { const b = $("#go", c); b.disabled = true; b.textContent = "Launching…";
+        try { await server(() => { S.campaigns.unshift({ id: "c" + Date.now(), name: C.name, kind: "Voucher", status: C.starts <= new Date(Date.now() + 60e3) ? "live" : "scheduled" }); S.drops.unshift({ id: "n" + Date.now(), name: C.name, status: C.starts <= new Date(Date.now() + 60e3) ? "live" : "scheduled", type: "pooled", total: n, left: n, starts: C.starts, ends: new Date(C.starts.getTime() + 86400e3) }); });
+          body.innerHTML = `<div class="card"><div class="notice ok"><div><b>Launched “${esc(C.name)}”.</b> ${drops} ${plural(drops, "drop")} created with ${fmt(n)} vouchers.</div></div><div class="row" style="margin-top:12px"><button class="btn primary" id="vd">View drops</button></div></div>`; $("#vd", body).onclick = () => go("vouchers", "drops");
+        } catch (e) { b.disabled = false; b.textContent = "Launch campaign"; $("#lerr", c).innerHTML = `<div class="notice bad"><div>${esc(ERR[e.code] || ERR.unknown)}</div></div>`; } };
+    });
+  }
+  pick(); return w;
+};
+
+/* ---------- PLAYERS ---------- */
+VIEWS["players:find"] = function () {
+  const w = el(`<div><div class="page-head"><div><h1>Find a player</h1><p>Profile, XP, referral counts, risk signals and history, in one place.</p></div></div><div class="card"><div class="field" style="margin:0"><label for="pl-q">@username or ID</label><div class="row"><input type="text" id="pl-q" style="max-width:320px;padding:9px 10px;border:1px solid var(--border,var(--line));border-radius:8px;background:var(--panel)" placeholder="@jun_wei"><button class="btn primary" id="pl-go">Open</button></div><div class="err" id="pl-err" hidden></div></div></div><div id="pl-out" style="margin-top:16px"></div></div>`);
+  const open = q => { const p = lookup(q), err = $("#pl-err", w); err.hidden = true; if (!p) { err.hidden = false; err.textContent = "No player found for that ID or @username. Search matches the exact @username or ID."; return; } go("affiliates", "find", { q: "@" + p.user }); };
+  $("#pl-go", w).onclick = () => open($("#pl-q", w).value); $("#pl-q", w).onkeydown = e => { if (e.key === "Enter") open(e.target.value); }; return w;
+};
+VIEWS["players:xp"] = function () {
+  const X = { q: (S.ctx && S.ctx.q) || "", p: null, amt: "" }; const XP_T = 1000;
+  const w = el(`<div><div class="page-head"><div><h1>Add or remove XP</h1><p>Look up the player first, then see exactly what changes before you confirm.</p></div></div><div class="card" style="max-width:640px">
+    <div class="field" id="f-q"><label for="xq">Player</label><input type="text" id="xq" value="${esc(X.q)}" placeholder="@username or ID"><div class="help" id="xhelp">Try @sam_tan</div><div class="err" hidden></div></div>
+    <div id="xcard"></div>
+    <div class="field" id="f-a"><label for="xa">XP to add (use a minus sign to remove)</label><div class="chips" id="xqk">${[-100, -50, 50, 100, 500].map(n => `<button class="chip" data-n="${n}">${n > 0 ? "+" : ""}${n}</button>`).join("")}</div><input type="number" id="xa" placeholder="e.g. 100 or -50" style="margin-top:6px"><div class="err" hidden></div></div>
+    <div id="xprev"></div><div class="row"><button class="btn primary" id="xgo" disabled>Review change</button></div></div></div>`);
+  const upd = () => { const a = parseInt($("#xa", w).value, 10); X.amt = Number.isFinite(a) ? a : 0; const prev = $("#xprev", w);
+    if (X.p && X.amt) { const cur = S.xp[X.p.id] ?? 0, nw = cur + X.amt; prev.innerHTML = `<div class="notice ${nw < 0 ? "bad" : "info"}"><div><b>@${esc(X.p.user)}</b>: ${fmt(cur)} → <b>${fmt(Math.max(0, nw))}</b> XP (${X.amt > 0 ? "+" : ""}${fmt(X.amt)})${nw < 0 ? ". They only have " + fmt(cur) + ", so XP can't go below zero." : ""}${Math.abs(X.amt) >= XP_T ? ` This is a large change, so you'll be asked to type a confirmation.` : ""}</div></div>`; } else prev.innerHTML = "";
+    $("#xgo", w).disabled = !(X.p && X.amt); };
+  const find = () => { const p = lookup($("#xq", w).value), f = $("#f-q", w); f.classList.remove("bad"); $(".err", f).hidden = true;
+    if (!$("#xq", w).value.trim()) { X.p = null; $("#xcard", w).innerHTML = ""; upd(); return; }
+    if (!p) { X.p = null; $("#xcard", w).innerHTML = ""; f.classList.add("bad"); $(".err", f).hidden = false; $(".err", f).textContent = "No player found. Search matches the exact @username or ID."; upd(); return; }
+    X.p = p; $("#xcard", w).innerHTML = `<div class="notice ok"><div><b>${esc(p.name)}</b> <span class="mono">@${esc(p.user)} · ${p.id}</span><br>Current XP: <b>${fmt(S.xp[p.id] ?? 0)}</b> · Segment: ${esc(p.effective)}</div></div>`; upd(); };
+  $("#xq", w).onchange = find; $("#xq", w).oninput = () => { clearTimeout(w._t); w._t = setTimeout(find, 300); }; $("#xa", w).oninput = upd;
+  $$("#xqk .chip", w).forEach(b => b.onclick = () => { $("#xa", w).value = b.dataset.n; upd(); });
+  $("#xgo", w).onclick = () => { const p = X.p, amt = X.amt, cur = S.xp[p.id] ?? 0, nw = Math.max(0, cur + amt), big = Math.abs(amt) >= XP_T;
+    modal({ title: `${amt > 0 ? "Add" : "Remove"} ${fmt(Math.abs(amt))} XP ${amt > 0 ? "to" : "from"} @${p.user}?`, tier: big ? 3 : 2, phrase: `XP ${amt > 0 ? "+" : "-"}${Math.abs(amt)}`, danger: amt < 0, primary: amt > 0 ? "Add XP" : "Remove XP",
+      body: `<p>${fmt(cur)} → <b>${fmt(nw)}</b> XP for <b>@${esc(p.user)}</b>. Takes effect immediately.</p><p class="muted">This request carries a unique key, so a double click can't apply it twice.</p>`,
+      run: () => server(() => { if (S.demo.cool) { const e = new Error("c"); e.code = "cooldown"; throw e; } S.xp[p.id] = nw; }) })
+      .then(r => { if (r) { toast(`Done. @${p.user} now has ${fmt(nw)} XP.`); $("#xa", w).value = ""; find(); } }); };
+  if (X.q) setTimeout(find, 0); return w;
+};
+
+/* ---------- global search + boot ---------- */
+(function () {
+  const inp = $("#gsearch"), hint = $("#ghint");
+  const hide = () => hint.hidden = true;
+  inp.oninput = () => { const q = inp.value.trim(); if (!q) { hide(); return; } hint.hidden = false; hint.innerHTML = `Press Enter to look up <b>${esc(q)}</b><div class="muted">Matches an exact @username or ID.</div>`; };
+  inp.onkeydown = e => { if (e.key === "Escape") hide(); if (e.key !== "Enter") return; const q = inp.value.trim(); if (!q) return; const p = lookup(q);
+    if (!p) { hint.hidden = false; hint.innerHTML = `<b>No player found</b> for “${esc(q)}”.<div class="muted">Search matches the exact @username or ID. Try @mei_lin or @arif_k.</div>`; return; } hide(); inp.value = ""; go("affiliates", "find", { q: "@" + p.user }); };
+  document.addEventListener("click", e => { if (!e.target.closest(".search")) hide(); });
+  $("#demo-btn").onclick = () => { const p = $("#demo-panel"); p.hidden = !p.hidden; $("#demo-btn").setAttribute("aria-expanded", String(!p.hidden)); };
+  const bind = (id, key) => $(id).onchange = e => { S.demo[key] = e.target.checked; if (key === "check" && S.view === "vouchers") render(); };
+  bind("#d-check", "check"); bind("#d-fail", "fail"); bind("#d-sess", "sess"); bind("#d-other", "other"); bind("#d-cool", "cool");
+  $("#d-reset").onclick = () => { S = freshState(); ["#d-fail", "#d-sess", "#d-other", "#d-cool"].forEach(i => $(i).checked = false); $("#d-check").checked = true; renderQuick(); render(); toast("Mock data reset."); };
+  S = freshState(); renderQuick(); render();
+})();
+</script>
