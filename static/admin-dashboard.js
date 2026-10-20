@@ -4746,6 +4746,46 @@
     return parts[0] + " " + parts[1] + ":00";
   }
 
+  // Plain-language text for a failed create-drop / add-codes request (server
+  // `code`/`reason`). `done` is the past participle for the action ("created" /
+  // "added"). Server rejections happen before anything is kept, so they can say
+  // so; a dropped connection cannot (see DROP_UNKNOWN_OUTCOME_MESSAGE).
+  var DROP_UNKNOWN_OUTCOME_MESSAGE = "The connection dropped, so we can't tell whether this was saved. Check Existing Drops before trying again.";
+  function dropWriteErrorMessage(d, done) {
+    d = d || {};
+    var code = d.code, reason = d.reason;
+    var nothing = "Nothing was " + (done || "saved") + ".";
+    if (code === "duplicate_code") {
+      var sample = (d.duplicateCodes || []).slice(0, 3).join(", ");
+      var n = d.duplicates;
+      return (n ? n + " of these codes are" : "Some of these codes are") + " already used in another voucher drop" +
+        (sample ? " (for example " + sample + ")" : "") + ". " + nothing + " Remove them and try again.";
+    }
+    var byReason = {
+      empty_codes: "No usable voucher codes were found. Paste one code per line.",
+      codes_must_be_list: "The codes were not sent as a list. Reload the page and try again.",
+      empty_assignments: "No valid username,code pairs were found.",
+      assignments_must_be_list: "The assignments were not sent as a list. Reload the page and try again.",
+      duplicate_username: "A username appears more than once in this personalised drop.",
+      bad_pool: "Choose Everyone (public) or Malaysia reserve (my) for the pool.",
+      bad_priority: "Priority must be a whole number.",
+      bad_type: "Codes can only be added to a pooled drop.",
+      creation_not_completed: "The drop could not be completed and was removed.",
+    };
+    if (reason && byReason[reason]) return byReason[reason] + " " + nothing;
+    var byCode = {
+      bad_start: "The start time is not valid.", bad_end: "The end time is not valid.",
+      end_before_start: "The end must be after the start.",
+      bad_request: "Name and start time are required.",
+      not_found: "That drop no longer exists. Refresh the list.",
+      drop_creating: "This drop is still being created. Try again in a minute.",
+      drop_deleting: "This drop is being deleted.",
+      server_error: "The server hit an error and rolled the change back.",
+    };
+    if (code && byCode[code]) return byCode[code] + " " + nothing;
+    return "Something went wrong (" + (code || "unknown") + "). " + nothing;
+  }
+
   function dropScheduleHtml(startsAt, endsAt) {
     if (!startsAt && !endsAt) return "—";
     return ccUtcToKlDisplay(startsAt) + " → " + (endsAt ? ccUtcToKlDisplay(endsAt) : "open");
@@ -4958,12 +4998,12 @@
         body: JSON.stringify(payload),
       }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
         .then(function (res) {
-          if (!res.ok || res.d.status !== "ok") throw new Error(res.d.code || "unknown");
+          if (!res.ok || res.d.status !== "ok") { var cerr = new Error(dropWriteErrorMessage(res.d, "created")); cerr.fromServer = true; throw cerr; }
           resultEl.textContent = "Created drop: " + res.d.dropId;
           toast("✅ Voucher drop created: " + res.d.dropId, "success");
           loadDrops(true);
         })
-        .catch(function (e) { resultEl.textContent = "Create failed: " + e.message; toast("❌ Failed to create drop: " + e.message, "error"); })
+        .catch(function (e) { var m = e && e.fromServer ? e.message : DROP_UNKNOWN_OUTCOME_MESSAGE; resultEl.textContent = "Create failed: " + m; toast("❌ Failed to create drop: " + m, "error"); })
         .finally(function () { createBtn.disabled = false; });
     });
 
@@ -4985,12 +5025,12 @@
         body: JSON.stringify(payload),
       }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
         .then(function (res) {
-          if (!res.ok || res.d.status !== "ok") throw new Error(res.d.code || "unknown");
+          if (!res.ok || res.d.status !== "ok") { var aerr = new Error(dropWriteErrorMessage(res.d, "added")); aerr.fromServer = true; throw aerr; }
           resultEl.textContent = "Added " + res.d.inserted + " code(s).";
           toast("✅ Added " + res.d.inserted + " code(s)", "success");
           loadDrops(true);
         })
-        .catch(function (e) { resultEl.textContent = "Add failed: " + e.message; toast("❌ Failed to add codes: " + e.message, "error"); })
+        .catch(function (e) { var m = e && e.fromServer ? e.message : DROP_UNKNOWN_OUTCOME_MESSAGE; resultEl.textContent = "Add failed: " + m; toast("❌ Failed to add codes: " + m, "error"); })
         .finally(function () { addBtn.disabled = false; });
     });
 
