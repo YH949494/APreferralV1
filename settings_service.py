@@ -267,7 +267,7 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
             "On/off switches and limits for the Databot -> APReferral segmentation pipeline (weekly snapshot, "
             "post-UIM recalculation, weekly sync into users.for_bot_segment, freshness alerts). Applied by Databot "
             "within 30 seconds; no Fly secret or redeploy. A Databot environment variable with the old name "
-            "overrides the value here -- Databot's /api/v1/runtime-settings shows the effective value and its source."
+            "overrides the value here -- Databot's Admin Utilities -> API & System Status -> Pipeline Switches (/api/admin/runtime-settings) shows the effective value and its source."
         ),
         "category": "segmentation_sync",
         "fields": {
